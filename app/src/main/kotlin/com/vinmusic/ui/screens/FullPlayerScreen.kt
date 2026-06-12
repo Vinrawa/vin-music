@@ -231,21 +231,22 @@ fun FullPlayerScreen(
                 .fillMaxWidth()
                 .fillMaxHeight(0.88f)
                 .scale(1.35f)
+                .blur(80.dp, edgeTreatment = androidx.compose.ui.draw.BlurredEdgeTreatment.Unbounded)
                 .graphicsLayer(alpha = 0.45f)
         )
 
         // ── 1.5 Fluid Glow Background ──
         AmbientFluidGlowBackground(currentPalette)
 
-        // ── 2. Static dark theme gradient background ──
+        // ── 2. Dynamic translucent gradient overlay ──
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            VinColors.GradTop,
-                            VinColors.BgColor
+                            animatedGradTop.copy(alpha = 0.6f),
+                            VinColors.BgColor.copy(alpha = 0.95f)
                         )
                     )
                 )

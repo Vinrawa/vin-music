@@ -1,0 +1,42 @@
+image: alvrme/alpine-android:latest-jdk17
+
+variables:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+
+before_script:
+  - export GRADLE_USER_HOME=$(pwd)/.gradle
+  - chmod +x ./gradlew
+
+stages:
+  - build
+  - test
+  - release
+
+build_debug:
+  stage: build
+  script:
+    - ./gradlew assembleDebug
+  artifacts:
+    paths:
+      - app/build/outputs/apk/debug/
+    expire_in: 1 week
+
+lint:
+  stage: test
+  script:
+    - ./gradlew lintDebug
+
+build_release:
+  stage: release
+  script:
+    # Setup the keystore credentials from GitLab CI/CD Variables
+    - echo "RELEASE_STORE_FILE=$RELEASE_STORE_FILE" > local.properties
+    - echo "RELEASE_STORE_PASSWORD=$RELEASE_STORE_PASSWORD" >> local.properties
+    - echo "RELEASE_KEY_ALIAS=$RELEASE_KEY_ALIAS" >> local.properties
+    - echo "RELEASE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD" >> local.properties
+    - ./gradlew assembleRelease
+  artifacts:
+    paths:
+      - app/build/outputs/apk/release/
+  only:
+    - tags

@@ -6,6 +6,7 @@ variables:
 before_script:
   - export GRADLE_USER_HOME=$(pwd)/.gradle
   - chmod +x ./gradlew
+  - cp "$GOOGLE_SERVICES_JSON" app/google-services.json
 
 stages:
   - build

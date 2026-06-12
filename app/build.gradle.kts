@@ -1,3 +1,6 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -7,6 +10,12 @@ plugins {
     alias(libs.plugins.google.services)
     alias(libs.plugins.firebase.crashlytics)
     alias(libs.plugins.sentry)
+}
+
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localProperties.load(FileInputStream(localPropertiesFile))
 }
 
 android {
@@ -22,11 +31,23 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            val storeFileProp = localProperties.getProperty("RELEASE_STORE_FILE") ?: System.getenv("RELEASE_STORE_FILE")
+            if (storeFileProp != null) {
+                storeFile = file(storeFileProp)
+                storePassword = localProperties.getProperty("RELEASE_STORE_PASSWORD") ?: System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias = localProperties.getProperty("RELEASE_KEY_ALIAS") ?: System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = localProperties.getProperty("RELEASE_KEY_PASSWORD") ?: System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isCrunchPngs = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -64,6 +85,8 @@ sentry {
 
 configurations.all {
     resolutionStrategy {
+        // Force specific protobuf version to resolve conflict between Media3 and Firebase dependencies
+        // which rely on different, incompatible protobuf-javalite versions. Can be removed once aligned.
         force("com.google.protobuf:protobuf-javalite:3.25.1")
     }
 }
@@ -109,7 +132,7 @@ dependencies {
     implementation(libs.coil.network.okhttp)
 
     // Palette (dynamic coloring)
-    implementation("androidx.palette:palette-ktx:1.0.0")
+    implementation(libs.androidx.palette.ktx)
 
     // OkHttp
     implementation(libs.okhttp)

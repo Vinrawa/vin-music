@@ -1154,17 +1154,57 @@ fun HomeScreen(
         }
     }
 
-    val homePalette = remember {
-        com.vinmusic.ui.utils.ColorExtractor.MusicPalette(
-            gradTop = Color(0x336338EC),
-            gradMid = Color(0x1F6338EC),
-            gradBottom = Color(0xFF0E0E11),
-            accent = VinColors.Accent
-        )
-    }
-
     Box(modifier = Modifier.fillMaxSize().background(VinColors.BgColor)) {
-        com.vinmusic.ui.components.AmbientFluidGlowBackground(homePalette)
+        // ✨ 1. Dynamic Animated Lava Lamp Fluid Background ✨
+        val infiniteTransition = rememberInfiniteTransition(label = "home_bg_anims")
+        val blob1X by infiniteTransition.animateFloat(
+            initialValue = -100f, targetValue = 400f,
+            animationSpec = infiniteRepeatable(tween(35000, easing = LinearEasing), RepeatMode.Reverse),
+            label = "blob1X"
+        )
+        val blob2Y by infiniteTransition.animateFloat(
+            initialValue = 800f, targetValue = -150f,
+            animationSpec = infiniteRepeatable(tween(42000, easing = LinearEasing), RepeatMode.Reverse),
+            label = "blob2Y"
+        )
+        val blob3X by infiniteTransition.animateFloat(
+            initialValue = 500f, targetValue = -200f,
+            animationSpec = infiniteRepeatable(tween(48000, easing = LinearEasing), RepeatMode.Reverse),
+            label = "blob3X"
+        )
+
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            // Blob 1: Dynamic Royal Purple aura
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(Color(0xFF6338EC).copy(alpha = 0.16f), Color.Transparent),
+                    center = Offset(blob1X.dp.toPx(), 220.dp.toPx()),
+                    radius = size.width * 0.75f
+                ),
+                radius = size.width * 0.75f,
+                center = Offset(blob1X.dp.toPx(), 220.dp.toPx())
+            )
+            // Blob 2: Vibrant Glowing Neon Pink aura
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(Color(0xFFEC4899).copy(alpha = 0.12f), Color.Transparent),
+                    center = Offset(100.dp.toPx(), blob2Y.dp.toPx()),
+                    radius = size.width * 0.65f
+                ),
+                radius = size.width * 0.65f,
+                center = Offset(100.dp.toPx(), blob2Y.dp.toPx())
+            )
+            // Blob 3: Sleek Dark Blue/Indigo aura
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(Color(0xFF1E3A8A).copy(alpha = 0.14f), Color.Transparent),
+                    center = Offset(blob3X.dp.toPx(), 620.dp.toPx()),
+                    radius = size.width * 0.70f
+                ),
+                radius = size.width * 0.70f,
+                center = Offset(blob3X.dp.toPx(), 620.dp.toPx())
+            )
+        }
         PullToRefreshBox(
             isRefreshing = isRefreshing,
             onRefresh = {

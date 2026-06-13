@@ -1154,7 +1154,17 @@ fun HomeScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    val homePalette = remember {
+        com.vinmusic.ui.utils.ColorExtractor.MusicPalette(
+            gradTop = Color(0x336338EC),
+            gradMid = Color(0x1F6338EC),
+            gradBottom = Color(0xFF0E0E11),
+            accent = VinColors.Accent
+        )
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(VinColors.BgColor)) {
+        com.vinmusic.ui.components.AmbientFluidGlowBackground(homePalette)
         PullToRefreshBox(
             isRefreshing = isRefreshing,
             onRefresh = {

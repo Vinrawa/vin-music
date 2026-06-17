@@ -46,7 +46,7 @@ object PlayerCacheManager {
         
         // Healing Mechanism: If DB says downloaded but actual cached bytes are missing, heal DB state!
         if (isDownloadCompleted && dlCacheBytes < 100_000L) {
-            Log.w(TAG, "Download DB says completed, but cached bytes are missing (\$dlCacheBytes). Healing DB.")
+            Log.w(TAG, "Download DB says completed, but cached bytes are missing ($dlCacheBytes). Healing DB.")
             try {
                 database.withTransaction {
                     database.downloadDao().delete(videoId)
@@ -57,7 +57,7 @@ object PlayerCacheManager {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to heal database for song \$videoId: \${e.message}")
+                Log.e(TAG, "Failed to heal database for song $videoId: ${e.message}")
             }
         }
 
@@ -105,9 +105,9 @@ object PlayerCacheManager {
                                 .data(nextSong.thumbnailHd)
                                 .build()
                             loader.enqueue(req2)
-                            Log.d(TAG, "Prefetched thumbnails for next song: \${nextSong.title}")
+                            Log.d(TAG, "Prefetched thumbnails for next song: ${nextSong.title}")
                         } catch (e: Exception) {
-                            Log.e(TAG, "Failed to prefetch thumbnail: \${e.message}")
+                            Log.e(TAG, "Failed to prefetch thumbnail: ${e.message}")
                         }
                     }
                     
@@ -117,7 +117,7 @@ object PlayerCacheManager {
                     val dlCache = if (isComplete) ctx.let { PlayerSingleton.getDownloadCache(it) } else null
                     val dlCacheBytes = dlCache?.getCachedBytes(nextSong.videoId, 0, -1) ?: 0L
                     if (isComplete && dlCacheBytes > 100_000L) {
-                        Log.d(TAG, "prefetchNextSongs: Song \${nextSong.title} (offset \$offset) is downloaded offline. Skipping.")
+                        Log.d(TAG, "prefetchNextSongs: Song ${nextSong.title} (offset $offset) is downloaded offline. Skipping.")
                         continue
                     }
                     
@@ -125,7 +125,7 @@ object PlayerCacheManager {
                     val pCache = PlayerSingleton.getCache(ctx)
                     val pCacheBytes = pCache?.getCachedBytes(nextSong.videoId, 0, -1) ?: 0L
                     if (pCacheBytes > 1_500_000L) {
-                        Log.d(TAG, "prefetchNextSongs: Song \${nextSong.title} (offset \$offset) already cached. Skipping.")
+                        Log.d(TAG, "prefetchNextSongs: Song ${nextSong.title} (offset $offset) already cached. Skipping.")
                         continue
                     }
                     
@@ -136,17 +136,17 @@ object PlayerCacheManager {
                         Log.d(TAG, "prefetchNextSongs: Found active stream URL prefetch deferred. Waiting...")
                         streamUrl = deferredPair.second.await()
                     } else {
-                        Log.d(TAG, "prefetchNextSongs: Fetching stream URL for prefetch offset=\$offset...")
+                        Log.d(TAG, "prefetchNextSongs: Fetching stream URL for prefetch offset=$offset...")
                         streamUrl = InnerTube.getStreamUrl(nextSong.videoId, quality)
                     }
                     
                     if (streamUrl.isNullOrBlank()) {
-                        Log.d(TAG, "prefetchNextSongs: Song stream URL is empty for offset=\$offset. Skipping.")
+                        Log.d(TAG, "prefetchNextSongs: Song stream URL is empty for offset=$offset. Skipping.")
                         continue
                     }
                     
                     val cache = PlayerSingleton.getCache(ctx) ?: continue
-                    Log.d(TAG, "prefetchNextSongs: Starting prefetch of 2.5MB for song \${nextSong.title} (offset \$offset, videoId=\${nextSong.videoId})")
+                    Log.d(TAG, "prefetchNextSongs: Starting prefetch of 2.5MB for song ${nextSong.title} (offset $offset, videoId=${nextSong.videoId})")
                     
                     val httpFactory = DefaultHttpDataSource.Factory()
                         .setUserAgent("com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12; GB) gzip")
@@ -179,12 +179,12 @@ object PlayerCacheManager {
                     )
                     
                     cacheWriter.cache()
-                    Log.d(TAG, "prefetchNextSongs: Successfully completed prefetch of 2.5MB for \${nextSong.title} (offset \$offset)")
+                    Log.d(TAG, "prefetchNextSongs: Successfully completed prefetch of 2.5MB for ${nextSong.title} (offset $offset)")
                 }
             } catch (e: CancellationException) {
                 Log.d(TAG, "prefetchNextSongs cancelled.")
             } catch (e: Exception) {
-                Log.e(TAG, "prefetchNextSongs failed: \${e.message}", e)
+                Log.e(TAG, "prefetchNextSongs failed: ${e.message}", e)
             }
         }
     }

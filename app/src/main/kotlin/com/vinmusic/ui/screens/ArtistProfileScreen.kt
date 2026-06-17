@@ -161,7 +161,7 @@ fun ArtistProfileScreen(
     // ── UI ────────────────────────────────────────────────────────────────────
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(VinColors.BgColor),
-        contentPadding = PaddingValues(bottom = 120.dp)
+        contentPadding = PaddingValues(bottom = 220.dp)
     ) {
 
         // ── Premium Artist Profile Header Banner ──────────────────────────────
@@ -267,7 +267,7 @@ fun ArtistProfileScreen(
                         modifier = Modifier
                             .size(96.dp)
                             .clip(CircleShape)
-                            .border(2.dp, Color(0xFFEAB308).copy(0.8f), CircleShape) // Gold border
+                            .border(2.dp, VinColors.Accent.copy(0.8f), CircleShape) // Light Brown border
                             .padding(2.dp)
                     ) {
                         AsyncImage(
@@ -299,7 +299,7 @@ fun ArtistProfileScreen(
                             modifier = Modifier
                                 .size(18.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFDC2626)),
+                                .background(VinColors.Accent),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -594,7 +594,7 @@ fun ArtistProfileScreen(
                             Box(
                                 Modifier.size(72.dp)
                                     .background(
-                                        Brush.linearGradient(listOf(VinColors.Accent.copy(0.7f), Color(0xFF7C3AED).copy(0.7f))),
+                                        Brush.linearGradient(listOf(VinColors.Accent.copy(0.7f), VinColors.AccentLight.copy(0.7f))),
                                         CircleShape
                                     )
                                     .padding(2.dp)

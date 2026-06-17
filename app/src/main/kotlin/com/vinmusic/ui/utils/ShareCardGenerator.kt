@@ -67,7 +67,7 @@ object ShareCardGenerator {
         val bgPaint = Paint()
         bgPaint.shader = LinearGradient(
             0f, 0f, 0f, CARD_H.toFloat(),
-            intArrayOf(0xFF1A1025.toInt(), 0xFF0E0E11.toInt(), 0xFF0A0A0D.toInt()),
+            intArrayOf(0xFF1E1A14.toInt(), 0xFF0E0E11.toInt(), 0xFF050505.toInt()),
             floatArrayOf(0f, 0.5f, 1f),
             Shader.TileMode.CLAMP
         )
@@ -112,7 +112,7 @@ object ShareCardGenerator {
                 // Glow shadow behind art
                 val glowPaint = Paint().apply {
                     maskFilter = BlurMaskFilter(50f, BlurMaskFilter.Blur.NORMAL)
-                    color = 0x556338EC.toInt()
+                    color = 0x55C5A880.toInt()
                 }
                 canvas.drawRoundRect(
                     artLeft - 10f, artTop - 10f,
@@ -126,12 +126,12 @@ object ShareCardGenerator {
             } catch (e: Exception) {
                 android.util.Log.e("ShareCard", "Failed to draw album art", e)
                 // Draw a fallback colored placeholder card
-                val placeholderPaint = Paint().apply { color = 0xFF6338EC.toInt() }
+                val placeholderPaint = Paint().apply { color = 0xFFC5A880.toInt() }
                 canvas.drawRoundRect(artLeft, artTop, artLeft + artSize, artTop + artSize, artRound, artRound, placeholderPaint)
             }
         } else {
             // Draw a fallback colored placeholder card
-            val placeholderPaint = Paint().apply { color = 0xFF6338EC.toInt() }
+            val placeholderPaint = Paint().apply { color = 0xFFC5A880.toInt() }
             canvas.drawRoundRect(artLeft, artTop, artLeft + artSize, artTop + artSize, artRound, artRound, placeholderPaint)
         }
 
@@ -159,7 +159,7 @@ object ShareCardGenerator {
         // ── 7. Duration pill ──
         val durationY = artistY + 70f
         val pillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFF6338EC.toInt()
+            color = 0xFFC5A880.toInt()
         }
         val durationTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
@@ -199,7 +199,7 @@ object ShareCardGenerator {
         val accentPaint = Paint().apply {
             shader = LinearGradient(
                 CARD_W * 0.2f, 0f, CARD_W * 0.8f, 0f,
-                intArrayOf(0x006338EC, 0xFF6338EC.toInt(), 0x006338EC),
+                intArrayOf(0x00C5A880, 0xFFC5A880.toInt(), 0x00C5A880),
                 null, Shader.TileMode.CLAMP
             )
             strokeWidth = 4f

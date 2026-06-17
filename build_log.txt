@@ -1,0 +1,31 @@
+Starting a Gradle Daemon, 3 busy Daemons could not be reused, use --status for details
+
+> Configure project :app
+WARNING: The option setting 'android.disableResourceValidation=true' is experimental.
+The current default is 'false'.
+w: History based incremental compilation approach for JVM platform is deprecated and will be removed soon in favor of approach based on ABI snapshots.
+Please remove 'kotlin.incremental.useClasspathSnapshot=false' from 'gradle.properties' file.
+
+
+[Incubating] Problems report is available at: file:///D:/ASUS/Documents/vin-music-v2/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Task ';' not found in root project 'VinMusicV2' and its subprojects.
+
+* Try:
+> Run gradlew tasks to get a list of available tasks.
+> For more on name expansion, please refer to https://docs.gradle.org/9.4.1/userguide/command_line_interface.html#sec:name_abbreviation in the Gradle documentation.
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.4.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD FAILED in 16s

@@ -74,50 +74,50 @@ object RecommendationManager {
         "Lofi" to GenreMixConfig(
             description = "Your personal sanctuary of calm. Lofi, acoustic indie, and soft chill melodies.",
             queries = listOf("hindi soft indie aesthetic", "acoustic lofi relax", "aesthetic bedtime chill"),
-            gradientStartHex = "0xFF3B0764", // Deep Violet
-            gradientEndHex = "0xFF1E1B4B",   // Dark Indigo
+            gradientStartHex = "0xFFC5A880", // Light Brown
+            gradientEndHex = "0xFF1E1A14",   // Charcoal
             targetMood = "Chill/Relaxed"
         ),
         "Rap/Hip-Hop" to GenreMixConfig(
             description = "Get moving with high-tempo rap, energetic workout tracks, and modern hip hop.",
             queries = listOf("energetic rap hits workout", "modern hip hop playlist popular", "trap music gym workout"),
-            gradientStartHex = "0xFF7F1D1D", // Deep Crimson
-            gradientEndHex = "0xFF450A0A",   // Dark Red
+            gradientStartHex = "0xFFB39873", // Goldish Light Brown
+            gradientEndHex = "0xFF191612",   // Dark Charcoal
             targetMood = "Energetic"
         ),
         "Bollywood" to GenreMixConfig(
             description = "Melodious romantic soundtracks, Bollywood hits, and warm acoustic love songs.",
             queries = listOf("bollywood romantic hit tracks", "arijit singh sweet love audio", "hindi slow romantic ost"),
-            gradientStartHex = "0xFF065F46", // Dark Emerald
-            gradientEndHex = "0xFF022C22",   // Sage Black
+            gradientStartHex = "0xFFD6BE9C", // Warm Tan
+            gradientEndHex = "0xFF2C251C",   // Deep Charcoal
             targetMood = "Romantic"
         ),
         "Punjabi Folk" to GenreMixConfig(
             description = "High-energy Punjabi beats, bhangra hits, and upbeat modern releases.",
             queries = listOf("upbeat punjabi dance bhangra", "karan aujla sidhu moose wala hits", "popular punjabi music charts"),
-            gradientStartHex = "0xFFB45309", // Amber
-            gradientEndHex = "0xFF78350F",   // Warm Orange
+            gradientStartHex = "0xFFA38C6D", // Dull Gold
+            gradientEndHex = "0xFF171411",   // Dark Charcoal
             targetMood = "Energetic"
         ),
         "Pop" to GenreMixConfig(
             description = "An upbeat collection of popular hits, dance anthems, and modern pop releases.",
             queries = listOf("popular pop hits charts", "dance pop anthems radio", "fresh upbeat pop music"),
-            gradientStartHex = "0xFF1E3A8A", // Deep Blue
-            gradientEndHex = "0xFF0F172A",   // Dark Slate
+            gradientStartHex = "0xFFC5A880", // Light Brown
+            gradientEndHex = "0xFF251F17",   // Warm Charcoal
             targetMood = "Happy"
         ),
         "Indie" to GenreMixConfig(
             description = "Warm acoustic indie, singer-songwriter gems, and fresh independent sounds.",
             queries = listOf("hindi indie acoustic aesthetic", "indie folk playlist viral", "prateek kuhad anuv jain style"),
-            gradientStartHex = "0xFF0F766E", // Deep Teal
-            gradientEndHex = "0xFF115E59",   // Medium Jade
+            gradientStartHex = "0xFFB39873", // Gold
+            gradientEndHex = "0xFF15120E",   // Charcoal
             targetMood = "Chill/Relaxed"
         ),
         "Rock" to GenreMixConfig(
             description = "Heavy guitar solos, classic rock anthems, and high-voltage grunge energy.",
             queries = listOf("popular rock workout music", "heavy grunge rock classics", "linkin park style rock music"),
-            gradientStartHex = "0xFF1F2937", // Slate Gray
-            gradientEndHex = "0xFF0F172A",   // Midnight Black
+            gradientStartHex = "0xFF8C7355", // Dull Light Brown
+            gradientEndHex = "0xFF100E0C",   // Dark Ash
             targetMood = "Energetic"
         )
     )
@@ -802,14 +802,14 @@ object RecommendationManager {
                 description = "Your personal compilation of $genre tracks curated matching your TasteDNA.",
                 queries = listOf("$genre official popular music", "$genre hit tracks playlist"),
                 gradientStartHex = when (i) {
-                    0 -> "0xFF3B0764"
-                    1 -> "0xFF7F1D1D"
-                    else -> "0xFF065F46"
+                    0 -> "0xFFC5A880"
+                    1 -> "0xFFB39873"
+                    else -> "0xFFD6BE9C"
                 },
                 gradientEndHex = when (i) {
-                    0 -> "0xFF1E1B4B"
-                    1 -> "0xFF450A0A"
-                    else -> "0xFF022C22"
+                    0 -> "0xFF1E1A14"
+                    1 -> "0xFF191612"
+                    else -> "0xFF2C251C"
                 },
                 targetMood = "Chill/Relaxed"
             )
@@ -839,8 +839,8 @@ object RecommendationManager {
             title = "Discover Weekly",
             description = "Fresh discoveries matching your TasteDNA. Underrated official tracks you haven't heard yet.",
             songs = dwSongs,
-            gradientStartHex = "0xFFEF4444", // Vibrant Red
-            gradientEndHex = "0xFF7F1D1D"   // Dark Red
+            gradientStartHex = "0xFFC5A880", // Light Brown
+            gradientEndHex = "0xFF1E1A14"   // Charcoal
         ))
 
         // 5. Release Radar Mix
@@ -853,8 +853,8 @@ object RecommendationManager {
             title = "Release Radar",
             description = "The latest official releases from your preferred artists and matching genres.",
             songs = rrSongs,
-            gradientStartHex = "0xFFB45309", // Amber
-            gradientEndHex = "0xFF78350F"   // Warm Orange
+            gradientStartHex = "0xFFB39873", // Gold
+            gradientEndHex = "0xFF191612"   // Dark Charcoal
         ))
 
         // 6. Repeat Rewind Mix
@@ -864,8 +864,8 @@ object RecommendationManager {
             title = "Repeat Rewind",
             description = "Rewind your favorites. The songs you have played on repeat and liked the most.",
             songs = rewindSongs,
-            gradientStartHex = "0xFF0369A1", // Cyan
-            gradientEndHex = "0xFF0C4A6E"   // Dark Navy
+            gradientStartHex = "0xFFA38C6D", // Dull Gold
+            gradientEndHex = "0xFF171411"   // Dark Charcoal
         ))
 
 

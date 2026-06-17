@@ -291,7 +291,7 @@ fun SearchScreen(
                     }
                 } else if (!hasResults && query.isNotEmpty()) {
                     // No results — smart recommendations
-                    LazyColumn(contentPadding = PaddingValues(bottom = 100.dp)) {
+                    LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
                         item {
                             Column(Modifier.fillMaxWidth().padding(16.dp, 20.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally) {
@@ -320,7 +320,7 @@ fun SearchScreen(
                 } else if (!hasResults) {
                     SearchEmptyState()
                 } else {
-                    LazyColumn(contentPadding = PaddingValues(bottom = 100.dp)) {
+                    LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
                         when (activeTab) {
                             // ── ALL tab: Artist → Albums → Songs ─────────────────────
                             SearchTab.ALL -> {
@@ -453,7 +453,7 @@ fun SearchScreen(
 
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 100.dp)
+                        contentPadding = PaddingValues(bottom = 220.dp)
                     ) {
                         items(filteredHistory) { histQuery ->
                             SuggestionRow(

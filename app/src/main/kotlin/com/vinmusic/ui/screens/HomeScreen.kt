@@ -110,11 +110,11 @@ data class QuickPlaylist(
 )
 
 private val QUICK_PLAYLISTS = listOf(
-    QuickPlaylist("Chill Vibes", "chill lofi hindi music",  Icons.Default.MusicNote,  Color(0xFF8B5CF6), Color(0xFF3B0764)),
-    QuickPlaylist("Workout",    "gym workout music 2025",  Icons.Default.Bolt,       Color(0xFF3B82F6), Color(0xFF1E3A8A)),
-    QuickPlaylist("Party Hits",  "party hits 2025 india",   Icons.Default.Star,       Color(0xFFEF4444), Color(0xFF500724)),
-    QuickPlaylist("Focus",      "study focus music",       Icons.Default.School,     Color(0xFF10B981), Color(0xFF064E3B)),
-    QuickPlaylist("Bollywood",  "bollywood superhits",     Icons.Default.Favorite,   Color(0xFFEF4444), Color(0xFF7F1D1D)),
+    QuickPlaylist("Chill Vibes", "chill lofi hindi music",  Icons.Default.MusicNote,  Color(0xFFC5A880), Color(0xFF1E1A14)),
+    QuickPlaylist("Workout",    "gym workout music 2025",  Icons.Default.Bolt,       Color(0xFFB39873), Color(0xFF191612)),
+    QuickPlaylist("Party Hits",  "party hits 2025 india",   Icons.Default.Star,       Color(0xFFD6BE9C), Color(0xFF2C251C)),
+    QuickPlaylist("Focus",      "study focus music",       Icons.Default.School,     Color(0xFFA38C6D), Color(0xFF171411)),
+    QuickPlaylist("Bollywood",  "bollywood superhits",     Icons.Default.Favorite,   Color(0xFFC5A880), Color(0xFF251F17)),
 )
 
 @OptIn(UnstableApi::class, ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
@@ -1174,30 +1174,30 @@ fun HomeScreen(
         )
 
         Canvas(modifier = Modifier.fillMaxSize()) {
-            // Blob 1: Dynamic Royal Purple aura
+            // Blob 1: Dynamic Light Brown aura
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(Color(0xFF6338EC).copy(alpha = 0.16f), Color.Transparent),
+                    colors = listOf(Color(0xFFC5A880).copy(alpha = 0.15f), Color.Transparent),
                     center = Offset(blob1X.dp.toPx(), 220.dp.toPx()),
                     radius = size.width * 0.75f
                 ),
                 radius = size.width * 0.75f,
                 center = Offset(blob1X.dp.toPx(), 220.dp.toPx())
             )
-            // Blob 2: Vibrant Glowing Neon Pink aura
+            // Blob 2: Warm Glowing Gold aura
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(Color(0xFFEC4899).copy(alpha = 0.12f), Color.Transparent),
+                    colors = listOf(Color(0xFFB39873).copy(alpha = 0.10f), Color.Transparent),
                     center = Offset(100.dp.toPx(), blob2Y.dp.toPx()),
                     radius = size.width * 0.65f
                 ),
                 radius = size.width * 0.65f,
                 center = Offset(100.dp.toPx(), blob2Y.dp.toPx())
             )
-            // Blob 3: Sleek Dark Blue/Indigo aura
+            // Blob 3: Warm Charcoal aura
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(Color(0xFF1E3A8A).copy(alpha = 0.14f), Color.Transparent),
+                    colors = listOf(Color(0xFF2C251C).copy(alpha = 0.12f), Color.Transparent),
                     center = Offset(blob3X.dp.toPx(), 620.dp.toPx()),
                     radius = size.width * 0.70f
                 ),
@@ -1357,13 +1357,13 @@ fun HomeScreen(
                         .background(
                             Brush.linearGradient(
                                 listOf(
-                                    Color(0xFFEF4444).copy(alpha = 0.25f),
-                                    Color(0xFF7F1D1D).copy(alpha = 0.35f)
+                                    Color(0xFFC5A880).copy(alpha = 0.25f),
+                                    Color(0xFF2C251C).copy(alpha = 0.35f)
                                 )
                             )
                         )
                         .border(
-                            BorderStroke(1.2.dp, Brush.linearGradient(listOf(Color(0xFFEF4444), Color(0xFF7F1D1D)))),
+                            BorderStroke(1.2.dp, Brush.linearGradient(listOf(Color(0xFFC5A880), Color(0xFF2C251C)))),
                             RoundedCornerShape(20.dp)
                         )
                         .clickable { onDiscoverClick() }
@@ -1389,7 +1389,7 @@ fun HomeScreen(
                                 Icon(
                                     Icons.Default.Favorite,
                                     contentDescription = null,
-                                    tint = Color(0xFFEF4444),
+                                    tint = Color(0xFFC5A880),
                                     modifier = Modifier.size(24.dp)
                                 )
                             }
@@ -1520,7 +1520,7 @@ fun HomeScreen(
                                 .background(
                                     if (active) {
                                         Brush.horizontalGradient(
-                                            listOf(Color(0xFFEF4444), Color(0xFF991B1B))
+                                            listOf(Color(0xFFC5A880), Color(0xFF8C7355))
                                         )
                                     } else {
                                         Brush.verticalGradient(
@@ -2201,7 +2201,7 @@ fun HomeScreen(
                                     .background(
                                         if (active) {
                                             Brush.horizontalGradient(
-                                                listOf(Color(0xFF8B5CF6), Color(0xFF4C1D95))
+                                                listOf(Color(0xFFC5A880), Color(0xFF8C7355))
                                             )
                                         } else {
                                             Brush.verticalGradient(
@@ -2397,8 +2397,8 @@ fun HomeScreen(
 
     if (selectedSpotifyMix != null) {
         val mix = selectedSpotifyMix!!
-        val startColor = runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFF3B0764) }
-        val endColor = runCatching { Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#"))) }.getOrElse { Color(0xFF1E1B4B) }
+        val startColor = runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFFC5A880) }
+        val endColor = runCatching { Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#"))) }.getOrElse { Color(0xFF1E1A14) }
 
         ModalBottomSheet(
             onDismissRequest = { selectedSpotifyMix = null },
@@ -3028,7 +3028,7 @@ fun ArtistCircleCard(
             modifier = Modifier
                 .size(130.dp)
                 .background(
-                    brush = Brush.linearGradient(listOf(VinColors.Accent, Color(0xFF7C3AED))),
+                    brush = Brush.linearGradient(listOf(VinColors.Accent, VinColors.AccentLight)),
                     shape = CircleShape
                 )
                 .padding(2.dp),
@@ -3082,10 +3082,10 @@ fun SpotifyMixCard(
     )
 
     val startColor = remember(mix.gradientStartHex) {
-        runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFF3B0764) }
+        runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFFC5A880) }
     }
     val endColor = remember(mix.gradientEndHex) {
-        runCatching { Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#"))) }.getOrElse { Color(0xFF1E1B4B) }
+        runCatching { Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#"))) }.getOrElse { Color(0xFF1E1A14) }
     }
 
     Column(

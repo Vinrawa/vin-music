@@ -8,6 +8,8 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 
 object InnerTube {
     const val TAG  = "VIN_STREAM"
@@ -25,6 +27,11 @@ object InnerTube {
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .followRedirects(true)
+        .build()
+
+    private val racingHttp = http.newBuilder()
+        .connectTimeout(2500, TimeUnit.MILLISECONDS)
+        .readTimeout(2500, TimeUnit.MILLISECONDS)
         .build()
 
     // ── Client definitions ────────────────────────────────────────────────────
@@ -128,8 +135,50 @@ object InnerTube {
         // 1. Fetch visitor token (bypasses LOGIN_REQUIRED for most music)
         ensureVisitorData()
 
-        // 2. Try NewPipeExtractor first (deciphers both signature and n-parameter for unthrottled streaming)
-        log("Trying NewPipeExtractor...")
+        // 2. Try InnerTube direct clients first (much faster than NewPipe HTML parsing)
+        log("Trying InnerTube direct clients in parallel racing...")
+        val url = runBlocking {
+            val channel = Channel<String>(Channel.UNLIMITED)
+            val remaining = java.util.concurrent.atomic.AtomicInteger(CLIENTS.size)
+
+            CLIENTS.forEach { client ->
+                launch(Dispatchers.IO) {
+                    try {
+                        log("Trying parallel race: ${client.name}...")
+                        val res = fetchViaClient(videoId, client, quality, racingHttp)
+                        if (!res.isNullOrEmpty()) {
+                            channel.trySend(res)
+                        }
+                    } catch (e: Throwable) {
+                        log("${client.name} threw in race: ${e.javaClass.simpleName}: ${e.message?.take(80)}")
+                    } finally {
+                        if (remaining.decrementAndGet() == 0) {
+                            channel.close()
+                        }
+                    }
+                }
+            }
+
+            var successfulUrl: String? = null
+            try {
+                for (res in channel) {
+                    successfulUrl = res
+                    coroutineContext.cancelChildren() // Cancel other client requests
+                    break
+                }
+            } catch (e: Exception) {
+                log("Race channel error: ${e.message}")
+            }
+            successfulUrl
+        }
+
+        if (!url.isNullOrEmpty()) {
+            log("SUCCESS via parallel race Host: ${android.net.Uri.parse(url).host}")
+            return url
+        }
+
+        // 3. Fallback to NewPipeExtractor
+        log("Trying NewPipeExtractor as fallback...")
         try {
             NewPipeInit.init()
             val info = org.schabi.newpipe.extractor.stream.StreamInfo.getInfo(
@@ -161,21 +210,6 @@ object InnerTube {
             log("NewPipe FAILED: ${e.javaClass.simpleName}: ${e.message?.take(100)}")
         }
 
-        // 3. Fallback to InnerTube direct clients
-        log("Trying InnerTube direct clients as fallback...")
-        for (client in CLIENTS) {
-            log("Trying ${client.name}...")
-            try {
-                val url = fetchViaClient(videoId, client, quality)
-                if (!url.isNullOrEmpty()) {
-                    log("SUCCESS via ${client.name} Host: ${android.net.Uri.parse(url).host}")
-                    return url
-                }
-            } catch (e: Throwable) {
-                log("${client.name} threw: ${e.javaClass.simpleName}: ${e.message?.take(80)}")
-            }
-        }
-
         log("ALL clients and fallbacks failed for $videoId")
         
         // Final fallback: Experimental Resolver (Metrolist IOS style)
@@ -189,7 +223,7 @@ object InnerTube {
     }
 
     // ── InnerTube player request ──────────────────────────────────────────────
-    private fun fetchViaClient(videoId: String, client: YTClient, quality: String? = null): String? {
+    private fun fetchViaClient(videoId: String, client: YTClient, quality: String? = null, clientOverride: OkHttpClient = http): String? {
         val endpoint = "$BASE/player?prettyPrint=false"
         log("--- DIAGNOSTIC: Testing ${client.name} / ${client.version} ---")
         log("Endpoint: $endpoint")
@@ -231,7 +265,7 @@ object InnerTube {
 
         val raw: String
         try {
-            val response = http.newCall(reqBuilder.build()).execute()
+            val response = clientOverride.newCall(reqBuilder.build()).execute()
             log("HTTP Status: ${response.code}")
             raw = response.body?.string() ?: ""
             if (raw.isEmpty()) {
@@ -1161,8 +1195,15 @@ object InnerTube {
         return sections
     }
 
+    private val searchAllCache = android.util.LruCache<String, Pair<Long, AllSearchResults>>(20)
+
     // ── Search All Types (Songs + Artists + Albums in one call) ──────────────
     fun searchAll(query: String): AllSearchResults {
+        val cached = searchAllCache.get(query)
+        if (cached != null && System.currentTimeMillis() - cached.first < 5 * 60 * 1000) {
+            return cached.second
+        }
+
         val body = mapOf(
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB", "clientVersion" to "2.20231219.04.00",
@@ -1237,7 +1278,9 @@ object InnerTube {
                     }
                 }
             }
-            AllSearchResults(songs, artists, albums)
+            val finalResults = AllSearchResults(songs, artists, albums)
+            searchAllCache.put(query, Pair(System.currentTimeMillis(), finalResults))
+            finalResults
         } catch (e: Exception) { AllSearchResults() }
     }
 
@@ -1398,10 +1441,18 @@ object InnerTube {
         return songs.distinctBy { it.videoId }
     }
 
+    private val suggestionsCache = android.util.LruCache<String, Pair<Long, List<String>>>(50)
+
     // ── Suggestions ───────────────────────────────────────────────────────────
-    fun getSuggestions(query: String): List<String> = try {
-        if (query.isBlank()) emptyList()
-        else {
+    fun getSuggestions(query: String): List<String> {
+        try {
+            if (query.isBlank()) return emptyList()
+            
+            val cached = suggestionsCache.get(query)
+            if (cached != null && System.currentTimeMillis() - cached.first < 5 * 60 * 1000) {
+                return cached.second
+            }
+            
             val url = "https://music.youtube.com/youtubei/v1/music/get_search_suggestions?prettyPrint=false"
             val body = mapOf(
                 "context" to mapOf(
@@ -1424,7 +1475,7 @@ object InnerTube {
 
             val root = gson.fromJson(resp, Map::class.java)
             val contents = root["contents"] as? List<*> ?: emptyList<Any?>()
-            buildList<String> {
+            val results = buildList<String> {
                 for (section in contents) {
                     val secMap = section as? Map<*, *> ?: continue
                     val renderer = secMap["searchSuggestionsSectionRenderer"] as? Map<*, *> ?: continue
@@ -1439,10 +1490,12 @@ object InnerTube {
                     }
                 }
             }.take(10)
+            suggestionsCache.put(query, Pair(System.currentTimeMillis(), results))
+            return results
+        } catch (e: Exception) {
+            log("Suggestions fetch failed: ${e.message}")
+            return emptyList()
         }
-    } catch (e: Exception) {
-        log("Suggestions fetch failed: ${e.message}")
-        emptyList()
     }
 
     /** Scrapes all VideoItems from a YouTube playlist (PL...) or album (OLAK...) browse endpoint */

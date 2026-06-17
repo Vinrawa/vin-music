@@ -69,10 +69,10 @@ fun FullPlayerScreen(
     var currentPalette by remember(song.videoId) {
         mutableStateOf(
             ColorExtractor.MusicPalette(
-                gradTop = Color(0x336338EC),
-                gradMid = Color(0x1F6338EC),
+                gradTop = Color(0x33C5A880),
+                gradMid = Color(0x1FC5A880),
                 gradBottom = Color(0xFF0E0E11),
-                accent = Color(0xFF6338EC)
+                accent = Color(0xFFC5A880)
             )
         )
     }
@@ -1665,7 +1665,7 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Bass Booster",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFFDC2626), Color(0xFF7F1D1D))),
+                    gradient = Brush.linearGradient(listOf(Color(0xFFC5A880), Color(0xFF1E1A14))),
                     active = vm.eqPreset == "Bass Boost",
                     onClick = {
                         val preset = EQ_PRESETS.find { it.name == "Bass Boost" }
@@ -1677,7 +1677,7 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Lo-Fi Lounge",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFFD97706), Color(0xFF78350F))),
+                    gradient = Brush.linearGradient(listOf(Color(0xFFB39873), Color(0xFF191612))),
                     active = vm.eqPreset == "Lofi",
                     onClick = {
                         val preset = EQ_PRESETS.find { it.name == "Lofi" }
@@ -1689,7 +1689,7 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Vocal Focus",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFF059669), Color(0xFF064E3B))),
+                    gradient = Brush.linearGradient(listOf(Color(0xFFD6BE9C), Color(0xFF2C251C))),
                     active = vm.eqPreset == "Vocal",
                     onClick = {
                         val preset = EQ_PRESETS.find { it.name == "Vocal" }
@@ -1701,7 +1701,7 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Acoustic Clarity",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFF0D9488), Color(0xFF115E59))),
+                    gradient = Brush.linearGradient(listOf(Color(0xFFA38C6D), Color(0xFF171411))),
                     active = vm.eqPreset == "Treble+",
                     onClick = {
                         val preset = EQ_PRESETS.find { it.name == "Treble+" }
@@ -1713,7 +1713,7 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Slowed + Reverb",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFF8B5CF6), Color(0xFF4C1D95))),
+                    gradient = Brush.linearGradient(listOf(Color(0xFFC5A880), Color(0xFF251F17))),
                     active = vm.isSlowedReverb,
                     onClick = {
                         vm.toggleSlowedReverb()
@@ -1724,7 +1724,7 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "8D Audio Mode",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFF3B82F6), Color(0xFF1D4ED8))),
+                    gradient = Brush.linearGradient(listOf(Color(0xFFB39873), Color(0xFF15120E))),
                     active = vm.is8dEnabled,
                     onClick = {
                         vm.toggle8dAudio()

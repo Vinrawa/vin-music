@@ -41,8 +41,8 @@ class TasteProfileManager @Inject constructor(
             var features = sig
             if (sig.energy == -1) {
                 val cleanTitle = sig.title.replace("(Official Video)", "", ignoreCase = true).trim()
-                // Disabled slow DB LIKE search to prevent infinite loading. Using fast NLP fallback instead.
-                val spotifyTrack: com.vinmusic.recommendation.SpotifyTrack? = null 
+                // Using fast indexed exact DB search
+                val spotifyTrack = try { spotifyDao.findTrackExact(cleanTitle) } catch (_: Exception) { null }
                 if (spotifyTrack != null) {
                     sig.energy = spotifyTrack.energy
                     sig.valence = spotifyTrack.valence

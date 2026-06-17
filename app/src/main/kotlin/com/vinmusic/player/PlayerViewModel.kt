@@ -137,10 +137,19 @@ class PlayerViewModel @Inject constructor(
         get() = PlayerSingleton.smartAutoplayEnabled
         set(value) { PlayerSingleton.smartAutoplayEnabled = value }
 
+    var currentPalette by mutableStateOf(
+        com.vinmusic.ui.utils.ColorExtractor.MusicPalette(
+            gradTop = androidx.compose.ui.graphics.Color(0x33C5A880),
+            gradMid = androidx.compose.ui.graphics.Color(0x1FC5A880),
+            gradBottom = androidx.compose.ui.graphics.Color(0xFF0E0E11),
+            accent = androidx.compose.ui.graphics.Color(0xFFC5A880)
+        )
+    )
 
     val isAutoplayLoading get() = PlayerSingleton.isAutoplayLoading
 
     companion object { const val TAG = "VIN" }
+
 
     // ── ExoPlayer via singleton (shared with VinMusicService for notification) ─
     val exoPlayer: ExoPlayer = PlayerSingleton.getOrCreate(app)
@@ -164,11 +173,24 @@ class PlayerViewModel @Inject constructor(
     private var sleepJob:    Job? = null
     private var progressJob: Job? = null
     private var syncLyricsJob: Job? = null
+    private var lyricsJob:   Job? = null
     private var previousLyricsVideoId: String? = null
 
     // ── DB ────────────────────────────────────────────────────────────────────
     private val db = VinDatabase.getInstance(app)
     val topTracksFlow = db.interactionSignalDao().getTopPlayedSongsFlow()
+
+    private fun resetLyricsState(song: VideoItem?) {
+        lyricsJob?.cancel()
+        lyricsJob = null
+        lyricsResult = LyricsResult.NotFound
+        isLyricsLoading = false
+        isTransliterating = false
+        currentLyricIndex = -1
+        lyricOffsetMs = 0L
+        currentSongDescription = null
+        previousLyricsVideoId = song?.videoId
+    }
 
     // ── Recommendation tracking variables ─────────────────────────────────────
     private var playStartTime: Long = 0L
@@ -230,15 +252,50 @@ class PlayerViewModel @Inject constructor(
         eqBass = prefs.getFloat("eq_230hz", 0f)
         eqLowMid = prefs.getFloat("eq_910hz", 0f)
         eqMid = prefs.getFloat("eq_4khz", 0f)
-        val eq14 = prefs.getFloat("eq_14khz", 0f)
-        eqTreble = eq14
-        eqAir = eq14
+        eqTreble = prefs.getFloat("eq_14khz", 0f)
+        eqAir = prefs.getFloat("eq_air", 0f)
         try {
             exoPlayer.skipSilenceEnabled = prefs.getBoolean("skip_silence", false)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize skip_silence: ${e.message}")
         }
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
+
+        // Monitor song changes to auto-reset and fetch lyrics, palette, and description
+        viewModelScope.launch {
+            androidx.compose.runtime.snapshotFlow { currentSong }.collect { song ->
+                resetLyricsState(song)
+                if (song != null) {
+                    loadLyrics(force = true)
+
+                    // Fetch palette in parallel (don't block next song change)
+                    launch {
+                        try {
+                            val ctx = getApplication<Application>()
+                            val url = song.thumbnailHd.takeIf { it.isNotBlank() } ?: song.thumbnail
+                            val extracted = com.vinmusic.ui.utils.ColorExtractor.extractColorsFromUrl(ctx, url)
+                            if (currentSong?.videoId == song.videoId) {
+                                currentPalette = extracted
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to extract palette", e)
+                        }
+                    }
+
+                    // Fetch description in parallel
+                    launch {
+                        try {
+                            val desc = com.vinmusic.innertube.InnerTube.getSongDescription(song.videoId)
+                            if (currentSong?.videoId == song.videoId) {
+                                currentSongDescription = desc
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to load description", e)
+                        }
+                    }
+                }
+            }
+        }
 
         // Start and Bind to VinMusicService so it lives as long as the app is alive
         // Media3 will automatically promote it to foreground when playback starts
@@ -256,32 +313,26 @@ class PlayerViewModel @Inject constructor(
     // ── Playback ──────────────────────────────────────────────────────────────
 
     fun playSong(song: VideoItem) {
-        lyricsResult      = LyricsResult.NotFound
+        resetLyricsState(song)
         progress          = 0f
         currentTimeMs     = 0L
         durationMs        = 0L
-        currentLyricIndex = -1
-        lyricOffsetMs     = 0L
         PlayerSingleton.playSong(song)
     }
 
     fun setQueue(songs: List<VideoItem>, startIndex: Int = 0) {
-        lyricsResult      = LyricsResult.NotFound
+        resetLyricsState(songs.getOrNull(startIndex))
         progress          = 0f
         currentTimeMs     = 0L
         durationMs        = 0L
-        currentLyricIndex = -1
-        lyricOffsetMs     = 0L
         PlayerSingleton.setQueue(songs, startIndex)
     }
 
     fun playSongWithRadio(song: VideoItem) {
-        lyricsResult      = LyricsResult.NotFound
+        resetLyricsState(song)
         progress          = 0f
         currentTimeMs     = 0L
         durationMs        = 0L
-        currentLyricIndex = -1
-        lyricOffsetMs     = 0L
         
         PlayerSingleton.setQueue(listOf(song), 0)
         PlayerSingleton.isAutoplayLoading = true
@@ -335,22 +386,19 @@ class PlayerViewModel @Inject constructor(
 
 
     fun playNext() {
-        lyricsResult      = LyricsResult.NotFound
+        resetLyricsState(null)
         progress          = 0f
         currentTimeMs     = 0L
         durationMs        = 0L
-        currentLyricIndex = -1
-        lyricOffsetMs     = 0L
         PlayerSingleton.playNext()
     }
 
     fun playPrev() {
-        lyricsResult      = LyricsResult.NotFound
+        val willChangeSong = exoPlayer.currentPosition <= 3000
+        if (willChangeSong) resetLyricsState(null)
         progress          = 0f
         currentTimeMs     = 0L
         durationMs        = 0L
-        currentLyricIndex = -1
-        lyricOffsetMs     = 0L
         PlayerSingleton.playPrev()
     }
 
@@ -434,7 +482,6 @@ class PlayerViewModel @Inject constructor(
                     }
 
                     updateSyncedLyricIndex()
-                    checkAndResetLyricsForNewSong()
                 }
             }
         }
@@ -451,15 +498,17 @@ class PlayerViewModel @Inject constructor(
 
     // ── Lyrics ────────────────────────────────────────────────────────────────
 
-    fun loadLyrics() {
+    fun loadLyrics(force: Boolean = false) {
         val song = currentSong ?: return
-        if (isLyricsLoading || lyricsResult !is LyricsResult.NotFound) return
+        if (!force && previousLyricsVideoId == song.videoId && (isLyricsLoading || lyricsResult !is LyricsResult.NotFound)) return
         isLyricsLoading = true
         previousLyricsVideoId = song.videoId
-        viewModelScope.launch(Dispatchers.IO) {
+        val fetchVideoId = song.videoId  // capture identity for staleness check
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val cached = db.cachedLyricsDao().get(song.videoId)
-                if (cached != null) {
+                if (cached != null && cached.lyricsType != "not_found") {
                     val res = when (cached.lyricsType) {
                         "synced" -> {
                             val lines = com.google.gson.Gson().fromJson(cached.content, Array<LyricsLine>::class.java).toList()
@@ -469,8 +518,11 @@ class PlayerViewModel @Inject constructor(
                         else -> LyricsResult.NotFound
                     }
                     withContext(Dispatchers.Main) {
-                        lyricsResult = res
-                        isLyricsLoading = false
+                        // Only write if this song is still playing
+                        if (currentSong?.videoId == fetchVideoId) {
+                            lyricsResult = res
+                            isLyricsLoading = false
+                        }
                     }
                     return@launch
                 }
@@ -479,25 +531,34 @@ class PlayerViewModel @Inject constructor(
                 val provider = prefs.getString("lyrics_provider", "Auto") ?: "Auto"
                 val res = LyricsHelper.fetch(song.title, song.author, song.videoId, provider)
                 withContext(Dispatchers.Main) {
-                    lyricsResult = res
+                    // Only write if this song is still playing
+                    if (currentSong?.videoId == fetchVideoId) {
+                        lyricsResult = res
+                    }
                 }
 
-                val type = when (res) {
-                    is LyricsResult.Synced -> "synced"
-                    is LyricsResult.Plain -> "plain"
-                    is LyricsResult.NotFound -> "not_found"
+                if (res !is LyricsResult.NotFound) {
+                    val type = when (res) {
+                        is LyricsResult.Synced -> "synced"
+                        is LyricsResult.Plain -> "plain"
+                        else -> "not_found"
+                    }
+                    val content = when (res) {
+                        is LyricsResult.Synced -> com.google.gson.Gson().toJson(res.lines)
+                        is LyricsResult.Plain -> res.text
+                        else -> ""
+                    }
+                    db.cachedLyricsDao().insert(CachedLyricsEntity(song.videoId, type, content))
                 }
-                val content = when (res) {
-                    is LyricsResult.Synced -> com.google.gson.Gson().toJson(res.lines)
-                    is LyricsResult.Plain -> res.text
-                    is LyricsResult.NotFound -> ""
-                }
-                db.cachedLyricsDao().insert(CachedLyricsEntity(song.videoId, type, content))
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Load lyrics failed", e)
             } finally {
-                withContext(Dispatchers.Main) {
-                    isLyricsLoading = false
+                withContext(Dispatchers.Main + NonCancellable) {
+                    if (currentSong?.videoId == fetchVideoId) {
+                        isLyricsLoading = false
+                    }
                 }
             }
         }
@@ -511,7 +572,9 @@ class PlayerViewModel @Inject constructor(
         lyricOffsetMs = 0L
         isLyricsLoading = true
         previousLyricsVideoId = song.videoId
-        viewModelScope.launch(Dispatchers.IO) {
+        val fetchVideoId = song.videoId  // capture identity for staleness check
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 // Delete cached lyrics so we get fresh ones
                 db.cachedLyricsDao().delete(song.videoId)
@@ -520,7 +583,9 @@ class PlayerViewModel @Inject constructor(
                 val provider = prefs.getString("lyrics_provider", "Auto") ?: "Auto"
                 val res = LyricsHelper.fetch(song.title, song.author, song.videoId, provider)
                 withContext(Dispatchers.Main) {
-                    lyricsResult = res
+                    if (currentSong?.videoId == fetchVideoId) {
+                        lyricsResult = res
+                    }
                 }
 
                 val type = when (res) {
@@ -536,35 +601,22 @@ class PlayerViewModel @Inject constructor(
                 if (content.isNotEmpty()) {
                     db.cachedLyricsDao().insert(CachedLyricsEntity(song.videoId, type, content))
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Refetch lyrics failed", e)
             } finally {
-                withContext(Dispatchers.Main) {
-                    isLyricsLoading = false
+                withContext(Dispatchers.Main + NonCancellable) {
+                    if (currentSong?.videoId == fetchVideoId) {
+                        isLyricsLoading = false
+                    }
                 }
             }
         }
     }
 
-    /** Called from progress loop to auto-detect song changes and reset lyrics */
-    fun checkAndResetLyricsForNewSong() {
-        val currentId = currentSong?.videoId ?: return
-        if (currentId != previousLyricsVideoId) {
-            lyricsResult = LyricsResult.NotFound
-            currentLyricIndex = -1
-            lyricOffsetMs = 0L
-            currentSongDescription = null
-            previousLyricsVideoId = currentId
-            loadLyrics()
-            
-            viewModelScope.launch(Dispatchers.IO) {
-                val desc = com.vinmusic.innertube.InnerTube.getSongDescription(currentId)
-                withContext(Dispatchers.Main) {
-                    currentSongDescription = desc
-                }
-            }
-        }
-    }
+    // checkAndResetLyricsForNewSong removed — song changes are now handled
+    // reliably via the snapshotFlow collector with proper job cancellation.
 
     // ── Like ──────────────────────────────────────────────────────────────────
 
@@ -640,6 +692,7 @@ class PlayerViewModel @Inject constructor(
             putFloat("eq_910hz", eqLowMid)
             putFloat("eq_4khz", eqMid)
             putFloat("eq_14khz", eqTreble)
+            putFloat("eq_air", eqAir)
             apply()
         }
 

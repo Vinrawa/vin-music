@@ -205,7 +205,7 @@ fun DownloadsScreen(
                         .clip(CircleShape)
                         .background(
                             androidx.compose.ui.graphics.Brush.horizontalGradient(
-                                colors = listOf(VinColors.Accent, Color(0xFFC084FC))
+                                colors = listOf(VinColors.Accent, VinColors.AccentLight)
                             )
                         )
                 )
@@ -225,7 +225,7 @@ fun DownloadsScreen(
                 }
             }
         } else {
-            LazyColumn(contentPadding = PaddingValues(bottom = 140.dp)) {
+            LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
                 items(downloads) { dl ->
                     val song = VideoItem(dl.videoId, dl.title, dl.author, dl.durationText)
                     val isCompleted = dl.status == "completed"

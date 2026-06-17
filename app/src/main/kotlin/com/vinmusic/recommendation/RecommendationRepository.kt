@@ -272,6 +272,7 @@ class RecommendationRepository @Inject constructor(
         profile: RecommendationManager.TasteProfile,
     ): List<VideoItem> {
         val dna = profile.tasteDNA
+        val yr = java.time.LocalDate.now().year
         val queries = ArrayList<String>()
         
         val topArtists = profile.topArtists.take(3).map { it.first }
@@ -303,12 +304,12 @@ class RecommendationRepository @Inject constructor(
         
         // Generate queries based on top genres
         for (genre in topGenres) {
-            queries.add("$genre $tempoTerm $energyTerm hits 2026")
+            queries.add("$genre $tempoTerm $energyTerm hits $yr")
             queries.add("$genre trending music official")
         }
         
         // Fallbacks
-        queries.add("trending official music hits 2026")
+        queries.add("trending official music hits $yr")
         if (queries.size > 8) {
             val uniqueQueries = queries.distinct().shuffled().take(6)
             queries.clear()
@@ -386,9 +387,10 @@ class RecommendationRepository @Inject constructor(
             if (seedTitle.isNotEmpty()) {
                 val seedItem = VideoItem(videoId, seedTitle, seedAuthor)
                 val seedMeta = RecommendationManager.inferMetadata(seedItem)
+                val yr = java.time.LocalDate.now().year
                 val queries = listOf(
                     "$seedAuthor official popular",
-                    "${seedMeta.genre} similar hits 2026",
+                    "${seedMeta.genre} similar hits $yr",
                     "$seedTitle similar music"
                 )
                 pool = fetchCandidatesFromQueries(queries)
@@ -508,7 +510,7 @@ class RecommendationRepository @Inject constructor(
                     .replace("(Official Music Video)", "", ignoreCase = true)
                     .replace("(Lyric Video)", "", ignoreCase = true).trim()
 
-                val spotifyTrack = recDb.trackDao().findTrack(cleanTitle)
+                val spotifyTrack = recDb.trackDao().findTrackExact(cleanTitle)
                 if (spotifyTrack != null) {
                     val similarTracks = try {
                         recDb.trackDao().getSimilarTracksInCluster(
@@ -557,9 +559,10 @@ class RecommendationRepository @Inject constructor(
                 if (seedTitle.isNotEmpty()) {
                     val seedItem = VideoItem(videoId, seedTitle, seedAuthor)
                     val seedMeta = RecommendationManager.inferMetadata(seedItem)
+                    val yr = java.time.LocalDate.now().year
                     val queries = listOf(
                         "$seedAuthor radio hits",
-                        "${seedMeta.genre} hits ${seedMeta.language} 2026",
+                        "${seedMeta.genre} hits ${seedMeta.language} $yr",
                         "$seedTitle similar track"
                     )
                     pool.addAll(fetchCandidatesFromQueries(queries))
@@ -582,7 +585,7 @@ class RecommendationRepository @Inject constructor(
                         .replace("(Official Music Video)", "", ignoreCase = true)
                         .replace("(Lyric Video)", "", ignoreCase = true).trim()
 
-                    val spotifyTrack = recDb.trackDao().findTrack(cleanTitle)
+                    val spotifyTrack = recDb.trackDao().findTrackExact(cleanTitle)
                     if (spotifyTrack != null) {
                         val similarTracks = try {
                             recDb.trackDao().getSimilarTracksInCluster(

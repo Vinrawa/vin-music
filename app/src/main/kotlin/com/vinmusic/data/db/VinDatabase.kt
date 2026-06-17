@@ -17,7 +17,7 @@ data class LikedSong(
     val likedAt:     Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "history")
+@Entity(tableName = "history", indices = [Index(value = ["playedAt"])])
 data class HistoryEntry(
     @PrimaryKey val videoId: String,
     val title:   String,
@@ -27,7 +27,7 @@ data class HistoryEntry(
     val playedAt: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "downloads")
+@Entity(tableName = "downloads", indices = [Index(value = ["status"]), Index(value = ["downloadedAt"])])
 data class DownloadEntity(
     @PrimaryKey val videoId:   String,
     val title:       String,
@@ -42,7 +42,7 @@ data class DownloadEntity(
     val thumbnailUrl: String? = null    // Original YouTube thumbnail URL
 )
 
-@Entity(tableName = "playlists")
+@Entity(tableName = "playlists", indices = [Index(value = ["isPinned", "createdAt"])])
 data class PlaylistEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name:      String,
@@ -51,7 +51,8 @@ data class PlaylistEntity(
 )
 
 @Entity(tableName = "playlist_songs",
-    primaryKeys = ["playlistId", "videoId"])
+    primaryKeys = ["playlistId", "videoId"],
+    indices = [Index(value = ["playlistId"]), Index(value = ["position"])])
 data class PlaylistSongEntity(
     val playlistId: Long,
     val videoId:    String,
@@ -336,6 +337,9 @@ interface SongCacheMetaDao {
     @Query("SELECT * FROM song_cache_meta ORDER BY totalPlayTime DESC LIMIT :limit")
     suspend fun topPlayed(limit: Int): List<SongCacheMeta>
 
+    @Query("SELECT * FROM song_cache_meta WHERE videoId = :id LIMIT 1")
+    suspend fun get(id: String): SongCacheMeta?
+
     @Query(
         """
         SELECT * FROM song_cache_meta
@@ -384,7 +388,7 @@ interface FollowedArtistDao {
                  PlaylistEntity::class, PlaylistSongEntity::class, QueueEntity::class,
                  InteractionSignal::class, CachedLyricsEntity::class, UserAccount::class,
                  RelatedSongMap::class, SongCacheMeta::class, FollowedArtist::class],
-    version   = 12,
+    version   = 13,
     exportSchema = false
 )
 abstract class VinDatabase : RoomDatabase() {
@@ -424,6 +428,61 @@ abstract class VinDatabase : RoomDatabase() {
                 database.execSQL("ALTER TABLE playlists ADD COLUMN isPinned INTEGER NOT NULL DEFAULT 0")
             }
         }
+
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `cached_lyrics` (
+                        `videoId` TEXT NOT NULL,
+                        `lyricsType` TEXT NOT NULL,
+                        `content` TEXT NOT NULL,
+                        PRIMARY KEY(`videoId`)
+                    )
+                """.trimIndent())
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `user_accounts` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `gender` TEXT NOT NULL,
+                        `dob` TEXT NOT NULL,
+                        `email` TEXT NOT NULL,
+                        `phone` TEXT NOT NULL
+                    )
+                """.trimIndent())
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `related_song_map` (
+                        `songId` TEXT NOT NULL,
+                        `relatedVideoId` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `author` TEXT NOT NULL,
+                        `durationText` TEXT NOT NULL,
+                        `savedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`songId`, `relatedVideoId`)
+                    )
+                """.trimIndent())
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `song_cache_meta` (
+                        `videoId` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `author` TEXT NOT NULL,
+                        `durationText` TEXT NOT NULL,
+                        `lastPlayedAt` INTEGER NOT NULL,
+                        `totalPlayTime` INTEGER NOT NULL,
+                        PRIMARY KEY(`videoId`)
+                    )
+                """.trimIndent())
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `followed_artists` (
+                        `channelId` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `thumbnail` TEXT NOT NULL,
+                        `subscriberCount` TEXT NOT NULL DEFAULT '',
+                        `followedAt` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(`channelId`)
+                    )
+                """.trimIndent())
+            }
+        }
         
         private val MIGRATION_11_12 = object : Migration(11, 12) {
             override fun migrate(database: SupportSQLiteDatabase) {
@@ -435,14 +494,23 @@ abstract class VinDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_history_playedAt` ON `history` (`playedAt`)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_downloads_status` ON `downloads` (`status`)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_downloads_downloadedAt` ON `downloads` (`downloadedAt`)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_playlists_isPinned_createdAt` ON `playlists` (`isPinned`, `createdAt`)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_playlist_songs_playlistId` ON `playlist_songs` (`playlistId`)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_playlist_songs_position` ON `playlist_songs` (`position`)")
+            }
+        }
+
         fun getInstance(ctx: Context): VinDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(ctx, VinDatabase::class.java, "vin_music.db")
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_11_12)
-                    .fallbackToDestructiveMigration()
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
                     .build().also { INSTANCE = it }
             }
     }
 }
-
 

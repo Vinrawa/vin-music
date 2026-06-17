@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Environment
 import android.util.Log
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -115,11 +116,12 @@ object UpdateManager {
                         }
                     }
 
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                        context.registerReceiver(onComplete, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_EXPORTED)
-                    } else {
-                        context.registerReceiver(onComplete, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
-                    }
+                    ContextCompat.registerReceiver(
+                        context,
+                        onComplete,
+                        IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+                        ContextCompat.RECEIVER_NOT_EXPORTED
+                    )
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {

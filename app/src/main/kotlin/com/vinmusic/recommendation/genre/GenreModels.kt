@@ -88,8 +88,8 @@ object GenreConstants {
         id = "rap",
         displayName = "Rap/Hip-Hop",
         subGenres = listOf("Trap", "Old School", "Desi Hip-Hop", "UK Drill"),
-        primaryColor = "#E63946",  // Red
-        secondaryColor = "#1D3557", // Dark Blue
+        primaryColor = "#C5A880",  // Light Brown
+        secondaryColor = "#1A1A1A", // Charcoal
         visualizerType = VisualizerType.BASS
     )
     
@@ -97,8 +97,8 @@ object GenreConstants {
         id = "kpop",
         displayName = "K-Pop",
         subGenres = listOf("Trending Groups", "Top Soloists", "Dance Practices", "Live Stages"),
-        primaryColor = "#F72585",  // Pink
-        secondaryColor = "#7209B7", // Purple
+        primaryColor = "#B39873",  // Goldish Light Brown
+        secondaryColor = "#101010", // Dark Charcoal
         visualizerType = VisualizerType.VINYL
     )
     
@@ -106,8 +106,8 @@ object GenreConstants {
         id = "90s",
         displayName = "90s Hits",
         subGenres = (1990..1999).map { it.toString() },
-        primaryColor = "#008080",  // Teal
-        secondaryColor = "#FF8C00", // Orange
+        primaryColor = "#D6BE9C",  // Warm Tan
+        secondaryColor = "#1E1A14", // Deep Charcoal
         visualizerType = VisualizerType.CASSETTE
     )
     
@@ -115,8 +115,8 @@ object GenreConstants {
         id = "indie",
         displayName = "Indie",
         subGenres = listOf("Undiscovered", "Acoustic"),
-        primaryColor = "#2A9D8F",  // Turquoise
-        secondaryColor = "#E76F51", // Coral
+        primaryColor = "#A38C6D",  // Dull Gold
+        secondaryColor = "#151515", // Light Charcoal
         visualizerType = VisualizerType.VINYL
     )
     

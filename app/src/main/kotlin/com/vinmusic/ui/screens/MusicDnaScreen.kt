@@ -146,7 +146,7 @@ fun MusicDnaScreen(
                         .background(
                             Brush.verticalGradient(
                                 listOf(
-                                    Color(0xFF151030),
+                                    Color(0xFF1E1A14),
                                     VinColors.BgColor
                                 )
                             )
@@ -168,7 +168,7 @@ fun MusicDnaScreen(
                             .fillMaxWidth()
                             .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(24.dp)),
                         shape = RoundedCornerShape(24.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color(0x331E293B))
+                        colors = CardDefaults.cardColors(containerColor = Color(0x33C5A880))
                     ) {
                         Column(
                             modifier = Modifier.padding(24.dp),
@@ -188,9 +188,9 @@ fun MusicDnaScreen(
                                 else -> "Chill & Balanced"
                             }
                             val primaryColor = when {
-                                profile!!.valence > 65 -> Color(0xFFFBBF24)
-                                profile!!.valence < 35 -> Color(0xFF8B5CF6)
-                                else -> Color(0xFF38BDF8)
+                                profile!!.valence > 65 -> VinColors.AccentLight
+                                profile!!.valence < 35 -> Color(0xFF8C7355)
+                                else -> VinColors.Accent
                             }
                             
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -205,9 +205,9 @@ fun MusicDnaScreen(
                             
                             Spacer(modifier = Modifier.height(8.dp))
                             
-                            DnaStatBar("Energy", profile!!.energy, Color(0xFFEC4899), Icons.Default.ElectricBolt)
-                            DnaStatBar("Danceability", profile!!.danceability, Color(0xFFF59E0B), Icons.Default.DirectionsRun)
-                            DnaStatBar("Acousticness", profile!!.acousticness, Color(0xFF10B981), Icons.Default.Spa)
+                            DnaStatBar("Energy", profile!!.energy, VinColors.Accent, Icons.Default.ElectricBolt)
+                            DnaStatBar("Danceability", profile!!.danceability, VinColors.AccentLight, Icons.Default.DirectionsRun)
+                            DnaStatBar("Acousticness", profile!!.acousticness, Color(0xFF8C7355), Icons.Default.Spa)
                             
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
@@ -248,7 +248,7 @@ fun MusicDnaScreen(
                             colors = CardDefaults.cardColors(containerColor = VinColors.White10)
                         ) {
                             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Icon(Icons.Default.TrendingUp, null, tint = Color(0xFF38BDF8))
+                                Icon(Icons.Default.TrendingUp, null, tint = VinColors.Accent)
                                 Text("Taste Trend", fontSize = 12.sp, color = VinColors.Secondary)
                                 Text("Exploring more ${if (profile!!.energy > 60) "Energetic" else "Acoustic"} vibes recently.", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = VinColors.Primary, lineHeight = 18.sp)
                             }
@@ -259,7 +259,7 @@ fun MusicDnaScreen(
                             colors = CardDefaults.cardColors(containerColor = VinColors.White10)
                         ) {
                             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF10B981))
+                                Icon(Icons.Default.CheckCircle, null, tint = VinColors.AccentLight)
                                 Text("Radio Accuracy", fontSize = 12.sp, color = VinColors.Secondary)
                                 Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Text("$smartRadioAccuracy%", fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, color = VinColors.Primary)
@@ -289,9 +289,9 @@ fun MusicDnaScreen(
                                     Box(
                                         modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).background(
                                                 when (index) {
-                                                    0 -> Color(0xFFFFD700).copy(alpha = 0.25f)
-                                                    1 -> Color(0xFFC0C0C0).copy(alpha = 0.25f)
-                                                    2 -> Color(0xFFCD7F32).copy(alpha = 0.25f)
+                                                    0 -> VinColors.Accent.copy(alpha = 0.25f)
+                                                    1 -> VinColors.AccentLight.copy(alpha = 0.25f)
+                                                    2 -> Color(0xFF8C7355).copy(alpha = 0.25f)
                                                     else -> VinColors.White20
                                                 }
                                             ),
@@ -301,9 +301,9 @@ fun MusicDnaScreen(
                                             text = (index + 1).toString(),
                                             fontWeight = FontWeight.Bold,
                                             color = when (index) {
-                                                0 -> Color(0xFFFFD700)
-                                                1 -> Color(0xFFE2E2E2)
-                                                2 -> Color(0xFFFFA07A)
+                                                0 -> VinColors.Accent
+                                                1 -> VinColors.AccentLight
+                                                2 -> Color(0xFF8C7355)
                                                 else -> VinColors.Primary
                                             },
                                             fontSize = 14.sp

@@ -206,7 +206,7 @@ fun LibraryScreen(
                     EmptyState(Icons.Default.FavoriteBorder, "No liked songs yet", "Tap the like icon on any song to save it here")
                 } else {
                     val songs = liked.map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
-                    LazyColumn(contentPadding = PaddingValues(bottom = 140.dp)) {
+                    LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
                         item {
                             Card(
                                 modifier = Modifier
@@ -220,9 +220,9 @@ fun LibraryScreen(
                                         .background(
                                             Brush.linearGradient(
                                                 colors = listOf(
-                                                    Color(0xFFEC4899), // Pink
-                                                    Color(0xFF8B5CF6), // Purple
-                                                    Color(0xFF3B82F6)  // Blue
+                                                     Color(0xFFC5A880), // Light Brown
+                                                     Color(0xFF8C7355), // Muted Gold/Brown
+                                                     Color(0xFF1E1A14)  // Charcoal/Dark Brown
                                                 )
                                             )
                                         )
@@ -377,7 +377,7 @@ fun LibraryScreen(
                         if (playlists.isEmpty()) {
                             EmptyState(Icons.Default.LibraryMusic, "No playlists yet", "Create a playlist to organize your music")
                         } else {
-                            LazyColumn(contentPadding = PaddingValues(bottom = 140.dp)) {
+                            LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
                                 items(playlists, key = { it.id }) { pl ->
                                     PlaylistItem(
                                         playlist = pl,
@@ -399,7 +399,7 @@ fun LibraryScreen(
                         } else if (ytPlaylists.isEmpty()) {
                             EmptyState(Icons.Default.CloudQueue, "No online playlists", "Log in or check your YouTube Music account connection")
                         } else {
-                            LazyColumn(contentPadding = PaddingValues(bottom = 140.dp)) {
+                            LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
                                 items(ytPlaylists) { pl ->
                                     YtPlaylistItem(
                                         playlist = pl,
@@ -417,7 +417,7 @@ fun LibraryScreen(
                 if (artists.isEmpty()) {
                     EmptyState(Icons.Default.Person, "No followed artists", "Follow your favorite artists to see them here")
                 } else {
-                    LazyColumn(contentPadding = PaddingValues(bottom = 140.dp)) {
+                    LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
                         items(artists, key = { it.channelId }) { artist ->
                             Row(
                                 modifier = Modifier
@@ -480,7 +480,7 @@ fun LibraryScreen(
                     EmptyState(Icons.Default.History, "No history yet", "Play some songs to see them here")
                 } else {
                     val songs = history.map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
-                    LazyColumn(contentPadding = PaddingValues(bottom = 140.dp)) {
+                    LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
                         item {
                             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                                 horizontalArrangement = Arrangement.End) {

@@ -212,6 +212,9 @@ object PlayerSingleton {
                     Player.STATE_READY     -> {
                         isLoading  = false
                         errorMessage = null
+                        // Reset the per-error retry budget on a successful load so a
+                        // couple of lifetime errors don't permanently disable retry.
+                        errorRetryCount = 0
                         // Re-apply stored playback parameters after song loads
                         reapplyPlaybackParameters()
                         prefetchNextSong()
@@ -470,6 +473,46 @@ object PlayerSingleton {
 
     // ── Queue & Playback Functions (Service/Background Safe) ─────────────────
 
+    private fun buildMediaMetadata(song: VideoItem, artBytes: ByteArray? = null): MediaMetadata {
+        val builder = MediaMetadata.Builder()
+            .setTitle(song.title)
+            .setArtist(song.author)
+
+        if (artBytes != null) {
+            builder.setArtworkData(artBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+        } else {
+            val artUrl = song.thumbnailHd.takeIf { it.isNotBlank() } ?: song.thumbnail
+            if (artUrl.isNotBlank()) {
+                builder.setArtworkUri(android.net.Uri.parse(artUrl))
+            }
+        }
+
+        return builder.build()
+    }
+
+    private fun buildMediaItem(song: VideoItem, url: String? = null, artBytes: ByteArray? = null): MediaItem {
+        val builder = MediaItem.Builder()
+            .setMediaId(song.videoId)
+            .setMediaMetadata(buildMediaMetadata(song, artBytes))
+
+        if (url != null) {
+            builder
+                .setUri(url)
+                .setCustomCacheKey(song.videoId)
+        }
+
+        return builder.build()
+    }
+
+    private fun showPendingSongInSession(song: VideoItem) {
+        try {
+            player.stop()
+            player.setMediaItem(buildMediaItem(song))
+        } catch (e: Exception) {
+            Log.w(TAG, "Pending media item update failed: ${e.message}")
+        }
+    }
+
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun playSong(song: VideoItem) {
         context?.let { acquireWakeLocks(it) }
@@ -485,6 +528,8 @@ object PlayerSingleton {
         errorMessage  = null
         val prefetchedUrlDeferred = nextStreamUrlDeferred
         nextStreamUrlDeferred = null
+
+        showPendingSongInSession(song)
 
 
 
@@ -637,26 +682,10 @@ object PlayerSingleton {
                         Log.e(TAG, "Failed to start VinMusicService in playSong: ${e.message}")
                     }
 
-                    val metaBuilder = MediaMetadata.Builder()
-                        .setTitle(song.title)
-                        .setArtist(song.author)
-
-                    if (artBytes != null) {
-                        metaBuilder.setArtworkData(artBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
-                    } else {
-                        metaBuilder.setArtworkUri(android.net.Uri.parse(song.thumbnailHd))
-                    }
-
-                    val mediaItem = MediaItem.Builder()
-                        .setMediaId(song.videoId)
-                        .setUri(url)
-                        .setCustomCacheKey(song.videoId)
-                        .setMediaMetadata(metaBuilder.build())
-                        .build()
+                    val mediaItem = buildMediaItem(song, url, artBytes)
 
                     Log.d(TAG, "Setting media item: ${url.take(80)}")
                     player.stop()
-                    player.clearMediaItems()
                     
                     if (isCachedComplete) {
                         val cache = if (isDownloadCacheValid) getDownloadCache(ctx) else getCache(ctx)
@@ -950,7 +979,7 @@ object PlayerSingleton {
     fun toggleLike(song: VideoItem) {
         val database = db ?: return
         scope.launch(Dispatchers.IO) {
-            val isCurrentlyLiked = database.likedSongDao().getAll().any { it.videoId == song.videoId }
+            val isCurrentlyLiked = database.likedSongDao().isLiked(song.videoId)
             val nextLiked = if (isCurrentlyLiked) {
                 database.likedSongDao().delete(song.videoId)
                 false

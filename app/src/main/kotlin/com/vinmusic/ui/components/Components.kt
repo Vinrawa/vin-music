@@ -944,10 +944,10 @@ fun UserAvatar(
 ) {
     val gradients = remember {
         listOf(
-            listOf(Color(0xFFEF4444), Color(0xFF991B1B)), // Solid Premium Red
-            listOf(Color(0xFFFF416C), Color(0xFFFF4B2B)), // Pink-Orange
-            listOf(Color(0xFF11998e), Color(0xFF38ef7d)), // Green-Teal
-            listOf(Color(0xFF8A2387), Color(0xFFE94057))  // Violet-Pink-Red
+            listOf(Color(0xFFC5A880), Color(0xFF1E1A14)),
+            listOf(Color(0xFFB39873), Color(0xFF191612)),
+            listOf(Color(0xFFD6BE9C), Color(0xFF2C251C)),
+            listOf(Color(0xFFA38C6D), Color(0xFF171411))
         )
     }
 

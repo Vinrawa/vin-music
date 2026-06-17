@@ -159,7 +159,7 @@ fun AlbumDetailScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    contentPadding = PaddingValues(bottom = 120.dp)
+                    contentPadding = PaddingValues(bottom = 220.dp)
                 ) {
                     // Album Cover & Info Header
                     item {
@@ -181,7 +181,7 @@ fun AlbumDetailScreen(
                                             Brush.linearGradient(
                                                 listOf(
                                                     VinColors.Accent,
-                                                    Color(0xFF7C3AED)
+                                                    VinColors.AccentLight
                                                 )
                                             ),
                                             RoundedCornerShape(24.dp)

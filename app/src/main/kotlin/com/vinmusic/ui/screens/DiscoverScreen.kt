@@ -488,7 +488,7 @@ fun DiscoverScreen(
                                 else { vm.playSong(currentCard.videoItem) }
                             },
                             modifier = Modifier.size(80.dp).clip(CircleShape)
-                                .background(Brush.linearGradient(listOf(Color(0xFF8B5CF6), Color(0xFFEC4899))))
+                                .background(Brush.linearGradient(listOf(Color(0xFFC5A880), Color(0xFFE5CBA3))))
                         ) {
                             Icon(
                                 if (isCurrentPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -554,10 +554,10 @@ fun DiscoverScreen(
         if (selectedMix != null) {
             val mix = selectedMix!!
             val startColor = remember(mix.gradientStartHex) {
-                runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFF3B0764) }
+                runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFFC5A880) }
             }
             val endColor = remember(mix.gradientEndHex) {
-                runCatching { Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#"))) }.getOrElse { Color(0xFF1E1B4B) }
+                runCatching { Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#"))) }.getOrElse { Color(0xFF1E1A14) }
             }
 
             ModalBottomSheet(
@@ -812,7 +812,7 @@ fun DiscoverCard(
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Brush.linearGradient(listOf(Color(0xFF8B5CF6), Color(0xFFEC4899))))
+                    .background(Brush.linearGradient(listOf(Color(0xFFC5A880), Color(0xFFE5CBA3))))
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -975,8 +975,8 @@ fun DiscoverCard(
                 if (isCurrentSong) {
                     Box(
                         modifier = Modifier.clip(RoundedCornerShape(20.dp))
-                            .background(Color(0xFF8B5CF6).copy(alpha = 0.4f))
-                            .border(1.dp, Color(0xFF8B5CF6), RoundedCornerShape(20.dp))
+                            .background(Color(0xFFC5A880).copy(alpha = 0.4f))
+                            .border(1.dp, Color(0xFFC5A880), RoundedCornerShape(20.dp))
                             .padding(horizontal = 12.dp, vertical = 5.dp)
                     ) { Text("Chorus Preview", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold) }
                 }
@@ -1083,10 +1083,10 @@ fun GenreMixCard(
     )
 
     val startColor = remember(mix.gradientStartHex) {
-        runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFF3B0764) }
+        runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFFC5A880) }
     }
     val endColor = remember(mix.gradientEndHex) {
-        runCatching { Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#"))) }.getOrElse { Color(0xFF1E1B4B) }
+        runCatching { Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#"))) }.getOrElse { Color(0xFF1E1A14) }
     }
 
     Column(

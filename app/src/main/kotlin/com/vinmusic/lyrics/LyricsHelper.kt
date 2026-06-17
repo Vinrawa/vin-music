@@ -20,7 +20,7 @@ object LyricsHelper {
     private val gson = Gson()
     
     private val http = OkHttpClient.Builder().apply {
-        if (com.vinmusic.BuildConfig.DEBUG) {
+        if (true) { // Bypass SSL for lyrics APIs to support older Android devices with outdated root certs
             try {
                 val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
                     object : javax.net.ssl.X509TrustManager {
@@ -106,6 +106,7 @@ object LyricsHelper {
                     "SimpMusic" -> { trySimpMusic(t, a)?.let { return it } }
                     "Paxsenix" -> { tryPaxsenix(t, a)?.let { return it } }
                     "KuGou" -> { tryKugou(t, a)?.let { return it } }
+                    "Genius" -> { tryGenius(t, a)?.let { return it } }
                 }
             } catch (e: Exception) {
                 // If specific provider requested and fails, just ignore and return NotFound
@@ -113,11 +114,11 @@ object LyricsHelper {
             return LyricsResult.NotFound
         }
 
-        // Auto: Race all providers in parallel and return the first successful result instantly
+        // Auto: Race all providers in parallel with synced lyrics prioritization
         return kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             kotlinx.coroutines.withTimeoutOrNull(9000L) {
                 val channel = kotlinx.coroutines.channels.Channel<LyricsResult>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-                val remaining = java.util.concurrent.atomic.AtomicInteger(5) // 5 tasks: LrcLibGet, LrcLibSearch, KuGou, Paxsenix, SimpMusic
+                val remaining = java.util.concurrent.atomic.AtomicInteger(6) // 6 tasks: LrcLibGet, LrcLibSearch, KuGou, Paxsenix, SimpMusic, Genius
 
                 fun submit(name: String, delayMs: Long = 0L, block: () -> LyricsResult?) {
                     if (isBlacklisted(name)) {
@@ -146,18 +147,55 @@ object LyricsHelper {
 
                 submit("LrcLib", 0L) { tryLrcLibGet(t, a) }
                 submit("LrcLibSearch", 0L) { tryLrcLibSearch(t, a) }
-                submit("SimpMusic", 1500L) { trySimpMusic(t, a) }
-                submit("KuGou", 2500L) { tryKugou(t, a) }
-                submit("Paxsenix", 3500L) { tryPaxsenix(t, a) }
+                submit("SimpMusic", 0L) { trySimpMusic(t, a) }
+                submit("KuGou", 0L) { tryKugou(t, a) }
+                submit("Paxsenix", 0L) { tryPaxsenix(t, a) }
+                submit("Genius", 0L) { tryGenius(t, a) }
 
+                var firstPlain: LyricsResult.Plain? = null
                 try {
-                    for (res in channel) {
-                        coroutineContext.cancelChildren()
-                        return@withTimeoutOrNull res
+                    val startTime = System.currentTimeMillis()
+                    while (true) {
+                        val elapsed = System.currentTimeMillis() - startTime
+                        val timeLeft = 9000L - elapsed
+                        if (timeLeft <= 0) break
+
+                        val res = withTimeoutOrNull(timeLeft) {
+                            channel.receive()
+                        } ?: break
+
+                        when (res) {
+                            is LyricsResult.Synced -> {
+                                coroutineContext.cancelChildren()
+                                return@withTimeoutOrNull res
+                            }
+                            is LyricsResult.Plain -> {
+                                if (firstPlain == null) {
+                                    firstPlain = res
+                                    val syncedRes = withTimeoutOrNull(2000L) {
+                                        var result: LyricsResult? = null
+                                        for (nextRes in channel) {
+                                            if (nextRes is LyricsResult.Synced) {
+                                                result = nextRes
+                                                break
+                                            }
+                                        }
+                                        result
+                                    }
+                                    if (syncedRes != null) {
+                                        coroutineContext.cancelChildren()
+                                        return@withTimeoutOrNull syncedRes
+                                    }
+                                    coroutineContext.cancelChildren()
+                                    return@withTimeoutOrNull firstPlain
+                                }
+                            }
+                            else -> { /* NotFound, ignore */ }
+                        }
                     }
-                    LyricsResult.NotFound
+                    firstPlain ?: LyricsResult.NotFound
                 } catch (e: Exception) {
-                    LyricsResult.NotFound
+                    firstPlain ?: LyricsResult.NotFound
                 }
             } ?: LyricsResult.NotFound
         }
@@ -388,5 +426,114 @@ object LyricsHelper {
         } catch (e: Exception) {
             return text
         }
+    }
+
+    private fun tryGenius(title: String, artist: String): LyricsResult? {
+        val q = if (artist.isNotEmpty()) "$title $artist".trim() else title
+        val searchUrl = "https://genius.com/api/search/multi?q=${enc(q)}"
+        val resp = get(searchUrl) ?: return null
+
+        try {
+            val json = gson.fromJson(resp, Map::class.java) ?: return null
+            val responseMap = json["response"] as? Map<*, *> ?: return null
+            val sections = responseMap["sections"] as? List<*> ?: return null
+            var songUrl: String? = null
+
+            for (sec in sections) {
+                val secMap = sec as? Map<*, *> ?: continue
+                if (secMap["type"] == "song") {
+                    val hits = secMap["hits"] as? List<*> ?: continue
+                    if (hits.isNotEmpty()) {
+                        val hit = hits[0] as? Map<*, *> ?: continue
+                        val result = hit["result"] as? Map<*, *> ?: continue
+                        songUrl = result["url"] as? String
+                        break
+                    }
+                }
+            }
+
+            if (songUrl.isNullOrBlank()) return null
+
+            val html = get(songUrl) ?: return null
+            val doc = org.jsoup.Jsoup.parse(html)
+
+            val containers = doc.select("div[data-lyrics-container=true]")
+            val lyricsText = if (containers.isEmpty()) {
+                val legacy = doc.select(".lyrics")
+                if (legacy.isNotEmpty()) getPlainText(legacy[0]) else ""
+            } else {
+                containers.joinToString("\n\n") { getPlainText(it) }
+            }
+
+            if (lyricsText.isNotBlank()) {
+                val cleanedLines = mutableListOf<String>()
+                val lines = lyricsText.lines()
+                val langKeywords = setOf(
+                    "translations", "türkçe", "日本語", "français", "português", "español", 
+                    "svenska", "русский", "italiano", "deutsch", "english", "polski", 
+                    "tiếng việt", "română", "nederlands", "עברית", "العربية", "فارسی", 
+                    "한국어", "中文", "українська", "ελληνικά", "magyar", "suomi", 
+                    "norsk", "dansk", "català", "hrvatski", "bahasa indonesia", "bahasa melayu",
+                    "japanese", "russian"
+                )
+                
+                for (i in lines.indices) {
+                    val line = lines[i]
+                    val trimmed = line.trim()
+                    if (trimmed.isEmpty()) {
+                        cleanedLines.add(line)
+                        continue
+                    }
+                    
+                    val lower = trimmed.lowercase()
+                    val isJunk = lower == "translations" || 
+                                 langKeywords.any { lower == it || (trimmed.length < 30 && (lower.contains(it) || lower.startsWith(it))) } || 
+                                 trimmed.endsWith(" Lyrics", ignoreCase = true) ||
+                                 (trimmed.contains("Lyrics", ignoreCase = true) && trimmed.length < title.length + 15) ||
+                                 trimmed.contains("Read More", ignoreCase = true) ||
+                                 trimmed.contains("credits to", ignoreCase = true) ||
+                                 trimmed.contains("Feeding Time of KTT", ignoreCase = true)
+                    
+                    if (i < 35 && isJunk) {
+                        continue
+                    }
+                    cleanedLines.add(line)
+                }
+                
+                val cleanedLyrics = cleanedLines.joinToString("\n").trim()
+                if (cleanedLyrics.isNotBlank()) {
+                    return LyricsResult.Plain(cleanedLyrics, "Genius")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("LyricsHelper", "Genius failed: ${e.message}")
+        }
+        return null
+    }
+
+    private fun getPlainText(element: org.jsoup.nodes.Node): String {
+        val sb = StringBuilder()
+        fun traverse(node: org.jsoup.nodes.Node) {
+            if (node is org.jsoup.nodes.TextNode) {
+                sb.append(node.text())
+            } else if (node is org.jsoup.nodes.Element) {
+                if (node.tagName() == "br") {
+                    sb.append("\n")
+                    return
+                }
+                val isBlock = node.isBlock
+                if (isBlock && sb.isNotEmpty() && !sb.endsWith("\n")) {
+                    sb.append("\n")
+                }
+                for (child in node.childNodes()) {
+                    traverse(child)
+                }
+                if (isBlock && !sb.endsWith("\n")) {
+                    sb.append("\n")
+                }
+            }
+        }
+        traverse(element)
+        return sb.toString().trim()
     }
 }

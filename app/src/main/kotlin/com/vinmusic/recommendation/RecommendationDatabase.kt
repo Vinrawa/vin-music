@@ -25,9 +25,11 @@ data class SpotifyTrack(
 
 @Dao
 interface SpotifyTrackDao {
-    // Find track by exact title or similar title
     @Query("SELECT * FROM tracks WHERE title LIKE '%' || :query || '%' OR artist LIKE '%' || :query || '%' LIMIT 1")
     suspend fun findTrack(query: String): SpotifyTrack?
+
+    @Query("SELECT * FROM tracks WHERE title = :title LIMIT 1")
+    suspend fun findTrackExact(title: String): SpotifyTrack?
     
     // Fast cluster-based nearest neighbor search
     @Query("""

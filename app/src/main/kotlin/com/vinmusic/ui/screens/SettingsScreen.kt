@@ -355,7 +355,7 @@ fun SettingsScreen(
                 .clip(RoundedCornerShape(20.dp))
                 .background(
                     Brush.linearGradient(
-                        listOf(Color(0xFF1A0A2E), Color(0xFF2D1B4E))
+                        listOf(Color(0xFF1E1A14), Color(0xFF101010))
                     )
                 )
                 .border(1.dp, VinColors.Accent.copy(alpha = 0.35f), RoundedCornerShape(20.dp))
@@ -425,7 +425,7 @@ fun SettingsScreen(
                 .clip(RoundedCornerShape(20.dp))
                 .background(
                     Brush.linearGradient(
-                        listOf(Color(0xFF1E1A3C), Color(0xFF0F0B1E))
+                        listOf(Color(0xFF191612), Color(0xFF0A0A0A))
                     )
                 )
                 .border(1.dp, VinColors.AccentLight.copy(alpha = 0.35f), RoundedCornerShape(20.dp))

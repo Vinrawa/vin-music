@@ -44,30 +44,30 @@ object Vin {
 
     object Colors {
         // Backgrounds
-        val Background      = Color(0xFF050508)
-        val BackgroundAlt   = Color(0xFF0A0A12)
-        val Surface         = Color(0xFF0F0F1A)
-        val SurfaceElevated = Color(0xFF141420)
-        val SurfaceCard     = Color(0xFF16162A)
+        val Background      = Color(0xFF070707)
+        val BackgroundAlt   = Color(0xFF0A0A0A)
+        val Surface         = Color(0xFF101010)
+        val SurfaceElevated = Color(0xFF151515)
+        val SurfaceCard     = Color(0xFF1A1A1A)
 
         // Solid elevated surfaces and high-contrast outline borders
-        val Glass           = Color(0xFF141424)
-        val GlassHover      = Color(0xFF1C1C30)
-        val GlassBorder     = Color(0xFF24243A)
-        val GlassBorderHigh = Color(0xFF2E2E4E)
+        val Glass           = Color(0xFF151515)
+        val GlassHover      = Color(0xFF202020)
+        val GlassBorder     = Color(0xFF262626)
+        val GlassBorderHigh = Color(0xFF333333)
 
-        // Accent — hot red → soft pink gradient
-        val Accent          = Color(0xFFFF2D55)
-        val AccentLight     = Color(0xFFFF6B9D)
-        val AccentDim       = Color(0xFFFF2D55).copy(alpha = 0.15f)
-        val AccentGlow      = Color(0xFFFF2D55).copy(alpha = 0.35f)
-        val AccentSurface   = Color(0xFFFF2D55).copy(alpha = 0.08f)
+        // Accent — Light Brown theme
+        val Accent          = Color(0xFFC5A880)
+        val AccentLight     = Color(0xFFE5CBA3)
+        val AccentDim       = Color(0xFFC5A880).copy(alpha = 0.15f)
+        val AccentGlow      = Color(0xFFC5A880).copy(alpha = 0.35f)
+        val AccentSurface   = Color(0xFFC5A880).copy(alpha = 0.08f)
 
         // Text hierarchy
-        val TextPrimary     = Color(0xFFF2F2FF)
-        val TextSecondary   = Color(0xFFAAAACC)
-        val TextMuted       = Color(0xFF666688)
-        val TextDim         = Color(0xFF444466)
+        val TextPrimary     = Color(0xFFF5F5F5)
+        val TextSecondary   = Color(0xFFAAAAAA)
+        val TextMuted       = Color(0xFF666666)
+        val TextDim         = Color(0xFF444444)
 
         // Semantic
         val Success         = Color(0xFF10B981)
@@ -76,14 +76,14 @@ object Vin {
         val Info            = Color(0xFF3B82F6)
 
         // Utility
-        val Divider         = Color(0xFF1C1C2E)
+        val Divider         = Color(0xFF202020)
         val Overlay         = Color(0xFF000000).copy(alpha = 0.5f)
         val Scrim           = Color(0xFF000000).copy(alpha = 0.75f)
 
         // Gradient stops
-        val GradientTop     = Color(0xFF120812)
-        val GradientMid     = Color(0xFF080410)
-        val GradientBottom   = Color(0xFF050508)
+        val GradientTop     = Color(0xFF0E0D0C)
+        val GradientMid     = Color(0xFF080808)
+        val GradientBottom   = Color(0xFF050505)
     }
 
     // ── Gradients ─────────────────────────────────────────────────────────────

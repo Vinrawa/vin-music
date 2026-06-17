@@ -7,17 +7,20 @@ package com.vinmusic.recommendation.genre
  * All query generation logic is deterministic and testable.
  */
 object GenreQueryBuilder {
-    
+
+    /** Current year, used so "fresh/recent" search queries don't silently rot. */
+    private val currentYear: Int = java.time.LocalDate.now().year
+
     /**
      * Builds optimized search queries for Rap/Hip-Hop genre
-     * 
+     *
      * @param subGenre Optional sub-genre: "Trap", "Old School", "Desi Hip-Hop", "UK Drill"
      * @return List of specialized search queries for the sub-genre
      */
     fun buildRapQueries(subGenre: String?): List<String> {
         val baseQueries = when (subGenre?.lowercase()) {
             "trap" -> listOf(
-                "trap music hits 2025",
+                "trap music hits $currentYear",
                 "trap rap popular songs",
                 "trap beats new releases"
             )
@@ -27,29 +30,29 @@ object GenreQueryBuilder {
                 "classic hip hop anthems"
             )
             "desi hip-hop" -> listOf(
-                "desi hip hop 2025",
+                "desi hip hop $currentYear",
                 "hindi rap songs divine kr\$na",
                 "indian hip hop new releases"
             )
             "uk drill" -> listOf(
-                "uk drill 2025",
+                "uk drill $currentYear",
                 "uk drill popular hits",
                 "uk drill new music"
             )
             else -> listOf(
-                "rap hip hop hits 2025",
+                "rap hip hop hits $currentYear",
                 "popular hip hop music",
-                "rap new releases 2025"
+                "rap new releases $currentYear"
             )
         }
         return baseQueries
     }
-    
+
     /**
      * Builds artist spotlight queries for Rap genre
-     * 
+     *
      * Includes queries for Kendrick Lamar, Divine, Kr$na, Eminem, and trending artists
-     * 
+     *
      * @return List of artist-specific search queries
      */
     fun buildRapArtistQueries(): List<String> = listOf(
@@ -57,7 +60,7 @@ object GenreQueryBuilder {
         "divine rapper official songs",
         "kr\$na official tracks",
         "eminem official music",
-        "trending rap artists 2025",
+        "trending rap artists $currentYear",
         "popular hip hop rappers"
     )
     
@@ -91,7 +94,7 @@ object GenreQueryBuilder {
                 "taeyeon official tracks"
             )
             else -> listOf(
-                "kpop hits 2025",
+                "kpop hits $currentYear",
                 "kpop popular songs",
                 "kpop new releases"
             )
@@ -123,7 +126,7 @@ object GenreQueryBuilder {
      */
     fun buildIndieUndiscoveredQueries(): List<String> = listOf(
         "indie unsigned artist new",
-        "underrated indie songs 2025",
+        "underrated indie songs $currentYear",
         "new indie music hidden gems",
         "indie discoveries underground"
     )

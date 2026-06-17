@@ -392,7 +392,7 @@ fun PlaylistDetailScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    contentPadding = PaddingValues(bottom = 120.dp)
+                    contentPadding = PaddingValues(bottom = 220.dp)
                 ) {
                     // Header Card matching Album Detail
                     item {

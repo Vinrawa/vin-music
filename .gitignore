@@ -34,3 +34,6 @@ Thumbs.db
 # Firebase configuration secrets
 /app/google-services.json
 
+# Signing keys
+*.jks
+*.keystore

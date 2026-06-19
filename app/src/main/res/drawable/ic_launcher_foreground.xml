@@ -5,90 +5,33 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Transparent background so it fits any solid container perfectly -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M0,0 L108,0 L108,108 L0,108 Z"/>
+        android:pathData="M0,0 L108,0 L108,108 L0,108 Z" />
 
-    <!-- Outer ring in pure white -->
     <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="1.5"
-        android:pathData="M54,54 m-34,0 a34,34 0 1,0 68,0 a34,34 0 1,0 -68,0"/>
+        android:fillColor="#B99A62"
+        android:pathData="M54,54 m-39,0 a39,39 0,1 0,78 0 a39,39 0,1 0,-78 0" />
 
-    <!-- Inner ring in semi-transparent white -->
     <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="0.8"
-        android:strokeAlpha="0.4"
-        android:pathData="M54,54 m-26,0 a26,26 0 1,0 52,0 a26,26 0 1,0 -52,0"/>
+        android:fillColor="#D7BD82"
+        android:fillAlpha="0.34"
+        android:pathData="M54,54 m-34,0 a34,34 0,1 0,68 0 a34,34 0,1 0,-68 0" />
 
-    <!-- Center hole in white -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,54 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"/>
+        android:fillColor="#806F48"
+        android:fillAlpha="0.30"
+        android:pathData="M19,66 C27,82 40,93 54,93 C76,93 93,76 93,54 C93,48 92,43 90,38 C84,61 66,78 43,78 C34,78 26,74 19,66 Z" />
 
-    <!-- Music note — stem -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M50,34 L54,34 L54,56 L50,56 Z"
-        android:fillAlpha="0.95"/>
+        android:fillColor="#050505"
+        android:pathData="M31,30 C38,30 41,33 48,33 C55,33 58,30 65,30 C72,30 75,33 82,33 L82,40 C75,40 72,37 65,37 C58,37 55,40 48,40 C41,40 38,37 31,37 Z" />
 
-    <!-- Music note — flag top -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,34 Q66,38 64,48 Q60,44 54,44 Z"
-        android:fillAlpha="0.95"/>
+        android:fillColor="#050505"
+        android:pathData="M24,47 C33,47 37,51 46,51 C55,51 59,47 68,47 C77,47 81,51 89,51 L89,59 C81,59 77,55 68,55 C59,55 55,59 46,59 C37,59 33,55 24,55 Z" />
 
-    <!-- Music note — head (filled circle) -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M50,56 m-5,3 a5.5,4 0 1,0 11,0 a5.5,4 0 1,0 -11,0"
-        android:fillAlpha="0.95"/>
-
-    <!-- Sparkle top-right -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M76,26 L77.5,30 L82,31.5 L77.5,33 L76,37 L74.5,33 L70,31.5 L74.5,30 Z"/>
-
-    <!-- Sparkle small bottom-left -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:fillAlpha="0.7"
-        android:pathData="M30,72 L31,74.5 L33.5,75.5 L31,76.5 L30,79 L29,76.5 L26.5,75.5 L29,74.5 Z"/>
-
-    <!-- Sound wave arc left -->
-    <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="2"
-        android:strokeAlpha="0.6"
-        android:pathData="M34,44 Q28,54 34,64"/>
-
-    <!-- Sound wave arc right -->
-    <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="2"
-        android:strokeAlpha="0.6"
-        android:pathData="M74,44 Q80,54 74,64"/>
-
-    <!-- Sound wave outer left -->
-    <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="1.5"
-        android:strokeAlpha="0.35"
-        android:pathData="M28,38 Q18,54 28,70"/>
-
-    <!-- Sound wave outer right -->
-    <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="1.5"
-        android:strokeAlpha="0.35"
-        android:pathData="M80,38 Q90,54 80,70"/>
-
+        android:fillColor="#050505"
+        android:pathData="M19,64 C29,64 34,68 44,68 C54,68 59,64 69,64 C79,64 84,68 89,68 L89,76 C84,76 79,72 69,72 C59,72 54,76 44,76 C34,76 29,72 19,72 Z" />
 </vector>

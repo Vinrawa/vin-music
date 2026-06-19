@@ -73,9 +73,19 @@ fun AlbumDetailScreen(
                     }
                 }
                 
-                android.util.Log.d("AlbumDetail", "Resolved ${resolved.size} songs for $pid")
+                val normalized = resolved
+                    .map { song ->
+                        if (song.author.isBlank() && album.author.isNotBlank()) {
+                            song.copy(author = album.author)
+                        } else {
+                            song
+                        }
+                    }
+                    .distinctBy { albumSongIdentity(it) }
+
+                android.util.Log.d("AlbumDetail", "Resolved ${normalized.size} songs for $pid")
                 withContext(Dispatchers.Main) {
-                    songs = resolved
+                    songs = normalized
                     isLoading = false
                 }
             } catch (e: Exception) {
@@ -176,7 +186,7 @@ fun AlbumDetailScreen(
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(200.dp)
+                                        .size(240.dp)
                                         .background(
                                             Brush.linearGradient(
                                                 listOf(
@@ -184,7 +194,7 @@ fun AlbumDetailScreen(
                                                     VinColors.AccentLight
                                                 )
                                             ),
-                                            RoundedCornerShape(24.dp)
+                                            RoundedCornerShape(6.dp)
                                         )
                                         .padding(2.dp)
                                 ) {
@@ -193,7 +203,7 @@ fun AlbumDetailScreen(
                                         contentDescription = null,
                                         modifier = Modifier
                                             .fillMaxSize()
-                                            .clip(RoundedCornerShape(22.dp)),
+                                            .clip(RoundedCornerShape(4.dp)),
                                         contentScale = ContentScale.Crop
                                     )
                                 }
@@ -394,6 +404,24 @@ fun AlbumDetailScreen(
             }
         }
     }
+}
+
+private fun albumSongIdentity(song: VideoItem): String {
+    val title = song.title
+        .lowercase()
+        .replace(Regex("""\([^)]*\)|\[[^]]*]"""), " ")
+        .replace(Regex("""(?i)\bofficial\b|\bmusic video\b|\baudio\b|\blyrics?\b|\bfull song\b|\bvisualizer\b|\bhd\b|\b4k\b"""), " ")
+        .replace(Regex("""(?i)\bfeat\.?\b.*|\bft\.?\b.*"""), " ")
+        .replace(Regex("""[^\p{L}\p{N}\s]"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+    val author = song.author
+        .lowercase()
+        .replace(" - topic", "")
+        .replace(Regex("""[^\p{L}\p{N}\s]"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+    return "$title|$author"
 }
 
 @Composable

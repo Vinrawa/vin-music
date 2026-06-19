@@ -38,6 +38,18 @@ import androidx.compose.ui.viewinterop.AndroidView
 import android.webkit.CookieManager
 import android.widget.Toast
 
+private fun libraryMonthlyListenersText(source: String): String {
+    val compact = source
+        .replace(Regex("""@\S+"""), "")
+        .replace("subscribers", "", ignoreCase = true)
+        .replace("subscriber", "", ignoreCase = true)
+        .replace(Regex("""\bartist\b""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""[•|·]+"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+    return if (compact.isBlank()) "" else "$compact Monthly Listeners"
+}
+
 @OptIn(UnstableApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
@@ -454,7 +466,7 @@ fun LibraryScreen(
                                     if (artist.subscriberCount.isNotEmpty()) {
                                         Spacer(Modifier.height(2.dp))
                                         Text(
-                                            text = artist.subscriberCount,
+                                            text = libraryMonthlyListenersText(artist.subscriberCount),
                                             color = VinColors.Secondary,
                                             fontSize = 13.sp,
                                             maxLines = 1
@@ -597,14 +609,14 @@ fun LibraryScreen(
                         val url = importUrl.trim()
                         if (url.isNotEmpty()) {
                             isImporting = true
-                            importProgress = "Analyzing link..."
+                            importProgress = "Loading"
                             scope.launch(Dispatchers.IO) {
                                 try {
                                     val isSpotify = url.contains("spotify.com")
                                     val isYouTube = url.contains("list=") || url.contains("youtube.com") || url.contains("youtu.be")
                                     
                                     if (isSpotify) {
-                                        importProgress = "Fetching Spotify metadata..."
+                                        importProgress = "Loading"
                                         val (playlistName, trackQueries) = InnerTube.importSpotifyPlaylist(url)
                                         if (trackQueries.isEmpty()) {
                                             launch(Dispatchers.Main) {
@@ -653,7 +665,7 @@ fun LibraryScreen(
                                             url
                                         }
                                         
-                                        importProgress = "Fetching YouTube playlist..."
+                                        importProgress = "Loading"
                                         val (playlistName, songs) = InnerTube.getPlaylistSongs(playlistId)
                                         if (songs.isEmpty()) {
                                             launch(Dispatchers.Main) {

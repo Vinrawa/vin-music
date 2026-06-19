@@ -126,6 +126,7 @@ fun MusicDnaScreen(
                 Text("Not enough listening data yet.\nKeep discovering music!", color = VinColors.Secondary, textAlign = TextAlign.Center)
             }
         } else {
+            val dna = profile!!
             // Infinite gradient mesh background
             val infiniteTransition = rememberInfiniteTransition(label = "dna_bg")
             val blob1X by infiniteTransition.animateFloat(
@@ -183,13 +184,13 @@ fun MusicDnaScreen(
                             )
                             
                             val moodText = when {
-                                profile!!.valence > 65 -> "Happy & Upbeat"
-                                profile!!.valence < 35 -> "Dark & Emotional"
+                                dna.valence > 65 -> "Happy & Upbeat"
+                                dna.valence < 35 -> "Dark & Emotional"
                                 else -> "Chill & Balanced"
                             }
                             val primaryColor = when {
-                                profile!!.valence > 65 -> VinColors.AccentLight
-                                profile!!.valence < 35 -> Color(0xFF8C7355)
+                                dna.valence > 65 -> VinColors.AccentLight
+                                dna.valence < 35 -> Color(0xFF8C7355)
                                 else -> VinColors.Accent
                             }
                             
@@ -205,13 +206,13 @@ fun MusicDnaScreen(
                             
                             Spacer(modifier = Modifier.height(8.dp))
                             
-                            DnaStatBar("Energy", profile!!.energy, VinColors.Accent, Icons.Default.ElectricBolt)
-                            DnaStatBar("Danceability", profile!!.danceability, VinColors.AccentLight, Icons.Default.DirectionsRun)
-                            DnaStatBar("Acousticness", profile!!.acousticness, Color(0xFF8C7355), Icons.Default.Spa)
+                            DnaStatBar("Energy", dna.energy, VinColors.Accent, Icons.Default.ElectricBolt)
+                            DnaStatBar("Danceability", dna.danceability, VinColors.AccentLight, Icons.Default.DirectionsRun)
+                            DnaStatBar("Acousticness", dna.acousticness, Color(0xFF8C7355), Icons.Default.Spa)
                             
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                "Average Tempo: ${profile!!.tempo} BPM",
+                                "Average Tempo: ${dna.tempo} BPM",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = VinColors.Secondary,
@@ -250,7 +251,7 @@ fun MusicDnaScreen(
                             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Icon(Icons.Default.TrendingUp, null, tint = VinColors.Accent)
                                 Text("Taste Trend", fontSize = 12.sp, color = VinColors.Secondary)
-                                Text("Exploring more ${if (profile!!.energy > 60) "Energetic" else "Acoustic"} vibes recently.", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = VinColors.Primary, lineHeight = 18.sp)
+                                Text("Exploring more ${if (dna.energy > 60) "Energetic" else "Acoustic"} vibes recently.", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = VinColors.Primary, lineHeight = 18.sp)
                             }
                         }
                         

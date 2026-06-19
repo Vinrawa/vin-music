@@ -37,3 +37,13 @@ Thumbs.db
 # Signing keys
 *.jks
 *.keystore
+
+# Large local logs / debug artifacts (machine-generated, should not be tracked)
+logcat.txt
+build_log.txt
+mood_hist_clean.txt
+
+# Local working notes / regression snapshots (keep local, don't commit)
+*_OLD.txt
+*_regression.txt
+regression_diff.txt

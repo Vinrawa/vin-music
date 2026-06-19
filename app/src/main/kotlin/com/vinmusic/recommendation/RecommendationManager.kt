@@ -54,6 +54,7 @@ object RecommendationManager {
     
     // Cache recommendations for 15 minutes to prevent frequent network requests
     private const val CACHE_EXPIRY_MS = 15 * 60 * 1000L
+    private const val CACHE_SCHEMA_VERSION = 3
     private var lastCacheTime: Long = 0L
     private val cachedSections = ArrayList<Pair<String, List<RecommendedSong>>>()
     
@@ -131,6 +132,7 @@ object RecommendationManager {
             prefs.edit()
                 .putString("cached_sections", json)
                 .putLong("cached_time", System.currentTimeMillis())
+                .putInt("cache_schema_version", CACHE_SCHEMA_VERSION)
                 .apply()
             Log.d(TAG, "Saved recommendations to disk cache.")
         } catch (e: Exception) {
@@ -141,6 +143,10 @@ object RecommendationManager {
     private fun loadFromDisk(ctx: Context): List<Pair<String, List<RecommendedSong>>>? {
         try {
             val prefs = ctx.getSharedPreferences("vin_music_recommendation_cache", Context.MODE_PRIVATE)
+            if (prefs.getInt("cache_schema_version", 0) != CACHE_SCHEMA_VERSION) {
+                prefs.edit().remove("cached_sections").remove("cached_time").apply()
+                return null
+            }
             val json = prefs.getString("cached_sections", null) ?: return null
             val time = prefs.getLong("cached_time", 0L)
             
@@ -431,7 +437,7 @@ object RecommendationManager {
 
         // 1. Language Detection
         var language = "English"
-        val punjabiKeywords = listOf("punjabi", "jatt", "munde", "kudi", "patiala", "punjab", "sidhu", "moose wala", "dhillon", "aujla", "dosanjh", "shubh", "singh", "garry", "bhangra", "kaur")
+        val punjabiKeywords = listOf("punjabi", "jatt", "munde", "kudi", "patiala", "punjab", "sidhu", "moose wala", "dhillon", "aujla", "dosanjh", "shubh", "garry", "bhangra", "kaur")
         val hindiKeywords = listOf("hindi", "bollywood", "arijit", "kakkar", "nautiyal", "aslam", "sonu nigam", "shreya", "alkas", "udit", "kumars", "pritam", "ar rahman", "t-series", "zee music", "yrf", "dil", "pyar", "tujhe", "ho", "tum", "yaar", "tere", "ishq", "mohabbat", "kiya", "meri", "hum", "channa", "mereya", "raataan", "lambiyan", "sajna", "duniya", "zindagi", "sanam")
         val tamilKeywords = listOf("tamil", "anirudh", "arrahman", "ilayaraja", "kadhal", "kadhala", "kollywood", "yuvan", "srinivas", "vijay", "ajith", "kamal", "rajini")
         val koreanKeywords = listOf("k-pop", "bts", "blackpink", "twice", "korean", "newjeans", "stray kids", "exo", "jungkook", "jimin", "seventeen")
@@ -771,7 +777,7 @@ object RecommendationManager {
         val now = System.currentTimeMillis()
         
         synchronized(cachedMixes) {
-            if (!forceRefresh && lastMixCacheTime > 0 && (now - lastMixCacheTime < CACHE_EXPIRY_MS) && cachedMixes.isNotEmpty()) {
+            if (!forceRefresh && cachedMixes.isNotEmpty()) {
                 return@withContext ArrayList(cachedMixes)
             }
         }
@@ -1165,10 +1171,9 @@ object RecommendationManager {
             else -> "Midnight Sanctuary"
         }
 
-        // 2. Validate memory cache: invalidate if time-of-day has shifted!
+        // 2. Memory cache is stale-first. Only forceRefresh should replace it.
         synchronized(cachedSections) {
-            val hasActiveTimeSection = cachedSections.any { it.first == expectedTimeSectionKey }
-            if (!forceRefresh && lastCacheTime > 0 && (now - lastCacheTime < CACHE_EXPIRY_MS) && hasActiveTimeSection && cachedSections.isNotEmpty()) {
+            if (!forceRefresh && cachedSections.isNotEmpty()) {
                 val totalSongs = cachedSections.sumOf { it.second.size }
                 if (totalSongs > 0) {
                     Log.d(TAG, "Returning memory cached personalized sections.")
@@ -1177,28 +1182,18 @@ object RecommendationManager {
                     cachedSections.clear()
                     lastCacheTime = 0L
                 }
-            } else if (!hasActiveTimeSection) {
-                lastCacheTime = 0L
-                cachedSections.clear()
             }
         }
 
-        // 3. Validate disk cache: invalidate if time-of-day has shifted!
+        // 3. Disk cache is also stale-first; manual pull refresh clears/replaces it.
         if (!forceRefresh) {
             val disk = loadFromDisk(ctx)
             if (disk != null && disk.isNotEmpty()) {
-                val hasActiveTimeSection = disk.any { it.first == expectedTimeSectionKey }
-                val prefs = ctx.getSharedPreferences("vin_music_recommendation_cache", Context.MODE_PRIVATE)
-                val cachedTime = prefs.getLong("cached_time", 0L)
-                if (hasActiveTimeSection && (now - cachedTime < CACHE_EXPIRY_MS)) {
-                    synchronized(cachedSections) {
-                        cachedSections.clear()
-                        cachedSections.addAll(disk)
-                    }
-                    return@withContext disk
-                } else {
-                    prefs.edit().remove("cached_sections").remove("cached_time").apply()
+                synchronized(cachedSections) {
+                    cachedSections.clear()
+                    cachedSections.addAll(disk)
                 }
+                return@withContext disk
             }
         }
 
@@ -1223,22 +1218,30 @@ object RecommendationManager {
             .filter { it.isNotBlank() && it.lowercase() != "unknown" && !isCorporateOrDistributorChannel(it) }
         val cleanListenedCount = listenedArtists.map { normalizeArtistName(it) }.distinct().size
 
-        val fallbackMoreFromArtists = listOf("Arijit Singh", "Sidhu Moose Wala", "Karan Aujla")
+        val fallbackMoreFromArtists = listOf(
+            "Arijit Singh", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh",
+            "The Weeknd", "Drake", "Anuv Jain", "Travis Scott"
+        )
         val topArtistsList = profile.topArtists.map { it.first }.filter { it.isNotBlank() }
         
         // Cold start safety rule: If user has heard fewer than 5 different artists overall, 
         // don't lock their feed onto J. Cole. Suggest highly diverse fallback artists instead!
         val moreFromArtists = if (cleanListenedCount >= 5) {
-            topArtistsList.take(3)
+            topArtistsList.take(5)
         } else {
-            fallbackMoreFromArtists
+            fallbackMoreFromArtists.take(5)
         }
         
         // Add a separate CurationTask per artist
         for (artistName in moreFromArtists) {
             tasks.add(CurationTask(
                 sectionKey = "More from $artistName",
-                queries = listOf("$artistName official audio popular", "$artistName hit songs"),
+                queries = listOf(
+                    "$artistName official audio popular",
+                    "$artistName hit songs",
+                    "$artistName deep cuts official",
+                    "$artistName live session acoustic"
+                ),
                 seedItem = null,
                 sourceType = "more_from_artist"
             ))
@@ -1271,12 +1274,103 @@ object RecommendationManager {
         }
         
         val similarQueries = if (similarSeed != null) {
-            listOf("${similarSeed.author} similar music", "${similarSeed.title} similar")
+            listOf(
+                "${similarSeed.author} similar music",
+                "${similarSeed.title} similar",
+                "${similarSeed.author} radio mix",
+                "${similarSeed.author} fans also like"
+            )
         } else {
-            listOf("chill acoustic aesthetic hits", "indie music sessions popular")
+            listOf("chill acoustic aesthetic hits", "indie music sessions popular", "fresh hindi indie pop", "global viral music discovery")
         }
         val seedVideo = similarSeed?.let { VideoItem(it.videoId, it.title, it.author, it.durationText) }
         tasks.add(CurationTask("Similar songs", similarQueries, seedVideo, "similar_songs"))
+
+        val topGenresForShelves = profile.topGenres.map { it.first }.filter { it.isNotBlank() }.take(4)
+        for (genre in topGenresForShelves) {
+            tasks.add(CurationTask(
+                sectionKey = "$genre for you",
+                queries = listOf(
+                    "$genre official hits",
+                    "$genre fresh releases",
+                    "$genre underrated songs",
+                    "$genre playlist 2026"
+                ),
+                seedItem = null,
+                sourceType = "genre_for_you"
+            ))
+        }
+
+        val topMoodsForShelves = profile.topMoods.map { it.first }.filter { it.isNotBlank() }.take(3)
+        for (mood in topMoodsForShelves) {
+            tasks.add(CurationTask(
+                sectionKey = "$mood mood",
+                queries = listOf(
+                    "$mood music official songs",
+                    "$mood playlist popular",
+                    "$mood songs hindi english punjabi",
+                    "$mood indie pop music"
+                ),
+                seedItem = null,
+                sourceType = "mood_for_you"
+            ))
+        }
+
+        val topLanguagesForShelves = profile.topLanguages.map { it.first }.filter { it.isNotBlank() }.take(3)
+        for (language in topLanguagesForShelves) {
+            tasks.add(CurationTask(
+                sectionKey = "$language picks",
+                queries = listOf(
+                    "$language songs latest hits",
+                    "$language music official audio",
+                    "$language indie pop playlist",
+                    "$language romantic energetic songs"
+                ),
+                seedItem = null,
+                sourceType = "language_for_you"
+            ))
+        }
+
+        val adjacentArtists = moreFromArtists
+            .flatMap { artistName ->
+                val norm = normalizeArtistName(artistName)
+                SIMILAR_ARTISTS_MAP.entries.firstOrNull { normalizeArtistName(it.key) == norm }?.value ?: emptyList()
+            }
+            .distinctBy { normalizeArtistName(it) }
+            .filter { similar -> moreFromArtists.none { normalizeArtistName(it) == normalizeArtistName(similar) } }
+            .take(6)
+        if (adjacentArtists.isNotEmpty()) {
+            tasks.add(CurationTask(
+                sectionKey = "Fans also like",
+                queries = adjacentArtists.flatMap { artist -> listOf("$artist official songs", "$artist popular tracks") },
+                seedItem = null,
+                sourceType = "artists_like"
+            ))
+        }
+
+        tasks.add(CurationTask(
+            sectionKey = "Fresh finds",
+            queries = listOf(
+                "new music releases 2026 official audio",
+                "fresh indie pop songs 2026",
+                "underrated artists songs 2026",
+                "new hindi punjabi english songs"
+            ),
+            seedItem = null,
+            sourceType = "fresh_finds"
+        ))
+
+        tasks.add(CurationTask(
+            sectionKey = "Deep cuts & hidden gems",
+            queries = listOf(
+                "underrated music hidden gems",
+                "deep cuts official audio",
+                "lesser known indie songs",
+                "underrated rap bollywood punjabi songs"
+            ),
+            seedItem = null,
+            sourceType = "hidden_gems"
+        ))
 
         // 5. Dynamic Time-of-Day Curation Task
         val timeCuration = when (expectedTimeSectionKey) {
@@ -1449,6 +1543,10 @@ object RecommendationManager {
                         "rewind_listen_back" -> "Familiar song from your history"
                         "artists_like"   -> "Artist similarity matches TasteDNA"
                         "similar_songs"  -> "Acoustically matches your top song"
+                        "genre_for_you"  -> "Matches your strongest genre"
+                        "mood_for_you"   -> "Fits your recent mood"
+                        "language_for_you" -> "Matches your listening language"
+                        "fresh_finds"    -> "Fresh discovery for your taste"
                         "trending_songs" -> "Trending official hit"
                         "hidden_gems"    -> "Acoustically matches underrated gem"
                         "morning_vibe"   -> "Perfect acoustic start for your morning"
@@ -1470,19 +1568,19 @@ object RecommendationManager {
                 if (task.sourceType == "more_from_artist") {
                     // For artist-specific shelves, bypass the global capping and select a randomized subset of the top 15 matches
                     // to guarantee highly relevant yet completely fresh/different tracks on reload!
-                    val topCandidates = distinctScored.take(15).shuffled()
+                    val topCandidates = distinctScored.take(24).shuffled()
                     for (rec in topCandidates) {
-                        if (selected.size >= 8) break
+                        if (selected.size >= 12) break
                         selected.add(rec)
                     }
                 } else {
-                    // Incorporate strict GLOBAL ARTIST CAPPING: max 2 songs per artist combined for general/time-of-day mixes
+                    // Incorporate GLOBAL ARTIST CAPPING: max 3 songs per artist combined for general/time-of-day mixes.
                     for (rec in distinctScored) {
-                        if (selected.size >= 8) break
+                        if (selected.size >= 12) break
                         val artLow = rec.videoItem.author.lowercase(Locale.ROOT)
                         val globalCount = globalArtistCounts[artLow] ?: 0
                         
-                        if (globalCount < 2) {
+                        if (globalCount < 3) {
                             selected.add(rec)
                             globalArtistCounts[artLow] = globalCount + 1
                         }
@@ -1505,7 +1603,11 @@ object RecommendationManager {
             Log.w(TAG, "Advanced curation resulted in empty shelves, generating premium default charts.")
             try {
                 val fallbackQueries = listOf(
-                    "Discover Weekly" to "acoustic warm indie pop songs"
+                    "Discover Weekly" to "acoustic warm indie pop songs",
+                    "Fresh Hindi & Punjabi" to "new hindi punjabi songs official audio",
+                    "Global Pop Radar" to "global pop hits official music",
+                    "Rap Rotation" to "hip hop rap official songs trending",
+                    "Late Night Chill" to "late night chill lofi indie songs"
                 )
                 for ((title, query) in fallbackQueries) {
                     val results = InnerTube.search(query)
@@ -1513,7 +1615,7 @@ object RecommendationManager {
                         .filter { !isCompilationTrack(it.title, it.durationText) }
                         .filter { !isNonMusicVideo(it.title, it.author) }
                         .filter { !isUnofficialContent(it.title, it.author) }
-                        .take(8).map { item ->
+                        .take(12).map { item ->
                             RecommendedSong(item, 50.0, "curated", "Discover Weekly hit")
                         }
                     if (songs.size >= 3) {
@@ -1530,7 +1632,7 @@ object RecommendationManager {
             val distinctCompilations = compilationSongs.distinctBy { it.videoItem.videoId }
                 .distinctBy { "${normalizeTitle(it.videoItem.title)}|${it.videoItem.author.lowercase(Locale.ROOT)}" }
                 .sortedByDescending { it.score }
-                .take(8)
+                .take(12)
             if (distinctCompilations.size >= 3) {
                 newSections.add("Jukebox & Compilations" to distinctCompilations)
             }

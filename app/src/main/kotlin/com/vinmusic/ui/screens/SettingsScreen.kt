@@ -231,12 +231,6 @@ fun SettingsScreen(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = "Music Enthusiast",
-                        fontSize = 12.sp,
-                        color = VinColors.Secondary
-                    )
                 }
 
                 Row(
@@ -924,11 +918,8 @@ fun SettingsScreen(
                         "230 Hz" to vm.eqBass to { v: Float -> vm.eqBass = v; vm.applyEQ() },
                         "910 Hz" to vm.eqLowMid to { v: Float -> vm.eqLowMid = v; vm.applyEQ() },
                         "4 kHz" to vm.eqMid to { v: Float -> vm.eqMid = v; vm.applyEQ() },
-                        "14 kHz" to vm.eqTreble to { v: Float -> 
-                            vm.eqTreble = v
-                            vm.eqAir = v
-                            vm.applyEQ()
-                        }
+                        "8 kHz" to vm.eqTreble to { v: Float -> vm.eqTreble = v; vm.applyEQ() },
+                        "16 kHz" to vm.eqAir to { v: Float -> vm.eqAir = v; vm.applyEQ() }
                     ).forEach { item ->
                         val pair = item.first
                         val onValChange = item.second

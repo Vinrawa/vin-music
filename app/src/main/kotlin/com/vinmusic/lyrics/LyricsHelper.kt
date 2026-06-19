@@ -64,7 +64,7 @@ object LyricsHelper {
         blacklistedProviders[provider] = System.currentTimeMillis()
     }
 
-    fun fetch(title: String, artist: String, videoId: String = "", provider: String = "Auto"): LyricsResult {
+    fun fetch(title: String, artist: String, videoId: String = "", provider: String = "Auto", durationMs: Long = 0L): LyricsResult {
         var t = cleanTitle(title)
         var a = cleanArtist(artist)
 
@@ -100,8 +100,8 @@ object LyricsHelper {
             try {
                 when (provider) {
                     "LrcLib" -> {
-                        tryLrcLibGet(t, a)?.let { return it }
-                        tryLrcLibSearch(t, a)?.let { return it }
+                        tryLrcLibGet(t, a, durationMs)?.let { return it }
+                        tryLrcLibSearch(t, a, durationMs)?.let { return it }
                     }
                     "SimpMusic" -> { trySimpMusic(t, a)?.let { return it } }
                     "Paxsenix" -> { tryPaxsenix(t, a)?.let { return it } }
@@ -114,91 +114,47 @@ object LyricsHelper {
             return LyricsResult.NotFound
         }
 
-        // Auto: Race all providers in parallel with synced lyrics prioritization
-        return kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
-            kotlinx.coroutines.withTimeoutOrNull(9000L) {
-                val channel = kotlinx.coroutines.channels.Channel<LyricsResult>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-                val remaining = java.util.concurrent.atomic.AtomicInteger(6) // 6 tasks: LrcLibGet, LrcLibSearch, KuGou, Paxsenix, SimpMusic, Genius
+        // Auto: sequential provider fallback — try each provider in order and
+        // return the FIRST usable result. This restores the pre-regression
+        // behavior that produced correctly-synced lyrics. The old "parallel
+        // race with longest-synced tie-break" picked shifted/community LRC
+        // variants, causing lyrics to lag in some parts and jump ahead in others.
+        //
+        // Order: LrcLib → Genius → SimpMusic → KuGou → Paxsenix
+        // Synced results return immediately. A Plain result from an early
+        // provider is remembered as a fallback while we keep trying later
+        // providers for a Synced version.
+        val providers: List<Pair<String, () -> LyricsResult?>> = listOf(
+            "LrcLib"     to { tryLrcLibGet(t, a, durationMs) ?: tryLrcLibSearch(t, a, durationMs) },
+            "Genius"     to { tryGenius(t, a) },
+            "SimpMusic"  to { trySimpMusic(t, a) },
+            "KuGou"      to { tryKugou(t, a) },
+            "Paxsenix"   to { tryPaxsenix(t, a) }
+        )
 
-                fun submit(name: String, delayMs: Long = 0L, block: () -> LyricsResult?) {
-                    if (isBlacklisted(name)) {
-                        if (remaining.decrementAndGet() == 0) channel.close()
-                        return
-                    }
-                    launch {
-                        try {
-                            if (delayMs > 0) kotlinx.coroutines.delay(delayMs)
-                            val res = block()
-                            if (res != null) {
-                                channel.trySend(res)
-                            }
-                        } catch (e: Exception) {
-                            android.util.Log.e("LyricsHelper", "Provider $name failed: ${e.message}")
-                            if (e is javax.net.ssl.SSLException) {
-                                markFailed(name)
-                            }
-                        } finally {
-                            if (remaining.decrementAndGet() == 0) {
-                                channel.close()
-                            }
-                        }
-                    }
+        var fallbackPlain: LyricsResult.Plain? = null
+        for ((name, provider) in providers) {
+            if (isBlacklisted(name)) continue
+            val res = try {
+                provider()
+            } catch (e: Exception) {
+                android.util.Log.e("LyricsHelper", "Provider $name failed: ${e.message}")
+                if (e is javax.net.ssl.SSLException) markFailed(name)
+                null
+            }
+            when (res) {
+                is LyricsResult.Synced -> {
+                    android.util.Log.d("LyricsHelper", "Lyrics found via $name (synced)")
+                    return res
                 }
-
-                submit("LrcLib", 0L) { tryLrcLibGet(t, a) }
-                submit("LrcLibSearch", 0L) { tryLrcLibSearch(t, a) }
-                submit("SimpMusic", 0L) { trySimpMusic(t, a) }
-                submit("KuGou", 0L) { tryKugou(t, a) }
-                submit("Paxsenix", 0L) { tryPaxsenix(t, a) }
-                submit("Genius", 0L) { tryGenius(t, a) }
-
-                var firstPlain: LyricsResult.Plain? = null
-                try {
-                    val startTime = System.currentTimeMillis()
-                    while (true) {
-                        val elapsed = System.currentTimeMillis() - startTime
-                        val timeLeft = 9000L - elapsed
-                        if (timeLeft <= 0) break
-
-                        val res = withTimeoutOrNull(timeLeft) {
-                            channel.receive()
-                        } ?: break
-
-                        when (res) {
-                            is LyricsResult.Synced -> {
-                                coroutineContext.cancelChildren()
-                                return@withTimeoutOrNull res
-                            }
-                            is LyricsResult.Plain -> {
-                                if (firstPlain == null) {
-                                    firstPlain = res
-                                    val syncedRes = withTimeoutOrNull(2000L) {
-                                        var result: LyricsResult? = null
-                                        for (nextRes in channel) {
-                                            if (nextRes is LyricsResult.Synced) {
-                                                result = nextRes
-                                                break
-                                            }
-                                        }
-                                        result
-                                    }
-                                    if (syncedRes != null) {
-                                        coroutineContext.cancelChildren()
-                                        return@withTimeoutOrNull syncedRes
-                                    }
-                                    coroutineContext.cancelChildren()
-                                    return@withTimeoutOrNull firstPlain
-                                }
-                            }
-                            else -> { /* NotFound, ignore */ }
-                        }
-                    }
-                    firstPlain ?: LyricsResult.NotFound
-                } catch (e: Exception) {
-                    firstPlain ?: LyricsResult.NotFound
+                is LyricsResult.Plain -> {
+                    android.util.Log.d("LyricsHelper", "Lyrics found via $name (plain) — keeping as fallback")
+                    if (fallbackPlain == null) fallbackPlain = res
                 }
-            } ?: LyricsResult.NotFound
+                else -> { /* NotFound or null — try next provider */ }
+            }
         }
+        return fallbackPlain ?: LyricsResult.NotFound
     }
 
     private fun cleanTitle(title: String): String {
@@ -232,14 +188,15 @@ object LyricsHelper {
     }
 
     // ── LrcLib direct GET ──────────────────────────────────────────────────────
-    private fun tryLrcLibGet(title: String, artist: String): LyricsResult? {
+    private fun tryLrcLibGet(title: String, artist: String, durationMs: Long = 0L): LyricsResult? {
         if (artist.isEmpty()) return null
-        val url = "https://lrclib.net/api/get?track_name=${enc(title)}&artist_name=${enc(artist)}"
+        val durationParam = if (durationMs > 0L) "&duration=${durationMs / 1000L}" else ""
+        val url = "https://lrclib.net/api/get?track_name=${enc(title)}&artist_name=${enc(artist)}$durationParam"
         val resp = get(url) ?: return null
         return parseLrcLibItem(resp, "LrcLib")
     }
 
-    private fun tryLrcLibSearch(title: String, artist: String): LyricsResult? {
+    private fun tryLrcLibSearch(title: String, artist: String, durationMs: Long = 0L): LyricsResult? {
         val urls = mutableListOf<String>()
         if (artist.isNotEmpty()) {
             urls.add("https://lrclib.net/api/search?track_name=${enc(title)}&artist_name=${enc(artist)}")
@@ -252,11 +209,63 @@ object LyricsHelper {
             try {
                 val arr = gson.fromJson(resp, List::class.java) ?: continue
                 if (arr.isEmpty()) continue
-                val firstItem = gson.toJson(arr[0])
-                parseLrcLibItem(firstItem, "LrcLib")?.let { return it }
+                // Pre-regression behavior: take the FIRST relevant result.
+                // Do NOT rank by duration or by syncedLyrics length — that
+                // picked shifted/community LRC variants and caused drift.
+                for (item in arr) {
+                    val itemMap = item as? Map<*, *> ?: continue
+                    parseLrcLibItem(gson.toJson(itemMap), "LrcLib")?.let { return it }
+                }
             } catch (_: Exception) { continue }
         }
         return null
+    }
+
+    private fun scoreLrcLibCandidate(item: Map<*, *>, title: String, artist: String, durationMs: Long): Double {
+        val candidateTitle = (item["trackName"] as? String).orEmpty()
+        val candidateArtist = (item["artistName"] as? String).orEmpty()
+        val candidateDurationMs = ((item["duration"] as? Number)?.toLong() ?: 0L) * 1000L
+
+        val titleScore = lyricTextSimilarity(title, candidateTitle)
+        val artistScore = if (artist.isBlank() || candidateArtist.isBlank()) {
+            0.35
+        } else {
+            lyricTextSimilarity(artist, candidateArtist)
+        }
+        val durationScore = if (durationMs > 0L && candidateDurationMs > 0L) {
+            val diff = kotlin.math.abs(durationMs - candidateDurationMs)
+            when {
+                diff <= 2_500L -> 1.0
+                diff <= 7_500L -> 0.75
+                diff <= 15_000L -> 0.45
+                else -> 0.0
+            }
+        } else {
+            0.35
+        }
+        val syncedBonus = if (!(item["syncedLyrics"] as? String).isNullOrBlank()) 0.12 else 0.0
+        return (titleScore * 0.48) + (artistScore * 0.28) + (durationScore * 0.24) + syncedBonus
+    }
+
+    private fun lyricTextSimilarity(left: String, right: String): Double {
+        val a = normalizeForLyricsMatch(left)
+        val b = normalizeForLyricsMatch(right)
+        if (a.isBlank() || b.isBlank()) return 0.0
+        if (a == b) return 1.0
+        if (a.contains(b) || b.contains(a)) return 0.82
+        val aTokens = a.split(" ").filter { it.length > 1 }.toSet()
+        val bTokens = b.split(" ").filter { it.length > 1 }.toSet()
+        if (aTokens.isEmpty() || bTokens.isEmpty()) return 0.0
+        return aTokens.intersect(bTokens).size.toDouble() / aTokens.union(bTokens).size.toDouble()
+    }
+
+    private fun normalizeForLyricsMatch(text: String): String {
+        return cleanTitle(text)
+            .lowercase()
+            .replace(Regex("""\b(feat|ft|with)\b.*"""), " ")
+            .replace(Regex("""[^a-z0-9\u0900-\u097F\u0A00-\u0A7F\s]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
     }
 
     private fun parseLrcLibItem(json: String, source: String): LyricsResult? {
@@ -265,8 +274,13 @@ object LyricsHelper {
             val lrc   = item["syncedLyrics"] as? String
             val plain = item["plainLyrics"] as? String
             when {
-                !lrc.isNullOrBlank()   -> LyricsResult.Synced(parseLrc(lrc), source)
-                !plain.isNullOrBlank() -> LyricsResult.Plain(plain, source)
+                !lrc.isNullOrBlank() -> {
+                    val lines = parseLrc(lrc)
+                    if (lines.isNotEmpty()) LyricsResult.Synced(lines, source) else null
+                }
+                !plain.isNullOrBlank() -> sanitizePlainLyrics(plain)
+                    .takeIf { it.isNotBlank() }
+                    ?.let { LyricsResult.Plain(it, source) }
                 else                   -> null
             }
         } catch (_: Exception) { null }
@@ -285,8 +299,13 @@ object LyricsHelper {
             val lrc   = json["syncedLyrics"] as? String
             val plain = json["plainLyrics"] as? String
             when {
-                !lrc.isNullOrBlank()   -> LyricsResult.Synced(parseLrc(lrc), "Paxsenix")
-                !plain.isNullOrBlank() -> LyricsResult.Plain(plain, "Paxsenix")
+                !lrc.isNullOrBlank() -> {
+                    val lines = parseLrc(lrc)
+                    if (lines.isNotEmpty()) LyricsResult.Synced(lines, "Paxsenix") else null
+                }
+                !plain.isNullOrBlank() -> sanitizePlainLyrics(plain)
+                    .takeIf { it.isNotBlank() }
+                    ?.let { LyricsResult.Plain(it, "Paxsenix") }
                 else                   -> null
             }
         } catch (_: Exception) { null }
@@ -294,17 +313,202 @@ object LyricsHelper {
 
     // ── LRC parser ─────────────────────────────────────────────────────────────
     fun parseLrc(lrc: String): List<LyricsLine> {
-        val re = Regex("""^\[(\d{2}):(\d{2})[\.\:](\d{2,3})\](.*)""")
+        val timestampRegex = Regex("""\[(\d{1,2}):(\d{2})[\.:](\d{1,3})]""")
         return lrc.lines()
-            .mapNotNull { re.matchEntire(it.trim()) }
-            .map { m ->
-                val ms = m.groupValues[1].toLong() * 60_000 +
-                         m.groupValues[2].toLong() * 1_000 +
-                         m.groupValues[3].padEnd(3,'0').take(3).toLong()
-                LyricsLine(ms, m.groupValues[4].trim())
+            .flatMap { rawLine ->
+                val line = rawLine.trim()
+                val matches = timestampRegex.findAll(line).toList()
+                if (matches.isEmpty()) return@flatMap emptyList()
+                val text = line
+                    .replace(timestampRegex, "")
+                    .replace(Regex("""<\d{1,2}:\d{2}[\.:]\d{1,3}>"""), "")
+                    .trim()
+                if (text.isEmpty() || isNonLyricLine(text)) return@flatMap emptyList()
+                matches.map { m ->
+                    val ms = m.groupValues[1].toLong() * 60_000 +
+                            m.groupValues[2].toLong() * 1_000 +
+                            m.groupValues[3].padEnd(3, '0').take(3).toLong()
+                    LyricsLine(ms, text)
+                }
             }
-            .filter { it.text.isNotEmpty() }
+            .distinctBy { "${it.timeMs}|${it.text}" }
             .sortedBy { it.timeMs }
+    }
+
+    private fun sanitizePlainLyrics(text: String): String {
+        return text
+            .replace("\u00A0", " ")
+            .lines()
+            .map { it.trim() }
+            .filter { line -> line.isEmpty() || !isNonLyricLine(line) }
+            .joinToString("\n")
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
+    }
+
+    private fun isNonLyricLine(raw: String): Boolean {
+        val text = raw.trim().trim('[', ']', '(', ')', '{', '}').trim()
+        if (text.isBlank()) return false
+        val lower = text.lowercase()
+
+        if (Regex("""^\d+\s+contributors?$""", RegexOption.IGNORE_CASE).matches(text)) return true
+        if (Regex("""^contributors?$""", RegexOption.IGNORE_CASE).matches(text)) return true
+        if (Regex("""^\d+\s*(embed|translations?)$""", RegexOption.IGNORE_CASE).matches(text)) return true
+
+        val sectionLine = Regex(
+            """^(intro|outro|verse|chorus|pre[-\s]?chorus|post[-\s]?chorus|bridge|hook|refrain|interlude|instrumental|drop|break|spoken|sample|skit|part|segue)(\s+\d+|\s+[ivx]+)?(\s*[:.-].*)?$""",
+            RegexOption.IGNORE_CASE
+        )
+        if (sectionLine.matches(text)) return true
+
+        val junkPhrases = listOf(
+            "you might also like",
+            "embed",
+            "read more",
+            "see live",
+            "get tickets",
+            "track info",
+            "produced by",
+            "written by",
+            "release date",
+            "translations",
+            "lyrics",
+            "album",
+            "contributors"
+        )
+        if (junkPhrases.any { lower == it || (text.length < 42 && lower.startsWith(it)) }) return true
+
+        val languages = setOf(
+            "english", "hindi", "punjabi", "urdu", "spanish", "espanol", "francais",
+            "portugues", "deutsch", "italiano", "turkce", "japanese", "russian",
+            "korean", "chinese", "arabic", "romanization", "translation"
+        )
+        if (text.length < 24 && lower in languages) return true
+
+        return false
+    }
+
+    private fun mergeSyncedWithGeniusText(
+        synced: LyricsResult.Synced,
+        title: String,
+        artist: String
+    ): LyricsResult.Synced? {
+        val genius = tryGenius(title, artist) as? LyricsResult.Plain ?: return null
+        val geniusLines = sanitizePlainLyrics(genius.text)
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        val syncedLines = synced.lines
+            .filter { it.text.isNotBlank() }
+            .sortedBy { it.timeMs }
+
+        if (geniusLines.size < 4 || syncedLines.size < 4) return null
+
+        val averageSyncedWords = syncedLines
+            .map { it.text.split(Regex("\\s+")).count { word -> word.isNotBlank() } }
+            .average()
+        if (averageSyncedWords <= 2.4 && syncedLines.size > geniusLines.size) {
+            return LyricsResult.Synced(
+                mapTextLinesToTimeline(geniusLines, syncedLines),
+                "${synced.source} timeline + Genius"
+            )
+        }
+
+        val merged = mutableListOf<LyricsLine>()
+        var plainCursor = 0
+        var matched = 0
+
+        syncedLines.forEachIndexed { index, syncedLine ->
+            val searchStart = plainCursor.coerceAtMost(geniusLines.lastIndex)
+            val searchEnd = (plainCursor + 8).coerceAtMost(geniusLines.lastIndex)
+            var bestIndex = -1
+            var bestScore = 0.0
+
+            for (candidateIndex in searchStart..searchEnd) {
+                val score = lyricLineSimilarity(syncedLine.text, geniusLines[candidateIndex])
+                if (score > bestScore) {
+                    bestScore = score
+                    bestIndex = candidateIndex
+                }
+            }
+
+            if (bestIndex >= 0 && bestScore >= 0.46) {
+                merged.add(LyricsLine(syncedLine.timeMs, geniusLines[bestIndex]))
+                plainCursor = bestIndex + 1
+                matched++
+            } else {
+                val ratioIndex = ((index.toDouble() / syncedLines.size.toDouble()) * geniusLines.size)
+                    .toInt()
+                    .coerceIn(0, geniusLines.lastIndex)
+                val ratioScore = lyricLineSimilarity(syncedLine.text, geniusLines[ratioIndex])
+                if (ratioScore >= 0.58) {
+                    merged.add(LyricsLine(syncedLine.timeMs, geniusLines[ratioIndex]))
+                    plainCursor = (ratioIndex + 1).coerceAtLeast(plainCursor)
+                    matched++
+                } else {
+                    merged.add(syncedLine)
+                }
+            }
+        }
+
+        val confidence = matched.toDouble() / syncedLines.size.toDouble()
+        if (confidence < 0.42) {
+            if (geniusLines.size < 2) return null
+            val lastSyncedIndex = (syncedLines.size - 1).coerceAtLeast(1)
+            val lastGeniusIndex = (geniusLines.size - 1).coerceAtLeast(0)
+            val orderMapped = syncedLines.mapIndexed { index, syncedLine ->
+                val ratioIndex = ((index.toDouble() / lastSyncedIndex.toDouble()) * lastGeniusIndex.toDouble())
+                    .toInt()
+                    .coerceIn(0, geniusLines.lastIndex)
+                LyricsLine(syncedLine.timeMs, geniusLines[ratioIndex])
+            }.distinctBy { "${it.timeMs}|${it.text}" }
+            return LyricsResult.Synced(orderMapped, "${synced.source} timeline + Genius")
+        }
+        return LyricsResult.Synced(merged, "${synced.source} + Genius")
+    }
+
+    private fun mapTextLinesToTimeline(
+        textLines: List<String>,
+        timeline: List<LyricsLine>
+    ): List<LyricsLine> {
+        if (textLines.isEmpty() || timeline.isEmpty()) return emptyList()
+        val lastTextIndex = (textLines.size - 1).coerceAtLeast(1)
+        val lastTimelineIndex = (timeline.size - 1).coerceAtLeast(0)
+        return textLines.mapIndexed { index, text ->
+            val timelineIndex = if (textLines.size == 1) {
+                0
+            } else {
+                ((index.toDouble() / lastTextIndex.toDouble()) * lastTimelineIndex.toDouble())
+                    .toInt()
+                    .coerceIn(0, timeline.lastIndex)
+            }
+            LyricsLine(timeline[timelineIndex].timeMs, text)
+        }.distinctBy { "${it.timeMs}|${it.text}" }
+    }
+
+    private fun lyricLineSimilarity(left: String, right: String): Double {
+        val a = lyricTokens(left)
+        val b = lyricTokens(right)
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        val common = a.intersect(b).size.toDouble()
+        val union = a.union(b).size.toDouble().coerceAtLeast(1.0)
+        val jaccard = common / union
+        val leftNorm = a.joinToString(" ")
+        val rightNorm = b.joinToString(" ")
+        val containsBoost = if (leftNorm.contains(rightNorm) || rightNorm.contains(leftNorm)) 0.22 else 0.0
+        return (jaccard + containsBoost).coerceAtMost(1.0)
+    }
+
+    private fun lyricTokens(text: String): Set<String> {
+        return text
+            .lowercase()
+            .replace(Regex("""\([^)]*\)|\[[^]]*]"""), " ")
+            .replace(Regex("""[^a-z0-9\u0900-\u097F\u0A00-\u0A7F\s']"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .split(" ")
+            .filter { it.length > 1 }
+            .toSet()
     }
 
     fun get(url: String): String? {
@@ -336,8 +540,13 @@ object LyricsHelper {
             val plain = lyricsData["plain"] as? String
             
             when {
-                !lrc.isNullOrBlank() -> return LyricsResult.Synced(parseLrc(lrc), "SimpMusic")
-                !plain.isNullOrBlank() -> return LyricsResult.Plain(plain, "SimpMusic")
+                !lrc.isNullOrBlank() -> {
+                    val lines = parseLrc(lrc)
+                    if (lines.isNotEmpty()) return LyricsResult.Synced(lines, "SimpMusic")
+                }
+                !plain.isNullOrBlank() -> sanitizePlainLyrics(plain)
+                    .takeIf { it.isNotBlank() }
+                    ?.let { return LyricsResult.Plain(it, "SimpMusic") }
             }
         } catch (_: Exception) {}
         return null
@@ -371,7 +580,9 @@ object LyricsHelper {
                 if (lines.isNotEmpty()) {
                     LyricsResult.Synced(lines, "KuGou")
                 } else {
-                    LyricsResult.Plain(lrcString, "KuGou")
+                    sanitizePlainLyrics(lrcString)
+                        .takeIf { it.isNotBlank() }
+                        ?.let { LyricsResult.Plain(it, "KuGou") }
                 }
             } else {
                 null
@@ -500,7 +711,7 @@ object LyricsHelper {
                     cleanedLines.add(line)
                 }
                 
-                val cleanedLyrics = cleanedLines.joinToString("\n").trim()
+                val cleanedLyrics = sanitizePlainLyrics(cleanedLines.joinToString("\n"))
                 if (cleanedLyrics.isNotBlank()) {
                     return LyricsResult.Plain(cleanedLyrics, "Genius")
                 }

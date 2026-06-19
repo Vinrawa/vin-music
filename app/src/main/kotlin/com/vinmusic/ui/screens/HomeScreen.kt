@@ -109,6 +109,21 @@ data class QuickPlaylist(
     val gradEnd: Color
 )
 
+private data class HomeRefreshPayload(
+    val recommendationSections: List<Pair<String, List<com.vinmusic.recommendation.RecommendedSong>>>,
+    val spotifyMixes: List<com.vinmusic.recommendation.SpotifyMix>,
+    val quickPicks: List<VideoItem>,
+    val ytMusicSections: List<com.vinmusic.innertube.YTMusicHomeSection>,
+    val ytLibraryPlaylists: List<AlbumItem>,
+    val recommendedRadio: List<VideoItem>,
+    val recommendedAlbums: List<AlbumItem>
+)
+
+private data class PlaylistSectionCache(
+    val title: String,
+    val playlists: List<AlbumItem>
+)
+
 private val QUICK_PLAYLISTS = listOf(
     QuickPlaylist("Chill Vibes", "chill lofi hindi music",  Icons.Default.MusicNote,  Color(0xFFC5A880), Color(0xFF1E1A14)),
     QuickPlaylist("Workout",    "gym workout music 2025",  Icons.Default.Bolt,       Color(0xFFB39873), Color(0xFF191612)),
@@ -131,6 +146,28 @@ fun HomeScreen(
     val ctx   = LocalContext.current
     val db    = com.vinmusic.data.db.VinDatabase.getInstance(ctx)
     val prefs = remember(ctx) { ctx.getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE) }
+    val playlistSectionCachePrefs = remember(ctx) { ctx.getSharedPreferences("home_playlist_section_cache", Context.MODE_PRIVATE) }
+    val homeGson = remember { Gson() }
+
+    fun loadPlaylistSectionCache(key: String): List<Pair<String, List<AlbumItem>>> {
+        return try {
+            val json = playlistSectionCachePrefs.getString(key, null) ?: return emptyList()
+            val type = object : TypeToken<List<PlaylistSectionCache>>() {}.type
+            val cached: List<PlaylistSectionCache> = homeGson.fromJson(json, type)
+            cached.map { it.title to it.playlists }.filter { it.second.isNotEmpty() }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun savePlaylistSectionCache(key: String, sections: List<Pair<String, List<AlbumItem>>>) {
+        if (sections.none { it.second.isNotEmpty() }) return
+        val payload = sections.map { PlaylistSectionCache(it.first, it.second) }
+        playlistSectionCachePrefs.edit()
+            .putString(key, homeGson.toJson(payload))
+            .putLong("${key}_time", System.currentTimeMillis())
+            .apply()
+    }
 
     var userName       by remember { mutableStateOf(prefs.getString("user_name", "Vin") ?: "Vin") }
     var avatarIndex    by remember { mutableIntStateOf(prefs.getInt("user_avatar_idx", 0)) }
@@ -178,6 +215,7 @@ fun HomeScreen(
     var selectedRecommendedPlaylist by remember { mutableStateOf<com.vinmusic.innertube.AlbumItem?>(null) }
     var recommendedPlaylistSongs by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var isLoadingPlaylistSongs by remember { mutableStateOf(false) }
+    val remotePlaylistSongsCache = remember { mutableStateMapOf<String, List<VideoItem>>() }
 
     var recommendationSections by remember { mutableStateOf<List<Pair<String, List<com.vinmusic.recommendation.RecommendedSong>>>>(emptyList()) }
     var spotifyMixes by remember { mutableStateOf<List<com.vinmusic.recommendation.SpotifyMix>>(emptyList()) }
@@ -206,6 +244,7 @@ fun HomeScreen(
     var recommendedRadio by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var isLoadingRecommendedRadio by remember { mutableStateOf(false) }
     var radioSeedSong by remember { mutableStateOf<VideoItem?>(null) }
+    var lastRadioSeedId by remember { mutableStateOf("") }
 
     var ytMusicSections by remember { mutableStateOf<List<com.vinmusic.innertube.YTMusicHomeSection>>(emptyList()) }
     var isLoadingYtHome by remember { mutableStateOf(false) }
@@ -235,11 +274,10 @@ fun HomeScreen(
                     cachePrefs.edit().clear().apply()
                 }
 
-                val cachedJson = cachePrefs.getString("playlists_json", null)
-                val cacheTime = cachePrefs.getLong("cache_time", 0L)
+                val cachedJson = cachePrefs.getString("playlists_json_v3", null)
                 val now = System.currentTimeMillis()
 
-                if (cachedJson != null && !forceRefresh && (now - cacheTime < 2 * 60 * 60 * 1000L)) {
+                if (cachedJson != null && !forceRefresh) {
                     val type = object : com.google.gson.reflect.TypeToken<List<com.vinmusic.innertube.AlbumItem>>() {}.type
                     val list: List<com.vinmusic.innertube.AlbumItem> = com.google.gson.Gson().fromJson(cachedJson, type)
                     if (list.isNotEmpty()) {
@@ -338,10 +376,10 @@ fun HomeScreen(
                     "viral reels trending songs"
                 )
 
-                // Fill up to 5 queries
+                // Fill a wider query set so recommendations do not collapse to the same few shelves.
                 val shuffledFallbacks = defaultFallbackPool.shuffled()
                 var fallbackIndex = 0
-                while (uniqueQueries.size < 5 && fallbackIndex < shuffledFallbacks.size) {
+                while (uniqueQueries.size < 10 && fallbackIndex < shuffledFallbacks.size) {
                     val query = shuffledFallbacks[fallbackIndex]
                     if (!uniqueQueries.any { it.lowercase().trim() == query.lowercase().trim() }) {
                         uniqueQueries.add(query)
@@ -349,8 +387,8 @@ fun HomeScreen(
                     fallbackIndex++
                 }
 
-                // Shuffle the queries to provide randomized variety on each reload, and take top 3
-                val finalQueries = uniqueQueries.shuffled().take(3)
+                // Shuffle the queries to provide randomized variety on each reload.
+                val finalQueries = uniqueQueries.shuffled().take(7)
 
                 val allResults = mutableListOf<com.vinmusic.innertube.AlbumItem>()
                 coroutineScope {
@@ -370,17 +408,17 @@ fun HomeScreen(
                     .distinctBy { it.playlistId }
                     .filter { it.playlistId.startsWith("PL") || it.playlistId.startsWith("VL") }
                     .shuffled() // Shuffle results to avoid identical layouts on every render
-                    .take(8)
+                    .take(16)
 
                 if (uniquePlaylists.isNotEmpty()) {
                     cachePrefs.edit()
-                        .putString("playlists_json", com.google.gson.Gson().toJson(uniquePlaylists))
+                        .putString("playlists_json_v3", com.google.gson.Gson().toJson(uniquePlaylists))
                         .putLong("cache_time", now)
                         .apply()
                 }
 
                 withContext(Dispatchers.Main) {
-                    recommendedPlaylists = uniquePlaylists
+                    if (uniquePlaylists.isNotEmpty()) recommendedPlaylists = uniquePlaylists
                 }
             } catch (e: Exception) {
                 android.util.Log.e("HomeScreen", "Failed to load recommended playlists", e)
@@ -391,6 +429,133 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+    suspend fun loadAutoHomeRecommendationSections(): List<Pair<String, List<com.vinmusic.recommendation.RecommendedSong>>> {
+        val sections = mutableListOf<Pair<String, List<com.vinmusic.recommendation.RecommendedSong>>>()
+        val signals = try { db.interactionSignalDao().getAll() } catch (_: Exception) { emptyList() }
+        val history = try { db.historyDao().getAllHistory() } catch (_: Exception) { emptyList() }
+
+        val repeatPool = (signals
+            .sortedWith(
+                compareByDescending<com.vinmusic.data.db.InteractionSignal> { it.repeatCount * 4 + it.playCount + if (it.isLiked) 8 else 0 }
+                    .thenByDescending { it.lastPlayedAt }
+            )
+            .map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
+            history.take(40).map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
+            .distinctBy { it.videoId }
+            .take(12)
+            .mapIndexed { index, item ->
+                com.vinmusic.recommendation.RecommendedSong(
+                    videoItem = item,
+                    score = (100 - index).toDouble(),
+                    source = "repeat_rewind",
+                    reason = "On repeat"
+                )
+            }
+        if (repeatPool.isNotEmpty()) {
+            sections.add("On Repeat" to repeatPool)
+        }
+
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        val vibeQuery = if (hour in 17..20) {
+            "sunset vibe energy songs official"
+        } else {
+            "energetic feel good songs official"
+        }
+        val vibeCachePrefs = ctx.getSharedPreferences("home_auto_video_cache", Context.MODE_PRIVATE)
+        val vibeCacheKey = "sunset_energy_videos"
+        val cachedVibeSongs = try {
+            val cachedJson = vibeCachePrefs.getString(vibeCacheKey, null)
+            if (cachedJson.isNullOrBlank()) {
+                emptyList()
+            } else {
+                val type = object : TypeToken<List<VideoItem>>() {}.type
+                homeGson.fromJson<List<VideoItem>>(cachedJson, type).orEmpty()
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+        val vibeSourceSongs = cachedVibeSongs.ifEmpty {
+            try {
+                InnerTube.search(vibeQuery)
+                    .filterNot { song ->
+                        com.vinmusic.recommendation.RecommendationManager.isNonMusicVideo(song.title, song.author) ||
+                            com.vinmusic.recommendation.RecommendationManager.isUnofficialContent(song.title, song.author)
+                    }
+                    .distinctBy { it.videoId }
+                    .take(10)
+                    .also { list ->
+                        if (list.isNotEmpty()) {
+                            vibeCachePrefs.edit()
+                                .putString(vibeCacheKey, homeGson.toJson(list))
+                                .putLong("${vibeCacheKey}_time", System.currentTimeMillis())
+                                .apply()
+                        }
+                    }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+        val vibeSongs = vibeSourceSongs.take(10).mapIndexed { index, item ->
+            com.vinmusic.recommendation.RecommendedSong(
+                videoItem = item,
+                score = (90 - index).toDouble(),
+                source = "sunset_energy",
+                reason = "Sunset energy"
+            )
+        }
+        if (vibeSongs.isNotEmpty()) {
+            sections.add("Sunset Vibe & Energy" to vibeSongs)
+        }
+
+        return sections
+    }
+
+    suspend fun loadRepeatRewindMix(): com.vinmusic.recommendation.SpotifyMix? {
+        val signals = try { db.interactionSignalDao().getAll() } catch (_: Exception) { emptyList() }
+        val history = try { db.historyDao().getAllHistory() } catch (_: Exception) { emptyList() }
+        val songs = (signals
+            .sortedWith(
+                compareByDescending<com.vinmusic.data.db.InteractionSignal> { it.repeatCount * 4 + it.playCount + if (it.isLiked) 8 else 0 }
+                    .thenByDescending { it.lastPlayedAt }
+            )
+            .map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
+            history.take(60).map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
+            .distinctBy { it.videoId }
+            .take(8)
+            .mapIndexed { index, item ->
+                com.vinmusic.recommendation.RecommendedSong(
+                    videoItem = item,
+                    score = (100 - index).toDouble(),
+                    source = "repeat_rewind",
+                    reason = "Your repeat"
+                )
+            }
+        if (songs.isEmpty()) return null
+        return com.vinmusic.recommendation.SpotifyMix(
+            id = "repeat_rewind",
+            title = "Repeat Rewind",
+            description = "Your most replayed tracks.",
+            songs = songs,
+            gradientStartHex = "0xFFA38C6D",
+            gradientEndHex = "0xFF171411"
+        )
+    }
+
+    suspend fun loadLocalQuickPicks(): List<VideoItem> {
+        val signals = try { db.interactionSignalDao().getAll() } catch (_: Exception) { emptyList() }
+        val history = try { db.historyDao().getAllHistory() } catch (_: Exception) { emptyList() }
+        return (signals
+            .sortedWith(
+                compareByDescending<com.vinmusic.data.db.InteractionSignal> { it.playCount + it.repeatCount * 3 + if (it.isLiked) 8 else 0 }
+                    .thenByDescending { it.lastPlayedAt }
+            )
+            .map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
+            history.take(50).map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
+            .filter { it.videoId.isNotBlank() && it.title.isNotBlank() }
+            .distinctBy { it.videoId }
+            .take(18)
     }
 
     fun triggerRefresh() {
@@ -405,33 +570,50 @@ fun HomeScreen(
                 ctx.getSharedPreferences("long_listens_cache", Context.MODE_PRIVATE).edit().clear().apply()
                 ctx.getSharedPreferences("recommended_albums_cache", Context.MODE_PRIVATE).edit().clear().apply()
                 ctx.getSharedPreferences("recommended_playlists_cache", Context.MODE_PRIVATE).edit().clear().apply()
+                ctx.getSharedPreferences("home_playlist_section_cache", Context.MODE_PRIVATE).edit().clear().apply()
+                ctx.getSharedPreferences("home_auto_video_cache", Context.MODE_PRIVATE).edit().clear().apply()
                 
                 loadRecommendedPlaylists(forceRefresh = true)
 
                 // Concurrently resolve all recommendation and network streams
-                val recs = com.vinmusic.recommendation.RecommendationManager.getRecommendations(ctx, forceRefresh = true)
-                val mixes = com.vinmusic.recommendation.RecommendationManager.getSpotifyMixes(ctx, forceRefresh = true)
-                val qp = try { vm.recommendationRepository.getQuickPicks() } catch (_: Exception) { emptyList() }
-                val yt = try { vm.recommendationRepository.getYouTubeMusicHomeSections() } catch (_: Exception) { emptyList() }
-                val playlists = try {
-                    if (YTMusicSession.hasCookie(ctx)) vm.recommendationRepository.getLibraryPlaylists() else emptyList()
-                } catch (_: Exception) { emptyList() }
-                
                 val seed = radioSeedSong
-                val rad = if (seed != null) {
-                    try { vm.recommendationRepository.getSongRadio(seed.videoId) } catch (_: Exception) { emptyList() }
-                } else emptyList()
-                
-                val albumsResult = try { InnerTube.searchAll("best hindi albums playlist 2025").albums.take(6) } catch (_: Exception) { emptyList() }
+                val (recs, mixes, qp, yt, playlists, rad, albumsResult) = coroutineScope {
+                    val recsDeferred = async { com.vinmusic.recommendation.RecommendationManager.getRecommendations(ctx, forceRefresh = true) }
+                    val mixesDeferred = async { com.vinmusic.recommendation.RecommendationManager.getSpotifyMixes(ctx, forceRefresh = true) }
+                    val qpDeferred = async { try { vm.recommendationRepository.getQuickPicks() } catch (_: Exception) { emptyList() } }
+                    val ytDeferred = async { try { vm.recommendationRepository.getYouTubeMusicHomeSections() } catch (_: Exception) { emptyList() } }
+                    val playlistsDeferred = async {
+                        try {
+                            if (YTMusicSession.hasCookie(ctx)) vm.recommendationRepository.getLibraryPlaylists() else emptyList()
+                        } catch (_: Exception) { emptyList() }
+                    }
+                    val radDeferred = async {
+                        if (seed != null) {
+                            try { vm.recommendationRepository.getSongRadio(seed.videoId) } catch (_: Exception) { emptyList() }
+                        } else emptyList()
+                    }
+                    val albumsDeferred = async {
+                        try { InnerTube.searchAll("best hindi albums playlist 2025").albums.take(6) } catch (_: Exception) { emptyList() }
+                    }
+                    HomeRefreshPayload(
+                        recsDeferred.await(),
+                        mixesDeferred.await(),
+                        qpDeferred.await(),
+                        ytDeferred.await(),
+                        playlistsDeferred.await(),
+                        radDeferred.await(),
+                        albumsDeferred.await()
+                    )
+                }
 
                 // Single unified Main thread dispatch
                 withContext(Dispatchers.Main) {
                     recommendationSections = recs
                     spotifyMixes = mixes
                     quickPicks = qp
-                    ytMusicSections = yt
+                    if (yt.isNotEmpty()) ytMusicSections = yt
                     ytMusicConnected = YTMusicSession.hasCookie(ctx)
-                    ytLibraryPlaylists = playlists
+                    if (playlists.isNotEmpty()) ytLibraryPlaylists = playlists
                     if (rad.isNotEmpty()) {
                         recommendedRadio = rad
                     }
@@ -449,25 +631,51 @@ fun HomeScreen(
         }
     }
 
+    fun mergeRecommendationSections(
+        fastSections: List<Pair<String, List<com.vinmusic.recommendation.RecommendedSong>>>,
+        fullSections: List<Pair<String, List<com.vinmusic.recommendation.RecommendedSong>>>
+    ): List<Pair<String, List<com.vinmusic.recommendation.RecommendedSong>>> {
+        if (fullSections.isEmpty()) return fastSections
+        val merged = LinkedHashMap<String, List<com.vinmusic.recommendation.RecommendedSong>>()
+        fastSections.forEach { (title, songs) ->
+            if (songs.isNotEmpty()) merged[title] = songs
+        }
+        fullSections.forEach { (title, songs) ->
+            if (songs.isNotEmpty()) merged[title] = songs
+        }
+        return merged.entries.map { it.key to it.value }
+    }
+
     LaunchedEffect(Unit) {
-        loadRecommendedPlaylists()
         scope.launch(Dispatchers.IO) {
             try {
                 isRecommendationsLoading = true
-                val recs = com.vinmusic.recommendation.RecommendationManager.getRecommendations(ctx, forceRefresh = false)
-                recommendationSections = recs
+                val fastRecs = loadAutoHomeRecommendationSections()
+                withContext(Dispatchers.Main) {
+                    recommendationSections = fastRecs
+                }
+                val fullRecs = kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                    com.vinmusic.recommendation.RecommendationManager.getRecommendations(ctx, forceRefresh = false)
+                }.orEmpty()
+                if (fullRecs.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        recommendationSections = mergeRecommendationSections(fastRecs, fullRecs)
+                    }
+                }
             } catch (e: Exception) {
                 android.util.Log.e("HomeScreen", "Failed to load recommendations: ${e.message}")
             } finally {
-                isRecommendationsLoading = false
+                withContext(Dispatchers.Main) {
+                    isRecommendationsLoading = false
+                }
             }
         }
         scope.launch(Dispatchers.IO) {
             try {
                 isLoadingMixes = true
-                val mixes = com.vinmusic.recommendation.RecommendationManager.getSpotifyMixes(ctx, forceRefresh = false)
+                val rewindMix = loadRepeatRewindMix()
                 withContext(Dispatchers.Main) {
-                    spotifyMixes = mixes
+                    spotifyMixes = listOfNotNull(rewindMix)
                     isLoadingMixes = false
                 }
             } catch (e: Exception) {
@@ -480,9 +688,18 @@ fun HomeScreen(
         scope.launch(Dispatchers.IO) {
             try {
                 isLoadingQuickPicks = true
-                val qp = vm.recommendationRepository.getQuickPicks()
+                val local = loadLocalQuickPicks()
+                if (local.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        if (quickPicks.isEmpty()) quickPicks = local
+                        isLoadingQuickPicks = false
+                    }
+                }
+                val qp = kotlinx.coroutines.withTimeoutOrNull(4500L) {
+                    vm.recommendationRepository.getQuickPicks()
+                }.orEmpty()
                 withContext(Dispatchers.Main) {
-                    quickPicks = qp
+                    if (qp.isNotEmpty()) quickPicks = qp
                     isLoadingQuickPicks = false
                 }
             } catch (e: Exception) {
@@ -495,29 +712,30 @@ fun HomeScreen(
         scope.launch(Dispatchers.IO) {
             try {
                 isLoadingYtHome = true
-                val yt = vm.recommendationRepository.getYouTubeMusicHomeSections()
+                isLoadingYtPlaylists = YTMusicSession.hasCookie(ctx)
+                val (ytHome, ytPlaylists) = coroutineScope {
+                    val homeDeferred = async { runCatching { vm.recommendationRepository.getYouTubeMusicHomeSections() }.getOrDefault(emptyList()) }
+                    val playlistsDeferred = async {
+                        if (YTMusicSession.hasCookie(ctx)) {
+                            runCatching { vm.recommendationRepository.getLibraryPlaylists() }.getOrDefault(emptyList())
+                        } else {
+                            emptyList()
+                        }
+                    }
+                    homeDeferred.await() to playlistsDeferred.await()
+                }
                 withContext(Dispatchers.Main) {
-                    ytMusicSections = yt
+                    if (ytHome.isNotEmpty()) ytMusicSections = ytHome
+                    if (ytPlaylists.isNotEmpty()) ytLibraryPlaylists = ytPlaylists
                     ytMusicConnected = YTMusicSession.hasCookie(ctx)
                     isLoadingYtHome = false
+                    isLoadingYtPlaylists = false
                 }
             } catch (e: Exception) {
-                android.util.Log.e("HomeScreen", "Failed to load YT Music home: ${e.message}")
-                withContext(Dispatchers.Main) { isLoadingYtHome = false }
-            }
-        }
-        scope.launch(Dispatchers.IO) {
-            if (YTMusicSession.hasCookie(ctx)) {
-                try {
-                    isLoadingYtPlaylists = true
-                    val playlists = vm.recommendationRepository.getLibraryPlaylists()
-                    withContext(Dispatchers.Main) {
-                        ytLibraryPlaylists = playlists
-                        isLoadingYtPlaylists = false
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("HomeScreen", "Failed to load YT playlists: ${e.message}")
-                    withContext(Dispatchers.Main) { isLoadingYtPlaylists = false }
+                android.util.Log.e("HomeScreen", "Failed to load YouTube Music shelves: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    isLoadingYtHome = false
+                    isLoadingYtPlaylists = false
                 }
             }
         }
@@ -528,20 +746,8 @@ fun HomeScreen(
             if (key == "yt_music_cookie") {
                 val connected = YTMusicSession.hasCookie(ctx)
                 ytMusicConnected = connected
-                if (connected) {
-                    scope.launch(Dispatchers.IO) {
-                        try {
-                            isLoadingYtPlaylists = true
-                            val playlists = vm.recommendationRepository.getLibraryPlaylists()
-                            withContext(Dispatchers.Main) {
-                                ytLibraryPlaylists = playlists
-                                isLoadingYtPlaylists = false
-                            }
-                        } catch (_: Exception) {
-                            withContext(Dispatchers.Main) { isLoadingYtPlaylists = false }
-                        }
-                    }
-                } else {
+                isLoadingYtPlaylists = false
+                if (!connected) {
                     ytLibraryPlaylists = emptyList()
                 }
             }
@@ -552,7 +758,8 @@ fun HomeScreen(
 
     LaunchedEffect(recentlyPlayed) {
         val lastSong = recentlyPlayed.firstOrNull()
-        if (lastSong != null) {
+        if (lastSong != null && lastSong.videoId != lastRadioSeedId) {
+            lastRadioSeedId = lastSong.videoId
             val seed = VideoItem(lastSong.videoId, lastSong.title, lastSong.author, lastSong.durationText)
             radioSeedSong = seed
             scope.launch(Dispatchers.IO) {
@@ -574,21 +781,13 @@ fun HomeScreen(
     }
 
     var lastRecommendationSeedId by remember { mutableStateOf("") }
+    // Counts genuine song changes so we can auto-refresh Quick Picks every 2 songs.
+    var songsPlayedSinceQuickPickRefresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(vm.currentSong?.videoId) {
         val currentSeedId = vm.currentSong?.videoId ?: ""
         if (currentSeedId.isNotEmpty() && currentSeedId != lastRecommendationSeedId) {
             lastRecommendationSeedId = currentSeedId
-            scope.launch(Dispatchers.IO) {
-                try {
-                    com.vinmusic.recommendation.RecommendationManager.invalidateCache()
-                    val recs = com.vinmusic.recommendation.RecommendationManager.getRecommendations(ctx, forceRefresh = true)
-                    withContext(Dispatchers.Main) {
-                        recommendationSections = recs
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("HomeScreen", "Failed to update recommendations on song play: ${e.message}")
-                }
-            }
+            songsPlayedSinceQuickPickRefresh += 1
             // Load "Similar To" songs for current song
             scope.launch(Dispatchers.IO) {
                 try {
@@ -598,19 +797,50 @@ fun HomeScreen(
                     }
                 } catch (_: Exception) {}
             }
+
+            // Auto-refresh Quick Picks after every 2 songs played. We invalidate
+            // the cache so getQuickPicks() regenerates from fresh history/related data.
+            if (songsPlayedSinceQuickPickRefresh >= 2) {
+                songsPlayedSinceQuickPickRefresh = 0
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        vm.recommendationRepository.invalidateQuickPicksCache()
+                        val qp = kotlinx.coroutines.withTimeoutOrNull(4500L) {
+                            vm.recommendationRepository.getQuickPicks()
+                        }.orEmpty()
+                        if (qp.isNotEmpty()) {
+                            withContext(Dispatchers.Main) {
+                                quickPicks = qp
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
         }
     }
 
     LaunchedEffect(selectedRecommendedPlaylist) {
         val recommendedPl = selectedRecommendedPlaylist
         if (recommendedPl != null) {
+            val cacheKey = recommendedPl.playlistId
+            val cachedSongs = remotePlaylistSongsCache[cacheKey]
+            if (!cachedSongs.isNullOrEmpty()) {
+                recommendedPlaylistSongs = cachedSongs
+                isLoadingPlaylistSongs = false
+                return@LaunchedEffect
+            }
             isLoadingPlaylistSongs = true
             recommendedPlaylistSongs = emptyList()
             scope.launch(Dispatchers.IO) {
                 try {
                     val (_, playlistSongs) = com.vinmusic.innertube.InnerTube.getPlaylistSongs(recommendedPl.playlistId)
+                    val filteredSongs = playlistSongs
+                        .filterNot { com.vinmusic.recommendation.RecommendationManager.isNonMusicVideo(it.title, it.author) }
+                        .filterNot { com.vinmusic.recommendation.RecommendationManager.isCompilationTrack(it.title, it.durationText) }
+                        .distinctBy { it.videoId.ifBlank { "${it.title}|${it.author}" } }
                     withContext(Dispatchers.Main) {
-                        recommendedPlaylistSongs = playlistSongs
+                        remotePlaylistSongsCache[cacheKey] = filteredSongs
+                        recommendedPlaylistSongs = filteredSongs
                         isLoadingPlaylistSongs = false
                     }
                 } catch (e: Exception) {
@@ -636,16 +866,81 @@ fun HomeScreen(
         return
     }
 
+    selectedSpotifyMix?.let { mix ->
+        HomeSpotifyMixDetailScreen(
+            mix = mix,
+            onBack = { selectedSpotifyMix = null },
+            onPlaySong = { song, queue -> onSongClick(song, queue) },
+            onImport = {
+                if (mix.songs.isNotEmpty()) {
+                    scope.launch(Dispatchers.IO) {
+                        val playlistDbId = db.playlistDao().insertPlaylist(com.vinmusic.data.db.PlaylistEntity(name = mix.title))
+                        mix.songs.forEachIndexed { index, song ->
+                            db.playlistDao().insertSong(
+                                com.vinmusic.data.db.PlaylistSongEntity(
+                                    playlistId = playlistDbId,
+                                    videoId = song.videoItem.videoId,
+                                    title = song.videoItem.title,
+                                    author = song.videoItem.author,
+                                    durationText = song.videoItem.durationText,
+                                    position = index
+                                )
+                            )
+                        }
+                        withContext(Dispatchers.Main) {
+                            android.widget.Toast.makeText(ctx, "Imported '${mix.title}' successfully!", android.widget.Toast.LENGTH_LONG).show()
+                            selectedSpotifyMix = null
+                        }
+                    }
+                }
+            }
+        )
+        return
+    }
+
+    selectedRecommendedPlaylist?.let { recommendedPl ->
+        HomeRemotePlaylistDetailScreen(
+            playlist = recommendedPl,
+            songs = recommendedPlaylistSongs,
+            isLoading = isLoadingPlaylistSongs,
+            onBack = { selectedRecommendedPlaylist = null },
+            onPlaySong = { song, queue -> onSongClick(song, queue) },
+            onImport = {
+                if (recommendedPlaylistSongs.isNotEmpty()) {
+                    scope.launch(Dispatchers.IO) {
+                        val playlistDbId = db.playlistDao().insertPlaylist(com.vinmusic.data.db.PlaylistEntity(name = recommendedPl.title))
+                        recommendedPlaylistSongs.forEachIndexed { index, song ->
+                            db.playlistDao().insertSong(
+                                com.vinmusic.data.db.PlaylistSongEntity(
+                                    playlistId = playlistDbId,
+                                    videoId = song.videoId,
+                                    title = song.title,
+                                    author = song.author,
+                                    durationText = song.durationText,
+                                    position = index
+                                )
+                            )
+                        }
+                        withContext(Dispatchers.Main) {
+                            android.widget.Toast.makeText(ctx, "Imported '${recommendedPl.title}' successfully!", android.widget.Toast.LENGTH_LONG).show()
+                            selectedRecommendedPlaylist = null
+                        }
+                    }
+                }
+            }
+        )
+        return
+    }
+
     // ── Recommended Albums with Local Cache ──
     LaunchedEffect(Unit) {
         scope.launch(Dispatchers.IO) {
             try {
                 val cachePrefs = ctx.getSharedPreferences("recommended_albums_cache", Context.MODE_PRIVATE)
-                val cachedJson = cachePrefs.getString("albums_json", null)
-                val cacheTime = cachePrefs.getLong("cache_time", 0L)
+                val cachedJson = cachePrefs.getString("albums_json_v2", null)
                 val now = System.currentTimeMillis()
                 
-                if (cachedJson != null && (now - cacheTime < 2 * 60 * 60 * 1000L)) {
+                if (cachedJson != null) {
                     val type = object : com.google.gson.reflect.TypeToken<List<com.vinmusic.innertube.AlbumItem>>() {}.type
                     val list: List<com.vinmusic.innertube.AlbumItem> = com.google.gson.Gson().fromJson(cachedJson, type)
                     if (list.isNotEmpty()) {
@@ -665,19 +960,19 @@ fun HomeScreen(
                 liked.filter { it.author.isNotBlank() && it.author.lowercase() != "unknown" && !com.vinmusic.recommendation.RecommendationManager.isCorporateOrDistributorChannel(it.author) }
                     .groupBy { it.author.trim() }
                     .entries.sortedByDescending { it.value.size }
-                    .take(2).forEach { artists.add(it.key) }
+                    .take(4).forEach { artists.add(it.key) }
                     
                 signals.filter { it.author.isNotBlank() && it.author.lowercase() != "unknown" && !com.vinmusic.recommendation.RecommendationManager.isCorporateOrDistributorChannel(it.author) }
                     .groupBy { it.author.trim() }
                     .mapValues { e -> e.value.sumOf { it.playCount } }
                     .filter { it.value > 0 }
                     .entries.sortedByDescending { it.value }
-                    .take(2).forEach { if (!artists.contains(it.key)) artists.add(it.key) }
+                    .take(4).forEach { if (!artists.contains(it.key)) artists.add(it.key) }
                     
                 history.filter { it.author.isNotBlank() && it.author.lowercase() != "unknown" && !com.vinmusic.recommendation.RecommendationManager.isCorporateOrDistributorChannel(it.author) }
                     .groupBy { it.author.trim() }
                     .entries.sortedByDescending { it.value.size }
-                    .take(2).forEach { if (!artists.contains(it.key)) artists.add(it.key) }
+                    .take(4).forEach { if (!artists.contains(it.key)) artists.add(it.key) }
                 
                 val queries = mutableListOf<String>()
                 artists.forEach { artist ->
@@ -694,12 +989,17 @@ fun HomeScreen(
                     "bollywood golden classics albums",
                     "slowed acoustic albums hits",
                     "ambient synthwave albums",
-                    "top hip hop rap albums"
+                    "top hip hop rap albums",
+                    "new english albums 2026",
+                    "underrated indie albums",
+                    "r&b soul albums popular",
+                    "desi hip hop albums",
+                    "k-pop albums trending"
                 )
                 
                 val shuffledFallbacks = fallbackAlbumPool.shuffled()
                 var fallbackIndex = 0
-                while (queries.size < 4 && fallbackIndex < shuffledFallbacks.size) {
+                while (queries.size < 8 && fallbackIndex < shuffledFallbacks.size) {
                     val fallback = shuffledFallbacks[fallbackIndex]
                     if (!queries.contains(fallback)) {
                         queries.add(fallback)
@@ -707,7 +1007,7 @@ fun HomeScreen(
                     fallbackIndex++
                 }
                 
-                val selectedQueries = queries.shuffled().take(2)
+                val selectedQueries = queries.shuffled().take(5)
                 
                 val allAlbums = mutableListOf<com.vinmusic.innertube.AlbumItem>()
                 coroutineScope {
@@ -727,17 +1027,17 @@ fun HomeScreen(
                     .distinctBy { it.playlistId }
                     .filter { it.playlistId.isNotEmpty() }
                     .shuffled()
-                    .take(6)
+                    .take(12)
                 
                 if (uniqueAlbums.isNotEmpty()) {
                     cachePrefs.edit()
-                        .putString("albums_json", com.google.gson.Gson().toJson(uniqueAlbums))
+                        .putString("albums_json_v2", com.google.gson.Gson().toJson(uniqueAlbums))
                         .putLong("cache_time", now)
                         .apply()
                 }
                 
                 withContext(Dispatchers.Main) {
-                    recommendedAlbums = uniqueAlbums
+                    if (uniqueAlbums.isNotEmpty()) recommendedAlbums = uniqueAlbums
                 }
             } catch (e: Exception) {
                 android.util.Log.e("HomeScreen", "Failed to load albums: ${e.message}")
@@ -759,11 +1059,10 @@ fun HomeScreen(
         scope.launch(Dispatchers.IO) {
             try {
                 val cachePrefs = ctx.getSharedPreferences("suggested_artists_cache", Context.MODE_PRIVATE)
-                val cachedJson = cachePrefs.getString("artists_json_v2", null)
-                val cacheTime = cachePrefs.getLong("cache_time_v2", 0L)
+                val cachedJson = cachePrefs.getString("artists_json_v3", null)
                 val now = System.currentTimeMillis()
                 
-                if (cachedJson != null && (now - cacheTime < 6 * 60 * 60 * 1000L)) {
+                if (cachedJson != null) {
                     val type = object : com.google.gson.reflect.TypeToken<List<com.vinmusic.innertube.ArtistItem>>() {}.type
                     val list: List<com.vinmusic.innertube.ArtistItem> = com.google.gson.Gson().fromJson(cachedJson, type)
                     if (list.isNotEmpty()) {
@@ -787,9 +1086,14 @@ fun HomeScreen(
 
                 if (cleanListened.size < 5) {
                     // Cold-start/Variety Phase: Recommend a highly diverse list of fallback premium artists, excluding the ones they've already heard!
-                    val fallbackList = listOf("Arijit Singh", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh", "The Weeknd", "Drake", "Anuv Jain", "Travis Scott")
+                    val fallbackList = listOf(
+                        "Arijit Singh", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh",
+                        "The Weeknd", "Drake", "Anuv Jain", "Travis Scott",
+                        "Kendrick Lamar", "J. Cole", "Seedhe Maut", "King",
+                        "SZA", "Frank Ocean", "Prateek Kuhad", "AP Dhillon"
+                    )
                     for (art in fallbackList) {
-                        if (artistNames.size >= 8) break
+                        if (artistNames.size >= 16) break
                         val normFallback = normalizeArtistName(art)
                         if (!cleanListened.contains(normFallback)) {
                             artistNames.add(art)
@@ -797,7 +1101,7 @@ fun HomeScreen(
                     }
                 } else {
                     // Warm-start Discovery Phase: Suggest SIMILAR artists that they haven't listened to yet!
-                    val topListened = listenedArtists.take(10)
+                    val topListened = listenedArtists.take(16)
                     for (artName in topListened) {
                         val normArt = normalizeArtistName(artName)
                         var similar: List<String>? = null
@@ -809,7 +1113,7 @@ fun HomeScreen(
                         }
                         if (similar != null) {
                             for (simArt in similar) {
-                                if (artistNames.size >= 8) break
+                                if (artistNames.size >= 16) break
                                 val normSim = normalizeArtistName(simArt)
                                 if (!cleanListened.contains(normSim) && !artistNames.map { normalizeArtistName(it) }.contains(normSim)) {
                                     artistNames.add(simArt)
@@ -820,9 +1124,14 @@ fun HomeScreen(
                 }
 
                 // Fill remaining spots with premium default artists they haven't listened to
-                val fallbackList = listOf("Arijit Singh", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh", "The Weeknd", "Drake", "Anuv Jain", "Travis Scott")
+                val fallbackList = listOf(
+                    "Arijit Singh", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh",
+                    "The Weeknd", "Drake", "Anuv Jain", "Travis Scott",
+                    "Kendrick Lamar", "J. Cole", "Seedhe Maut", "King",
+                    "SZA", "Frank Ocean", "Prateek Kuhad", "AP Dhillon"
+                )
                 for (art in fallbackList) {
-                    if (artistNames.size >= 8) break
+                    if (artistNames.size >= 16) break
                     val normFallback = normalizeArtistName(art)
                     if (!cleanListened.contains(normFallback) && !artistNames.map { normalizeArtistName(it) }.contains(normFallback)) {
                         artistNames.add(art)
@@ -843,11 +1152,11 @@ fun HomeScreen(
                     val resolved = deferreds.awaitAll()
                         .filterNotNull()
                         .distinctBy { normalizeArtistName(it.name) }
-                        .take(8)
+                        .take(16)
                     if (resolved.isNotEmpty()) {
                         cachePrefs.edit()
-                            .putString("artists_json_v2", com.google.gson.Gson().toJson(resolved))
-                            .putLong("cache_time_v2", now)
+                            .putString("artists_json_v3", com.google.gson.Gson().toJson(resolved))
+                            .putLong("cache_time_v3", now)
                             .apply()
                             
                         withContext(Dispatchers.Main) {
@@ -884,6 +1193,15 @@ fun HomeScreen(
             // ── Deep Mood Sections: official YTM category sections + artist-specific
             isMoodLoading = true
             moodSections = emptyList()
+            val sectionCacheKey = "mood_sections_${filter.lowercase().replace(Regex("[^a-z0-9]+"), "_")}"
+            if (!isRefreshing) {
+                val cachedSections = loadPlaylistSectionCache(sectionCacheKey)
+                if (cachedSections.isNotEmpty()) {
+                    moodSections = cachedSections
+                    isMoodLoading = false
+                    return@LaunchedEffect
+                }
+            }
             scope.launch(Dispatchers.IO) {
                 try {
                     val MOOD_PARAMS_MAP = mapOf(
@@ -969,7 +1287,10 @@ fun HomeScreen(
                     }
 
                     withContext(Dispatchers.Main) {
-                        moodSections = sections
+                        if (sections.isNotEmpty()) {
+                            savePlaylistSectionCache(sectionCacheKey, sections)
+                            moodSections = sections
+                        }
                         isMoodLoading = false
                         isRefreshing = false
                     }
@@ -985,11 +1306,23 @@ fun HomeScreen(
             // Rap parent selected — don't load generic flat list, sub-categories handle it
             isRapSubLoading = true
             rapSubSections = emptyList()
+            val rapSectionCacheKey = "rap_sections_${rapSubFilter.lowercase().replace(Regex("[^a-z0-9]+"), "_")}"
+            if (!isRefreshing) {
+                val cachedSections = loadPlaylistSectionCache(rapSectionCacheKey)
+                if (cachedSections.isNotEmpty()) {
+                    rapSubSections = cachedSections
+                    isRapSubLoading = false
+                    return@LaunchedEffect
+                }
+            }
             scope.launch(Dispatchers.IO) {
                 try {
                     val sections = loadRapSubSections(rapSubFilter, recentlyPlayed)
                     withContext(Dispatchers.Main) {
-                        rapSubSections = sections
+                        if (sections.isNotEmpty()) {
+                            savePlaylistSectionCache(rapSectionCacheKey, sections)
+                            rapSubSections = sections
+                        }
                         isRapSubLoading = false
                         isRefreshing = false
                     }
@@ -1005,6 +1338,15 @@ fun HomeScreen(
             // Genre chips: Bollywood, Lo-fi, Indie, K-Pop, 90s Hits — load full sectioned layout
             isMoodLoading = true
             moodSections = emptyList()
+            val genreSectionCacheKey = "genre_sections_${filter.lowercase().replace(Regex("[^a-z0-9]+"), "_")}"
+            if (!isRefreshing) {
+                val cachedSections = loadPlaylistSectionCache(genreSectionCacheKey)
+                if (cachedSections.isNotEmpty()) {
+                    moodSections = cachedSections
+                    isMoodLoading = false
+                    return@LaunchedEffect
+                }
+            }
             scope.launch(Dispatchers.IO) {
                 try {
                     val MOOD_PARAMS_MAP = mapOf(
@@ -1058,7 +1400,10 @@ fun HomeScreen(
                     }
 
                     withContext(Dispatchers.Main) {
-                        moodSections = sections
+                        if (sections.isNotEmpty()) {
+                            savePlaylistSectionCache(genreSectionCacheKey, sections)
+                            moodSections = sections
+                        }
                         isMoodLoading = false
                         isRefreshing = false
                     }
@@ -1078,11 +1423,21 @@ fun HomeScreen(
         if (filter != "Rap") return@LaunchedEffect
         isRapSubLoading = true
         rapSubSections = emptyList()
+        val rapSectionCacheKey = "rap_sections_${rapSubFilter.lowercase().replace(Regex("[^a-z0-9]+"), "_")}"
+        val cachedSections = loadPlaylistSectionCache(rapSectionCacheKey)
+        if (cachedSections.isNotEmpty()) {
+            rapSubSections = cachedSections
+            isRapSubLoading = false
+            return@LaunchedEffect
+        }
         scope.launch(Dispatchers.IO) {
             try {
                 val sections = loadRapSubSections(rapSubFilter, recentlyPlayed)
                 withContext(Dispatchers.Main) {
-                    rapSubSections = sections
+                    if (sections.isNotEmpty()) {
+                        savePlaylistSectionCache(rapSectionCacheKey, sections)
+                        rapSubSections = sections
+                    }
                     isRapSubLoading = false
                 }
             } catch (e: Exception) {
@@ -1099,10 +1454,9 @@ fun HomeScreen(
             try {
                 val cachePrefs = ctx.getSharedPreferences("long_listens_cache", Context.MODE_PRIVATE)
                 val cachedJson = cachePrefs.getString("songs_json", null)
-                val cacheTime = cachePrefs.getLong("cache_time", 0L)
                 val now = System.currentTimeMillis()
                 
-                if (cachedJson != null && (now - cacheTime < 24 * 60 * 60 * 1000L)) {
+                if (cachedJson != null) {
                     val type = object : com.google.gson.reflect.TypeToken<List<VideoItem>>() {}.type
                     val list: List<VideoItem> = com.google.gson.Gson().fromJson(cachedJson, type)
                     if (list.isNotEmpty()) {
@@ -1143,7 +1497,7 @@ fun HomeScreen(
                 }
                 
                 withContext(Dispatchers.Main) {
-                    longListens = distinctLong
+                    if (distinctLong.isNotEmpty()) longListens = distinctLong
                     isLoadingLongListens = false
                 }
             } catch (e: Exception) {
@@ -1241,6 +1595,7 @@ fun HomeScreen(
                     ) {
                         Row(
                             modifier = Modifier
+                                .weight(1f)
                                 .clickable(
                                     interactionSource = remember { MutableInteractionSource() },
                                     indication = null
@@ -1256,18 +1611,14 @@ fun HomeScreen(
                                 size = 46.dp,
                                 name = userName
                             )
-                            Column {
+                            Column(modifier = Modifier.weight(1f, fill = false)) {
                                 Text(
-                                    text = userName,
-                                    fontSize = 16.sp,
+                                    text = "${greeting()}, $userName",
+                                    fontSize = 18.sp,
+                                    color = Color.White,
                                     fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = "Music Enthusiast",
-                                    fontSize = 11.sp,
-                                    color = VinColors.Secondary,
-                                    fontWeight = FontWeight.Medium
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -1775,6 +2126,7 @@ fun HomeScreen(
                 // Custom Spotify-Style Mixes divided into premium distinct shelves (below Recommended Radio)
                 if (spotifyMixes.isNotEmpty()) {
                     val rewindMixes = spotifyMixes.filter { it.id == "repeat_rewind" }
+                    val genreMixes = spotifyMixes.filterNot { it.id == "repeat_rewind" }
 
                     // 3. Repeat Rewind
                     if (rewindMixes.isNotEmpty()) {
@@ -1787,6 +2139,24 @@ fun HomeScreen(
                                 modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
                             ) {
                                 items(rewindMixes, key = { it.id }) { mix ->
+                                    SpotifyMixCard(
+                                        mix = mix,
+                                        onClick = { selectedSpotifyMix = mix }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (genreMixes.isNotEmpty()) {
+                        item {
+                            SectionTitle("Genre Mixes")
+                            Spacer(Modifier.height(10.dp))
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = 20.dp),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
+                            ) {
+                                items(genreMixes, key = { it.id }) { mix ->
                                     SpotifyMixCard(
                                         mix = mix,
                                         onClick = { selectedSpotifyMix = mix }
@@ -1850,7 +2220,7 @@ fun HomeScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(32.dp))
-                            Text("Tuning your recommendations...", color = VinColors.Secondary, fontSize = 12.sp)
+                            Text("Loading", color = VinColors.Secondary, fontSize = 12.sp)
                         }
                     }
                 } else {
@@ -1949,7 +2319,7 @@ fun HomeScreen(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(24.dp))
-                            Text("Loading your YouTube playlists...", color = VinColors.Secondary, fontSize = 12.sp)
+                            Text("Loading", color = VinColors.Secondary, fontSize = 12.sp)
                         }
                     }
                 }
@@ -2112,6 +2482,7 @@ fun HomeScreen(
                 // Custom Spotify-Style Mixes divided into premium distinct shelves
                 if (spotifyMixes.isNotEmpty()) {
                     val rewindMixes = spotifyMixes.filter { it.id == "repeat_rewind" }
+                    val genreMixes = spotifyMixes.filterNot { it.id == "repeat_rewind" }
 
                     // 3. Repeat Rewind
                     if (rewindMixes.isNotEmpty()) {
@@ -2124,6 +2495,24 @@ fun HomeScreen(
                                 modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
                             ) {
                                 items(rewindMixes, key = { it.id }) { mix ->
+                                    SpotifyMixCard(
+                                        mix = mix,
+                                        onClick = { selectedSpotifyMix = mix }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (genreMixes.isNotEmpty()) {
+                        item {
+                            SectionTitle("Genre Mixes")
+                            Spacer(Modifier.height(10.dp))
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = 20.dp),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
+                            ) {
+                                items(genreMixes, key = { it.id }) { mix ->
                                     SpotifyMixCard(
                                         mix = mix,
                                         onClick = { selectedSpotifyMix = mix }
@@ -2145,7 +2534,7 @@ fun HomeScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(32.dp))
-                            Text("Tuning your recommendations...", color = VinColors.Secondary, fontSize = 12.sp)
+                            Text("Loading", color = VinColors.Secondary, fontSize = 12.sp)
                         }
                     }
                 } else {
@@ -2251,7 +2640,7 @@ fun HomeScreen(
                             ) {
                                 CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(36.dp))
                                 Text(
-                                    "Curating your $rapSubFilter vibe...",
+                                    "Loading",
                                     color = VinColors.Secondary,
                                     fontSize = 13.sp
                                 )
@@ -2271,7 +2660,7 @@ fun HomeScreen(
                                 ) {
                                     items(playlists) { playlist ->
                                         RecommendedPlaylistCard(playlist = playlist) {
-                                            onAlbumClick(playlist)
+                                            selectedRecommendedPlaylist = playlist
                                         }
                                     }
                                 }
@@ -2297,7 +2686,7 @@ fun HomeScreen(
                             ) {
                                 CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(36.dp))
                                 Text(
-                                    "Curating your ${filter.filter { it.isLetter() || it.isWhitespace() }.trim()} vibe...",
+                                    "Loading",
                                     color = VinColors.Secondary,
                                     fontSize = 13.sp
                                 )
@@ -2318,7 +2707,7 @@ fun HomeScreen(
                                 ) {
                                     items(playlists) { playlist ->
                                         RecommendedPlaylistCard(playlist = playlist) {
-                                            onAlbumClick(playlist)
+                                            selectedRecommendedPlaylist = playlist
                                         }
                                     }
                                 }
@@ -2344,7 +2733,7 @@ fun HomeScreen(
                                             playlist = playlist,
                                             modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            onAlbumClick(playlist)
+                                            selectedRecommendedPlaylist = playlist
                                         }
                                     }
                                 }
@@ -2775,6 +3164,446 @@ fun HomeScreen(
     }
 }
 
+@Composable
+fun HomeRemotePlaylistDetailScreen(
+    playlist: AlbumItem,
+    songs: List<VideoItem>,
+    isLoading: Boolean,
+    onBack: () -> Unit,
+    onPlaySong: (VideoItem, List<VideoItem>) -> Unit,
+    onImport: () -> Unit
+) {
+    val queue = remember(songs) {
+        songs.distinctBy { it.videoId.ifBlank { "${it.title}|${it.author}" } }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(VinColors.BgColor)
+    ) {
+        AsyncImage(
+            model = playlist.thumbnail,
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(360.dp)
+                .blur(28.dp)
+                .scale(1.12f),
+            contentScale = ContentScale.Crop
+        )
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Black.copy(alpha = 0.35f), VinColors.BgColor, VinColors.BgColor),
+                        startY = 0f,
+                        endY = 760f
+                    )
+                )
+        )
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 120.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    }
+                    Text(
+                        text = "Playlist",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(210.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(VinColors.White10)
+                            .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(12.dp))
+                    ) {
+                        AsyncImage(
+                            model = playlist.thumbnail,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+
+                    Spacer(Modifier.height(22.dp))
+
+                    Text(
+                        text = playlist.title,
+                        color = Color.White,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = if (playlist.author.isNotBlank()) playlist.author else "YouTube Music",
+                        color = VinColors.Secondary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = if (isLoading) "Loading" else "${queue.size} songs",
+                        color = VinColors.AccentLight,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 22.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(
+                        onClick = { queue.firstOrNull()?.let { onPlaySong(it, queue) } },
+                        enabled = !isLoading && queue.isNotEmpty(),
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(26.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent)
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Play", fontWeight = FontWeight.ExtraBold)
+                    }
+
+                    Button(
+                        onClick = onImport,
+                        enabled = !isLoading && queue.isNotEmpty(),
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(26.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = VinColors.White10),
+                        border = BorderStroke(1.dp, VinColors.GlassBorder)
+                    ) {
+                        Icon(Icons.Default.CloudDownload, contentDescription = null, tint = Color.White)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Import", color = Color.White, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
+
+            when {
+                isLoading -> item {
+                    HomePlaylistLoadingState()
+                }
+                queue.isEmpty() -> item {
+                    HomePlaylistEmptyState("No songs found for this playlist.")
+                }
+                else -> itemsIndexed(queue, key = { index, song -> "remote_${song.videoId}_$index" }) { index, song ->
+                    HomePlaylistTrackRow(
+                        index = index + 1,
+                        song = song,
+                        onClick = { onPlaySong(song, queue) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HomeSpotifyMixDetailScreen(
+    mix: com.vinmusic.recommendation.SpotifyMix,
+    onBack: () -> Unit,
+    onPlaySong: (VideoItem, List<VideoItem>) -> Unit,
+    onImport: () -> Unit
+) {
+    val queue = remember(mix) {
+        mix.songs.map { it.videoItem }.distinctBy { it.videoId.ifBlank { "${it.title}|${it.author}" } }
+    }
+    val startColor = runCatching {
+        Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#")))
+    }.getOrElse { Color(0xFFC5A880) }
+    val endColor = runCatching {
+        Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#")))
+    }.getOrElse { Color(0xFF1E1A14) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(VinColors.BgColor)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(420.dp)
+                .background(Brush.verticalGradient(listOf(startColor.copy(alpha = 0.7f), VinColors.BgColor)))
+        )
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 120.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    }
+                    Text(
+                        text = "Mix",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    HomeMixArtworkGrid(
+                        songs = queue,
+                        modifier = Modifier
+                            .size(210.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Brush.linearGradient(listOf(startColor, endColor)))
+                    )
+
+                    Spacer(Modifier.height(22.dp))
+
+                    Text(
+                        text = mix.title,
+                        color = Color.White,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = mix.description,
+                        color = VinColors.Secondary,
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "${queue.size} songs",
+                        color = VinColors.AccentLight,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 22.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(
+                        onClick = { queue.firstOrNull()?.let { onPlaySong(it, queue) } },
+                        enabled = queue.isNotEmpty(),
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(26.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent)
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Play", fontWeight = FontWeight.ExtraBold)
+                    }
+
+                    Button(
+                        onClick = onImport,
+                        enabled = queue.isNotEmpty(),
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(26.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = VinColors.White10),
+                        border = BorderStroke(1.dp, VinColors.GlassBorder)
+                    ) {
+                        Icon(Icons.Default.CloudDownload, contentDescription = null, tint = Color.White)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Import", color = Color.White, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
+
+            if (queue.isEmpty()) {
+                item { HomePlaylistEmptyState("No tracks inside this mix.") }
+            } else {
+                itemsIndexed(queue, key = { index, song -> "mix_${song.videoId}_$index" }) { index, song ->
+                    HomePlaylistTrackRow(
+                        index = index + 1,
+                        song = song,
+                        onClick = { onPlaySong(song, queue) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeMixArtworkGrid(songs: List<VideoItem>, modifier: Modifier = Modifier) {
+    val covers = songs.take(4)
+    Box(modifier = modifier.border(1.dp, VinColors.GlassBorder, RoundedCornerShape(12.dp))) {
+        if (covers.isEmpty()) {
+            Icon(
+                Icons.Default.MusicNote,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.align(Alignment.Center).size(54.dp)
+            )
+        } else {
+            Column(Modifier.fillMaxSize()) {
+                repeat(2) { row ->
+                    Row(Modifier.weight(1f)) {
+                        repeat(2) { column ->
+                            val song = covers.getOrNull(row * 2 + column)
+                            Box(Modifier.weight(1f).fillMaxHeight()) {
+                                if (song != null) {
+                                    AsyncImage(
+                                        model = song.thumbnail,
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize().scale(1.2f),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomePlaylistTrackRow(index: Int, song: VideoItem, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 5.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = index.toString(),
+            color = VinColors.Secondary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.width(30.dp)
+        )
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(VinColors.White10)
+        ) {
+            AsyncImage(
+                model = song.thumbnail,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize().scale(1.25f),
+                contentScale = ContentScale.Crop
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = song.title,
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = listOf(song.author, song.durationText).filter { it.isNotBlank() }.joinToString(" - "),
+                color = VinColors.Secondary,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Icon(
+            Icons.Default.PlayArrow,
+            contentDescription = null,
+            tint = VinColors.White40,
+            modifier = Modifier.size(22.dp)
+        )
+    }
+}
+
+@Composable
+private fun HomePlaylistLoadingState() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(180.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(34.dp))
+            Text("Loading", color = VinColors.Secondary, fontSize = 13.sp)
+        }
+    }
+}
+
+@Composable
+private fun HomePlaylistEmptyState(message: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(180.dp)
+            .padding(horizontal = 24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(message, color = VinColors.Secondary, fontSize = 13.sp, textAlign = TextAlign.Center)
+    }
+}
+
 /**
  * Helper function to load rap sub-section data.
  * Handles both the initial rap sub-section loading and updates when the sub-filter changes.
@@ -3059,13 +3888,25 @@ fun ArtistCircleCard(
             lineHeight = 18.sp
         )
         Text(
-            text = if (artist.subscriberCount.isNotEmpty()) artist.subscriberCount else "Artist",
+            text = if (artist.subscriberCount.isNotEmpty()) homeMonthlyListenersText(artist.subscriberCount) else "Artist",
             fontSize = 12.sp,
             color = VinColors.Secondary,
             fontWeight = FontWeight.Medium,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
     }
+}
+
+private fun homeMonthlyListenersText(source: String): String {
+    val compact = source
+        .replace(Regex("""@\S+"""), "")
+        .replace("subscribers", "", ignoreCase = true)
+        .replace("subscriber", "", ignoreCase = true)
+        .replace(Regex("""\bartist\b""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""[•|·]+"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+    return if (compact.isBlank()) "" else "$compact Monthly Listeners"
 }
 
 @Composable
@@ -3367,9 +4208,44 @@ fun VibeOfTheDayCapsule(context: Context, db: com.vinmusic.data.db.VinDatabase) 
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
-            val cachedLyrics = try { db.cachedLyricsDao().getRandomLyrics() } catch (_: Exception) { emptyList<com.vinmusic.data.db.CachedLyricsEntity>() }
+            val cachedLyrics = try { db.cachedLyricsDao().getAll() } catch (_: Exception) { emptyList<com.vinmusic.data.db.CachedLyricsEntity>() }
+                .filter { it.content.isNotBlank() && it.lyricsType != "not_found" }
+            val lyricsById = cachedLyrics.associateBy { it.videoId }
+            val topMeta = try { db.songCacheMetaDao().topPlayed(500) } catch (_: Exception) { emptyList() }
+            val metaById = topMeta.associateBy { it.videoId }
+            val liked = try { db.likedSongDao().getAll() } catch (_: Exception) { emptyList() }
+            val history = try { db.historyDao().getAllHistory() } catch (_: Exception) { emptyList() }
+            val signals = try { db.interactionSignalDao().getAll() } catch (_: Exception) { emptyList() }
+            val priorityIds = (
+                signals.sortedWith(
+                    compareByDescending<com.vinmusic.data.db.InteractionSignal> { it.isLiked }
+                        .thenByDescending { it.repeatCount }
+                        .thenByDescending { it.playCount }
+                        .thenByDescending { it.lastPlayedAt }
+                ).map { it.videoId } +
+                liked.map { it.videoId } +
+                history.map { it.videoId } +
+                topMeta.map { it.videoId }
+            ).distinct()
             val customQuotes = ArrayList<Pair<String, String>>()
 
+            for (videoId in priorityIds) {
+                val ly = lyricsById[videoId] ?: continue
+                val lines = extractVibeLines(ly)
+                if (lines.isNotEmpty()) {
+                    val trackTitle = metaById[videoId]?.let { "${it.title} â€¢ ${it.author}" }
+                        ?: liked.firstOrNull { it.videoId == videoId }?.let { "${it.title} â€¢ ${it.author}" }
+                        ?: history.firstOrNull { it.videoId == videoId }?.let { "${it.title} â€¢ ${it.author}" }
+                        ?: signals.firstOrNull { it.videoId == videoId }?.let { "${it.title} â€¢ ${it.author}" }
+                        ?: "Your Library"
+                    val cleanTrackTitle = cleanVibeSourcePart(trackTitle).ifBlank { "Your Library" }
+                    lines.shuffled().take(2).forEach { line ->
+                        customQuotes.add(line to cleanTrackTitle)
+                    }
+                }
+            }
+
+            /*
             for (ly in cachedLyrics) {
                 if (ly.content.isNotEmpty()) {
                     if (ly.lyricsType == "plain" && ly.content.length > 30) {
@@ -3393,8 +4269,10 @@ fun VibeOfTheDayCapsule(context: Context, db: com.vinmusic.data.db.VinDatabase) 
                 }
             }
 
+            */
+
             val finalPool = if (customQuotes.isNotEmpty()) {
-                customQuotes + AESTHETIC_LYRICS_QUOTES
+                customQuotes
             } else {
                 AESTHETIC_LYRICS_QUOTES
             }
@@ -3455,7 +4333,7 @@ fun VibeOfTheDayCapsule(context: Context, db: com.vinmusic.data.db.VinDatabase) 
                         )
                     }
                     Text(
-                        text = "VIBE OF THE DAY",
+                        text = "YOUR VIBE TODAY",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = VinColors.AccentLight,
@@ -3481,6 +4359,70 @@ fun VibeOfTheDayCapsule(context: Context, db: com.vinmusic.data.db.VinDatabase) 
             }
         }
     }
+}
+
+private fun extractVibeLines(lyrics: com.vinmusic.data.db.CachedLyricsEntity): List<String> {
+    val rawLines = when (lyrics.lyricsType) {
+        "synced" -> try {
+            com.google.gson.Gson()
+                .fromJson(lyrics.content, Array<com.vinmusic.lyrics.LyricsLine>::class.java)
+                .toList()
+                .map { it.text }
+        } catch (_: Exception) {
+            emptyList()
+        }
+        "plain" -> lyrics.content.split("\n\n", "\n")
+        else -> emptyList()
+    }
+
+    return rawLines
+        .mapNotNull { cleanVibeLine(it) }
+        .distinct()
+        .filter { it.length in 24..92 }
+        .filterNot { it.count { ch -> ch.isLetter() } < 10 }
+        .filter { isHindiEnglishVibeLine(it) }
+        .take(24)
+}
+
+private fun cleanVibeLine(raw: String): String? {
+    val text = raw
+        .replace("\u00A0", " ")
+        .replace(Regex("""[€$£¥₹¢]"""), "")
+        .replace("Ã¢â‚¬Â¢", " ")
+        .replace("â€¢", " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+        .trim('"', '\'', '[', ']', '(', ')')
+        .trim()
+    if (text.isBlank()) return null
+    val lower = text.lowercase()
+    if (Regex("""^\d+\s+contributors?$""", RegexOption.IGNORE_CASE).matches(text)) return null
+    if (Regex("""^(intro|outro|verse|chorus|pre[-\s]?chorus|post[-\s]?chorus|bridge|hook|refrain|interlude|instrumental|drop|break|spoken|sample|skit)(\s+\d+|\s+[ivx]+)?(\s*[:.-].*)?$""", RegexOption.IGNORE_CASE).matches(text)) return null
+    val junk = listOf("you might also like", "embed", "read more", "translations", "lyrics", "track info", "produced by", "written by", "release date")
+    if (junk.any { lower == it || (text.length < 42 && lower.startsWith(it)) }) return null
+    return text
+}
+
+private fun isHindiEnglishVibeLine(text: String): Boolean {
+    if (Regex("""[€$£¥₹¢]""").containsMatchIn(text)) return false
+    val unsupported = text.any { ch ->
+        !(ch.isLetterOrDigit() ||
+            ch.isWhitespace() ||
+            ch in setOf('\'', '"', ',', '.', '?', '!', '-', ':', ';') ||
+            ch in '\u0900'..'\u097F')
+    }
+    if (unsupported) return false
+    return text.any { it in 'a'..'z' || it in 'A'..'Z' || it in '\u0900'..'\u097F' }
+}
+
+private fun cleanVibeSourcePart(raw: String): String {
+    return raw
+        .replace(Regex("""[€$£¥₹¢]"""), "")
+        .replace("Ã¢â‚¬Â¢", " ")
+        .replace("â€¢", " ")
+        .replace(Regex("""[^\p{L}\p{N}\s.'\-]"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
 }
 
 @Composable

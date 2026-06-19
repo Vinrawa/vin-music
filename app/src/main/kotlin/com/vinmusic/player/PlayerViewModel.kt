@@ -3,7 +3,9 @@ package com.vinmusic.player
 import android.app.Application
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
+import android.media.audiofx.EnvironmentalReverb
 import android.media.audiofx.LoudnessEnhancer
+import android.media.audiofx.PresetReverb
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -26,6 +28,9 @@ import javax.inject.Inject
 import android.content.Context
 import android.content.SharedPreferences
 import dagger.hilt.android.lifecycle.HiltViewModel
+
+private const val PREF_CONCERT_HALL = "concert_hall"
+private const val PRESET_CONCERT_HALL = "Concert Hall"
 
 @UnstableApi
 @HiltViewModel
@@ -58,7 +63,13 @@ class PlayerViewModel @Inject constructor(
     val is8dEnabled get() = PlayerSingleton.is8dEnabled
 
     fun toggle8dAudio() {
-        PlayerSingleton.setEightDEnabled(!PlayerSingleton.is8dEnabled)
+        val shouldEnable = !PlayerSingleton.is8dEnabled
+        if (shouldEnable && concertHallEnabled) {
+            concertHallEnabled = false
+            prefs.edit().putBoolean(PREF_CONCERT_HALL, false).apply()
+        }
+        PlayerSingleton.setEightDEnabled(shouldEnable)
+        applyConcertHallInternal()
     }
 
     // ── Progress (isolated — only progress composables recompose) ─────────────
@@ -133,6 +144,7 @@ class PlayerViewModel @Inject constructor(
     var audioNormalizationEnabled by mutableStateOf(false)
     var crossfadeEnabled by mutableStateOf(false)
     var crossfadeSecs by mutableIntStateOf(3)
+    var concertHallEnabled by mutableStateOf(false)
     var smartAutoplayEnabled: Boolean
         get() = PlayerSingleton.smartAutoplayEnabled
         set(value) { PlayerSingleton.smartAutoplayEnabled = value }
@@ -159,6 +171,8 @@ class PlayerViewModel @Inject constructor(
     private var equalizer:   Equalizer?        = null
     private var bassBoostFx: BassBoost?        = null
     private var loudnessFx:  LoudnessEnhancer? = null
+    private var concertHallFx: PresetReverb?   = null
+    private var concertHallEnvFx: EnvironmentalReverb? = null
 
     // EQ apply handler — debounce rapid slider changes to avoid audio artifacts
     private val eqHandler = Handler(Looper.getMainLooper())
@@ -175,6 +189,10 @@ class PlayerViewModel @Inject constructor(
     private var syncLyricsJob: Job? = null
     private var lyricsJob:   Job? = null
     private var previousLyricsVideoId: String? = null
+    private var lyricsSuppressedForVideoId: String? = null
+    private var cachedPlainTimelineText: String? = null
+    private var cachedPlainTimelineDurationMs: Long = 0L
+    private var cachedPlainTimeline: List<LyricsLine> = emptyList()
 
     // ── DB ────────────────────────────────────────────────────────────────────
     private val db = VinDatabase.getInstance(app)
@@ -190,6 +208,9 @@ class PlayerViewModel @Inject constructor(
         lyricOffsetMs = 0L
         currentSongDescription = null
         previousLyricsVideoId = song?.videoId
+        cachedPlainTimelineText = null
+        cachedPlainTimelineDurationMs = 0L
+        cachedPlainTimeline = emptyList()
     }
 
     // ── Recommendation tracking variables ─────────────────────────────────────
@@ -206,6 +227,10 @@ class PlayerViewModel @Inject constructor(
             }
             "crossfade" -> crossfadeEnabled = sharedPreferences.getBoolean(key, false)
             "crossfade_secs" -> crossfadeSecs = sharedPreferences.getInt(key, 3)
+            PREF_CONCERT_HALL -> {
+                concertHallEnabled = sharedPreferences.getBoolean(key, false)
+                applyConcertHallInternal()
+            }
             "skip_silence" -> {
                 try {
                     exoPlayer.skipSilenceEnabled = sharedPreferences.getBoolean(key, false)
@@ -247,12 +272,13 @@ class PlayerViewModel @Inject constructor(
         audioNormalizationEnabled = prefs.getBoolean("audio_normalization", false)
         crossfadeEnabled = prefs.getBoolean("crossfade", false)
         crossfadeSecs = prefs.getInt("crossfade_secs", 3)
+        concertHallEnabled = prefs.getBoolean(PREF_CONCERT_HALL, false)
         eqEnabled = prefs.getBoolean("eq_enabled", false)
         eqSubBass = prefs.getFloat("eq_60hz", 0f)
         eqBass = prefs.getFloat("eq_230hz", 0f)
         eqLowMid = prefs.getFloat("eq_910hz", 0f)
         eqMid = prefs.getFloat("eq_4khz", 0f)
-        eqTreble = prefs.getFloat("eq_14khz", 0f)
+        eqTreble = prefs.getFloat("eq_8khz", prefs.getFloat("eq_14khz", 0f))
         eqAir = prefs.getFloat("eq_air", 0f)
         try {
             exoPlayer.skipSilenceEnabled = prefs.getBoolean("skip_silence", false)
@@ -266,7 +292,11 @@ class PlayerViewModel @Inject constructor(
             androidx.compose.runtime.snapshotFlow { currentSong }.collect { song ->
                 resetLyricsState(song)
                 if (song != null) {
-                    loadLyrics(force = true)
+                    if (lyricsSuppressedForVideoId == song.videoId) {
+                        lyricsSuppressedForVideoId = null
+                    } else {
+                        loadLyrics(force = true)
+                    }
 
                     // Fetch palette in parallel (don't block next song change)
                     launch {
@@ -313,6 +343,7 @@ class PlayerViewModel @Inject constructor(
     // ── Playback ──────────────────────────────────────────────────────────────
 
     fun playSong(song: VideoItem) {
+        lyricsSuppressedForVideoId = null
         resetLyricsState(song)
         progress          = 0f
         currentTimeMs     = 0L
@@ -320,7 +351,17 @@ class PlayerViewModel @Inject constructor(
         PlayerSingleton.playSong(song)
     }
 
+    fun playSongPreview(song: VideoItem, startPositionMs: Long) {
+        lyricsSuppressedForVideoId = song.videoId
+        resetLyricsState(song)
+        progress          = 0f
+        currentTimeMs     = startPositionMs.coerceAtLeast(0L)
+        durationMs        = 0L
+        PlayerSingleton.playSong(song, startPositionMs)
+    }
+
     fun setQueue(songs: List<VideoItem>, startIndex: Int = 0) {
+        lyricsSuppressedForVideoId = null
         resetLyricsState(songs.getOrNull(startIndex))
         progress          = 0f
         currentTimeMs     = 0L
@@ -329,6 +370,7 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun playSongWithRadio(song: VideoItem) {
+        lyricsSuppressedForVideoId = null
         resetLyricsState(song)
         progress          = 0f
         currentTimeMs     = 0L
@@ -411,7 +453,9 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun seekToMs(ms: Long) {
+        currentTimeMs = ms.coerceAtLeast(0L)
         PlayerSingleton.seekToMs(ms)
+        updateSyncedLyricIndex()
     }
 
     /**
@@ -435,13 +479,13 @@ class PlayerViewModel @Inject constructor(
     private fun startProgressJob() {
         progressJob = viewModelScope.launch {
             while (true) {
-                delay(300) // Throttled updates to reduce recomposition overhead (300ms)
+                delay(180)
                 if (exoPlayer.isPlaying && durationMs > 0) {
                     val pos = exoPlayer.currentPosition
                     val prog = (pos.toFloat() / durationMs).coerceIn(0f, 1f)
                     
                     // Only write state if the change is significant (to avoid unnecessary recompositions)
-                    if (Math.abs(pos - currentTimeMs) >= 250 || Math.abs(prog - progress) >= 0.001f || pos == 0L) {
+                    if (Math.abs(pos - currentTimeMs) >= 140 || Math.abs(prog - progress) >= 0.001f || pos == 0L) {
                         currentTimeMs = pos
                         progress = prog
                     }
@@ -488,12 +532,130 @@ class PlayerViewModel @Inject constructor(
     }
 
     private fun updateSyncedLyricIndex() {
-        val synced = lyricsResult as? LyricsResult.Synced ?: return
-        val lines = synced.lines
-        if (lines.isEmpty()) return
-        val adjustedTime = currentTimeMs + lyricOffsetMs
-        val idx = lines.indexOfLast { it.timeMs <= adjustedTime }
+        val lines = currentLyricsTimeline()
+        if (lines.isEmpty()) {
+            if (currentLyricIndex != -1) currentLyricIndex = -1
+            return
+        }
+        val adjustedTime = lyricAdjustedTimeMs()
+        val idx = lines.indexOfLast { it.timeMs <= adjustedTime }.coerceAtLeast(0)
         if (idx != currentLyricIndex) currentLyricIndex = idx
+    }
+
+    private fun playbackTimelineMs(): Long {
+        val playerPosition = runCatching { exoPlayer.currentPosition }.getOrNull()
+        return playerPosition
+            ?.takeIf { it >= 0L }
+            ?: currentTimeMs
+    }
+
+    fun lyricAdjustedTimeMs(): Long = (playbackTimelineMs() + lyricOffsetMs).coerceAtLeast(0L)
+
+    fun currentLyricsTimeline(): List<LyricsLine> {
+        return when (val result = lyricsResult) {
+            is LyricsResult.Synced -> result.lines
+            is LyricsResult.Plain -> {
+                val duration = knownSongDurationMs()
+                if (cachedPlainTimelineText != result.text || cachedPlainTimelineDurationMs != duration) {
+                    cachedPlainTimelineText = result.text
+                    cachedPlainTimelineDurationMs = duration
+                    cachedPlainTimeline = buildEstimatedTimeline(result.text, duration)
+                }
+                cachedPlainTimeline
+            }
+            else -> emptyList()
+        }
+    }
+
+    private fun buildEstimatedTimeline(text: String, duration: Long): List<LyricsLine> {
+        val lines = text.lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .take(160)
+
+        if (lines.isEmpty()) return emptyList()
+
+        val leadIn = (duration * 0.018f).toLong().coerceIn(300L, 3_500L)
+        val tail = (duration * 0.03f).toLong().coerceIn(800L, 6_000L)
+        val usableDuration = (duration - leadIn - tail).coerceAtLeast(duration / 2)
+
+        val weights = lines.map { line ->
+            line.split(Regex("\\s+")).count { it.isNotBlank() }.coerceIn(3, 18)
+        }
+        val totalWeight = weights.sum().coerceAtLeast(1)
+        val unitMs = usableDuration.toDouble() / totalWeight.toDouble()
+
+        var cursor = leadIn
+        val maxTime = (duration - 500L).coerceAtLeast(0L)
+        return lines.mapIndexed { index, line ->
+            val time = cursor.coerceIn(0L, maxTime)
+            val lineDuration = (weights[index] * unitMs).toLong().coerceAtLeast(1_200L)
+            cursor += lineDuration
+            LyricsLine(time, line)
+        }
+    }
+
+    private fun knownSongDurationMs(): Long {
+        val stateDuration = durationMs.takeIf { it > 10_000L }
+        val playerDuration = runCatching { exoPlayer.duration }
+            .getOrNull()
+            ?.takeIf { it > 10_000L && it != C.TIME_UNSET }
+        val textDuration = currentSong?.durationText
+            ?.let { parseDurationTextMs(it) }
+            ?.takeIf { it > 10_000L }
+
+        return stateDuration ?: playerDuration ?: textDuration ?: 180_000L
+    }
+
+    private fun parseDurationTextMs(durationText: String): Long? {
+        val parts = durationText.split(":")
+            .map { it.trim().toLongOrNull() ?: return null }
+        if (parts.size < 2) return null
+        return parts.fold(0L) { total, part -> total * 60 + part } * 1_000L
+    }
+
+    private fun cleanCachedSyncedLines(lines: List<LyricsLine>): List<LyricsLine> {
+        return lines
+            .map { it.copy(text = it.text.trim()) }
+            .filter { it.text.isNotEmpty() && !isNonLyricDisplayLine(it.text) }
+            .sortedBy { it.timeMs }
+    }
+
+    private fun cleanCachedPlainLyrics(text: String): String {
+        return text
+            .replace("\u00A0", " ")
+            .lines()
+            .map { it.trim() }
+            .filter { line -> line.isEmpty() || !isNonLyricDisplayLine(line) }
+            .joinToString("\n")
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
+    }
+
+    private fun isNonLyricDisplayLine(raw: String): Boolean {
+        val text = raw.trim().trim('[', ']', '(', ')', '{', '}').trim()
+        if (text.isBlank()) return false
+        val lower = text.lowercase()
+        if (Regex("""^\d+\s+contributors?$""", RegexOption.IGNORE_CASE).matches(text)) return true
+        if (Regex("""^contributors?$""", RegexOption.IGNORE_CASE).matches(text)) return true
+        if (Regex("""^\d+\s*(embed|translations?)$""", RegexOption.IGNORE_CASE).matches(text)) return true
+        if (Regex("""^(intro|outro|verse|chorus|pre[-\s]?chorus|post[-\s]?chorus|bridge|hook|refrain|interlude|instrumental|drop|break|spoken|sample|skit|part|segue)(\s+\d+|\s+[ivx]+)?(\s*[:.-].*)?$""", RegexOption.IGNORE_CASE).matches(text)) return true
+        val junk = listOf("you might also like", "embed", "read more", "see live", "get tickets", "track info", "produced by", "written by", "release date", "translations", "lyrics", "album", "contributors")
+        return junk.any { lower == it || (text.length < 42 && lower.startsWith(it)) }
+    }
+
+    private fun normalizeLyricsResult(result: LyricsResult): LyricsResult {
+        return when (result) {
+            is LyricsResult.Synced -> {
+                val lines = cleanCachedSyncedLines(result.lines)
+                if (lines.isNotEmpty()) LyricsResult.Synced(lines, result.source) else LyricsResult.NotFound
+            }
+            is LyricsResult.Plain -> {
+                val text = cleanCachedPlainLyrics(result.text)
+                if (text.isNotBlank()) LyricsResult.Plain(text, result.source) else LyricsResult.NotFound
+            }
+            else -> result
+        }
     }
 
     // ── Lyrics ────────────────────────────────────────────────────────────────
@@ -509,18 +671,22 @@ class PlayerViewModel @Inject constructor(
             try {
                 val cached = db.cachedLyricsDao().get(song.videoId)
                 if (cached != null && cached.lyricsType != "not_found") {
-                    val res = when (cached.lyricsType) {
+                    val rawRes = when (cached.lyricsType) {
                         "synced" -> {
-                            val lines = com.google.gson.Gson().fromJson(cached.content, Array<LyricsLine>::class.java).toList()
+                            val lines = cleanCachedSyncedLines(
+                                com.google.gson.Gson().fromJson(cached.content, Array<LyricsLine>::class.java).toList()
+                            )
                             LyricsResult.Synced(lines, "Local Cache")
                         }
-                        "plain" -> LyricsResult.Plain(cached.content, "Local Cache")
+                        "plain" -> LyricsResult.Plain(cleanCachedPlainLyrics(cached.content), "Local Cache")
                         else -> LyricsResult.NotFound
                     }
+                    val res = normalizeLyricsResult(rawRes)
                     withContext(Dispatchers.Main) {
                         // Only write if this song is still playing
                         if (currentSong?.videoId == fetchVideoId) {
                             lyricsResult = res
+                            updateSyncedLyricIndex()
                             isLyricsLoading = false
                         }
                     }
@@ -529,11 +695,13 @@ class PlayerViewModel @Inject constructor(
 
                 val prefs = getApplication<Application>().getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
                 val provider = prefs.getString("lyrics_provider", "Auto") ?: "Auto"
-                val res = LyricsHelper.fetch(song.title, song.author, song.videoId, provider)
+                val fetched = LyricsHelper.fetch(song.title, song.author, song.videoId, provider, knownSongDurationMs())
+                val res = normalizeLyricsResult(fetched)
                 withContext(Dispatchers.Main) {
                     // Only write if this song is still playing
                     if (currentSong?.videoId == fetchVideoId) {
                         lyricsResult = res
+                        updateSyncedLyricIndex()
                     }
                 }
 
@@ -581,10 +749,12 @@ class PlayerViewModel @Inject constructor(
 
                 val prefs = getApplication<Application>().getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
                 val provider = prefs.getString("lyrics_provider", "Auto") ?: "Auto"
-                val res = LyricsHelper.fetch(song.title, song.author, song.videoId, provider)
+                val fetched = LyricsHelper.fetch(song.title, song.author, song.videoId, provider, knownSongDurationMs())
+                val res = normalizeLyricsResult(fetched)
                 withContext(Dispatchers.Main) {
                     if (currentSong?.videoId == fetchVideoId) {
                         lyricsResult = res
+                        updateSyncedLyricIndex()
                     }
                 }
 
@@ -691,20 +861,39 @@ class PlayerViewModel @Inject constructor(
             putFloat("eq_230hz", eqBass)
             putFloat("eq_910hz", eqLowMid)
             putFloat("eq_4khz", eqMid)
-            putFloat("eq_14khz", eqTreble)
+            putFloat("eq_8khz", eqTreble)
             putFloat("eq_air", eqAir)
             apply()
         }
 
         equalizer?.runCatching {
             enabled = eqEnabled
-            val n = numberOfBands.toInt()
-            val bands = listOf(eqSubBass, eqBass, eqLowMid, eqMid, eqTreble, eqAir)
-            bands.forEachIndexed { i, gain ->
-                if (i < n) {
-                    val targetLevel = if (eqEnabled) (gain * 100).toInt().toShort() else 0.toShort()
-                    setBandLevel(i.toShort(), targetLevel)
+            val gains = listOf(eqSubBass, eqBass, eqLowMid, eqMid, eqTreble, eqAir)
+            val targetsMilliHz = listOf(60_000, 250_000, 1_000_000, 4_000_000, 8_000_000, 16_000_000)
+            val range = bandLevelRange
+            val minLevel = range.getOrNull(0)?.toInt() ?: -1500
+            val maxLevel = range.getOrNull(1)?.toInt() ?: 1500
+            val bandCount = numberOfBands.toInt()
+            val centers = (0 until bandCount).map { band ->
+                runCatching { getCenterFreq(band.toShort()) }.getOrDefault(targetsMilliHz.getOrElse(band) { targetsMilliHz.last() })
+            }
+            val bandGains = List(bandCount) { mutableListOf<Float>() }
+            targetsMilliHz.forEachIndexed { targetIndex, target ->
+                val nearestBand = centers.indices.minByOrNull { band ->
+                    kotlin.math.abs(centers[band] - target)
+                } ?: targetIndex.coerceIn(0, (bandCount - 1).coerceAtLeast(0))
+                if (nearestBand in bandGains.indices) {
+                    bandGains[nearestBand].add(gains[targetIndex])
                 }
+            }
+            for (band in 0 until bandCount) {
+                val gain = bandGains[band].maxByOrNull { kotlin.math.abs(it) } ?: 0f
+                val targetLevel = if (eqEnabled) {
+                    (gain * 100).toInt().coerceIn(minLevel, maxLevel).toShort()
+                } else {
+                    0.toShort()
+                }
+                setBandLevel(band.toShort(), targetLevel)
             }
         }
         bassBoostFx?.runCatching { setStrength(bassBoostStr.toInt().toShort()) }
@@ -715,6 +904,7 @@ class PlayerViewModel @Inject constructor(
                 setTargetGain(loudnessGain.toInt())
             }
         }
+        applyConcertHallInternal()
     }
 
     fun applyPreset(preset: EQPreset) {
@@ -725,6 +915,7 @@ class PlayerViewModel @Inject constructor(
         eqMid     = preset.mid
         eqTreble  = preset.treble
         eqAir     = preset.air
+        updateConcertHallEnabled(preset.name == PRESET_CONCERT_HALL)
         applyEQ()
     }
 
@@ -733,6 +924,7 @@ class PlayerViewModel @Inject constructor(
         eqMid = 0f; eqTreble = 0f; eqAir = 0f
         bassBoostStr = 0f; loudnessGain = 0f
         eqPreset = "Flat"
+        updateConcertHallEnabled(false)
         applyEQ()
 
         playbackSpeed = 1.0f
@@ -835,12 +1027,16 @@ class PlayerViewModel @Inject constructor(
             equalizer?.release()
             bassBoostFx?.release()
             loudnessFx?.release()
+            concertHallFx?.release()
+            concertHallEnvFx?.release()
         } catch (e: Exception) {
             Log.e(TAG, "Error releasing previous AudioEffects", e)
         }
         equalizer = null
         bassBoostFx = null
         loudnessFx = null
+        concertHallFx = null
+        concertHallEnvFx = null
 
         runCatching {
             equalizer = Equalizer(0, sessionId).apply { enabled = true }
@@ -858,12 +1054,58 @@ class PlayerViewModel @Inject constructor(
         }.onFailure { Log.e(TAG, "LoudnessEnhancer build failed: ${it.message}") }
 
         applyEQInternal()
+        applyConcertHallInternal()
+    }
+
+    fun updateConcertHallEnabled(enabled: Boolean) {
+        if (enabled && PlayerSingleton.is8dEnabled) {
+            PlayerSingleton.setEightDEnabled(false)
+        }
+        concertHallEnabled = enabled
+        prefs.edit().putBoolean(PREF_CONCERT_HALL, enabled).apply()
+        applyConcertHallInternal()
+    }
+
+    private fun applyConcertHallInternal() {
+        val shouldApply = concertHallEnabled && !PlayerSingleton.is8dEnabled && currentSessionId > 0
+        try {
+            if (shouldApply) {
+                val env = concertHallEnvFx ?: EnvironmentalReverb(0, 0).also { concertHallEnvFx = it }
+                env.setRoomLevel((-900).toShort())
+                env.setRoomHFLevel((-1600).toShort())
+                env.setDecayTime(2400)
+                env.setDecayHFRatio((640).toShort())
+                env.setReflectionsLevel((-850).toShort())
+                env.setReflectionsDelay(38)
+                env.setReverbLevel((-650).toShort())
+                env.setReverbDelay(72)
+                env.setDiffusion((900).toShort())
+                env.setDensity((1000).toShort())
+                env.enabled = true
+                exoPlayer.setAuxEffectInfo(AuxEffectInfo(env.id, 0.18f))
+            } else {
+                exoPlayer.setAuxEffectInfo(AuxEffectInfo(0, 0f))
+                concertHallFx?.enabled = false
+                concertHallEnvFx?.enabled = false
+            }
+        } catch (e: Exception) {
+            runCatching {
+                val effect = concertHallFx ?: PresetReverb(0, 0).also { concertHallFx = it }
+                effect.preset = PresetReverb.PRESET_LARGEHALL
+                effect.enabled = shouldApply
+                exoPlayer.setAuxEffectInfo(if (shouldApply) AuxEffectInfo(effect.id, 0.20f) else AuxEffectInfo(0, 0f))
+            }.onFailure {
+                Log.e(TAG, "Failed to apply Concert Hall: ${it.message}")
+            }
+        }
     }
 
     override fun onCleared() {
         equalizer?.release()
         bassBoostFx?.release()
         loudnessFx?.release()
+        concertHallFx?.release()
+        concertHallEnvFx?.release()
         eqHandler.removeCallbacks(eqApplyRunnable)
         pbHandler.removeCallbacks(pbApplyRunnable)
         prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
@@ -934,6 +1176,7 @@ val EQ_PRESETS = listOf(
     EQPreset("Classical",  3f,   2f,   0f,  -2f,   3f,   4f),
     EQPreset("Jazz",       3f,   2f,   0f,   2f,   4f,   3f),
     EQPreset("Electronic", 5f,   4f,   0f,   3f,   2f,   2f),
+    EQPreset(PRESET_CONCERT_HALL, 2f, 3f, -1f, -1f, 4f, 5f),
     EQPreset("Vocal",     -2f,   0f,   5f,   5f,   3f,   0f),
     EQPreset("Lofi",       4f,   3f,  -3f,  -3f,  -2f,  -5f)
 )

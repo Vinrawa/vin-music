@@ -15,6 +15,8 @@ import dagger.hilt.android.AndroidEntryPoint
 
 import android.os.Bundle
 import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.session.CommandButton
 import androidx.media3.session.SessionCommand
@@ -45,6 +47,12 @@ class VinMusicService : MediaSessionService() {
             }
             override fun hasNextMediaItem() = true
             override fun hasPreviousMediaItem() = true
+            override fun getCurrentMediaItem(): MediaItem? {
+                return PlayerSingleton.notificationMediaItem ?: super.getCurrentMediaItem()
+            }
+            override fun getMediaMetadata(): MediaMetadata {
+                return PlayerSingleton.notificationMediaItem?.mediaMetadata ?: super.getMediaMetadata()
+            }
             override fun seekToNextMediaItem() { PlayerSingleton.actionEvents.tryEmit("NEXT") }
             override fun seekToNext() { PlayerSingleton.actionEvents.tryEmit("NEXT") }
             override fun seekToPreviousMediaItem() { PlayerSingleton.actionEvents.tryEmit("PREV") }
@@ -60,17 +68,26 @@ class VinMusicService : MediaSessionService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val likeButton = CommandButton.Builder()
-            .setDisplayName("Like")
-            .setIconResId(com.vinmusic.R.drawable.ic_unlike)
-            .setSessionCommand(SessionCommand("ACTION_LIKE", Bundle.EMPTY))
-            .build()
+        fun buildLikeButton(): CommandButton {
+            val liked = PlayerSingleton.currentSongLikedForNotification
+            return CommandButton.Builder()
+                .setDisplayName(if (liked) "Liked" else "Like")
+                .setIconResId(if (liked) com.vinmusic.R.drawable.ic_like else com.vinmusic.R.drawable.ic_unlike)
+                .setSessionCommand(SessionCommand("ACTION_LIKE", Bundle.EMPTY))
+                .build()
+        }
 
-        val repeatButton = CommandButton.Builder()
-            .setDisplayName("Repeat")
-            .setIconResId(com.vinmusic.R.drawable.ic_repeat)
-            .setSessionCommand(SessionCommand("ACTION_REPEAT", Bundle.EMPTY))
-            .build()
+        fun buildRepeatButton(): CommandButton {
+            return CommandButton.Builder()
+                .setDisplayName("Repeat")
+                .setIconResId(com.vinmusic.R.drawable.ic_repeat)
+                .setSessionCommand(SessionCommand("ACTION_REPEAT", Bundle.EMPTY))
+                .build()
+        }
+
+        fun updateNotificationActions() {
+            mediaSession?.setCustomLayout(listOf(buildLikeButton(), buildRepeatButton()))
+        }
 
         val callback = object : MediaSession.Callback {
             override fun onConnect(
@@ -95,7 +112,7 @@ class VinMusicService : MediaSessionService() {
                 args: Bundle
             ): ListenableFuture<SessionResult> {
                 if (customCommand.customAction == "ACTION_LIKE") {
-                    PlayerSingleton.actionEvents.tryEmit("LIKE")
+                    PlayerSingleton.currentSong?.let { PlayerSingleton.toggleLike(it) }
                     return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
                 if (customCommand.customAction == "ACTION_REPEAT") {
@@ -109,7 +126,7 @@ class VinMusicService : MediaSessionService() {
         mediaSession = MediaSession.Builder(this, forwardingPlayer)
             .setSessionActivity(activityIntent)
             .setCallback(callback)
-            .setCustomLayout(listOf(likeButton, repeatButton))
+            .setCustomLayout(listOf(buildLikeButton(), buildRepeatButton()))
             .build()
 
         // Provide the custom notification provider to ensure small icon is set
@@ -118,6 +135,7 @@ class VinMusicService : MediaSessionService() {
         setMediaNotificationProvider(provider)
 
         PlayerSingleton.mediaSession = mediaSession
+        PlayerSingleton.onNotificationActionsChanged = { updateNotificationActions() }
         Log.d("VIN_SERVICE", "MediaSession created, notification will appear")
     }
 
@@ -131,6 +149,7 @@ class VinMusicService : MediaSessionService() {
         }
         mediaSession = null
         PlayerSingleton.mediaSession = null
+        PlayerSingleton.onNotificationActionsChanged = null
         super.onDestroy()
     }
 }

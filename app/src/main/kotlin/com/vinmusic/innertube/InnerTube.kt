@@ -29,9 +29,12 @@ object InnerTube {
         .followRedirects(true)
         .build()
 
+    // Timeouts must stay above YouTube's realistic /player response latency.
+    // 2.5s caused all 4 racing clients to time out together whenever YouTube
+    // was slightly slow, cascading into the slow NewPipe/Resolver fallbacks.
     private val racingHttp = http.newBuilder()
-        .connectTimeout(2500, TimeUnit.MILLISECONDS)
-        .readTimeout(2500, TimeUnit.MILLISECONDS)
+        .connectTimeout(8_000, TimeUnit.MILLISECONDS)
+        .readTimeout(12_000, TimeUnit.MILLISECONDS)
         .build()
 
     // ── Client definitions ────────────────────────────────────────────────────
@@ -97,10 +100,29 @@ object InnerTube {
     }
 
     fun getSongDescription(videoId: String): String? {
-        val endpoint = "$BASE/player?prettyPrint=false"
+        if (videoId.isBlank()) return null
+        val descriptions = mutableListOf<String>()
+
+        fetchPlayerDescription(videoId, "WEB_REMIX", "1.20231214.00.00", "67")?.let { descriptions.add(it) }
+        fetchPlayerDescription(videoId, "WEB", "2.20231219.04.00", "1")?.let { descriptions.add(it) }
+        fetchNextDescription(videoId)?.let { descriptions.add(it) }
+
+        return descriptions
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .maxByOrNull { descriptionCreditScore(it) }
+    }
+
+    private fun fetchPlayerDescription(
+        videoId: String,
+        clientName: String,
+        clientVersion: String,
+        clientId: String
+    ): String? {
         val ctx = mapOf(
-            "clientName" to "WEB_REMIX",
-            "clientVersion" to "1.20231214.00.00",
+            "clientName" to clientName,
+            "clientVersion" to clientVersion,
             "hl" to "en",
             "gl" to "IN"
         )
@@ -108,23 +130,78 @@ object InnerTube {
             "context" to mapOf("client" to ctx),
             "videoId" to videoId
         )
-        val reqBuilder = Request.Builder()
-            .url(endpoint)
-            .post(gson.toJson(body).toRequestBody(JSON))
-            .header("Content-Type", "application/json")
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .header("X-YouTube-Client-Name", "67")
-            .header("X-YouTube-Client-Version", "1.20231214.00.00")
-        try {
-            val response = http.newCall(reqBuilder.build()).execute()
-            val raw = response.body?.string() ?: return null
+        return try {
+            val raw = http.newCall(Request.Builder()
+                .url("$BASE/player?prettyPrint=false")
+                .post(gson.toJson(body).toRequestBody(JSON))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("X-YouTube-Client-Name", clientId)
+                .header("X-YouTube-Client-Version", clientVersion)
+                .build()
+            ).execute().use { it.body?.string() } ?: return null
             val root = gson.fromJson(raw, Map::class.java)
             val videoDetails = root["videoDetails"] as? Map<*, *>
-            return videoDetails?.get("shortDescription") as? String
+            videoDetails?.get("shortDescription") as? String
         } catch (e: Exception) {
-            log("getSongDescription error: ${e.message}")
-            return null
+            log("getSongDescription $clientName error: ${e.message}")
+            null
         }
+    }
+
+    private fun fetchNextDescription(videoId: String): String? {
+        val body = mapOf(
+            "context" to mapOf("client" to mapOf(
+                "clientName" to "WEB",
+                "clientVersion" to "2.20231219.04.00",
+                "hl" to "en",
+                "gl" to "IN"
+            )),
+            "videoId" to videoId
+        )
+        return try {
+            val raw = http.newCall(Request.Builder()
+                .url("$BASE/next?prettyPrint=false")
+                .post(gson.toJson(body).toRequestBody(JSON))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("X-YouTube-Client-Name", "1")
+                .header("X-YouTube-Client-Version", "2.20231219.04.00")
+                .build()
+            ).execute().use { it.body?.string() } ?: return null
+            val root = gson.fromJson(raw, Map::class.java)
+            val candidates = mutableListOf<String>()
+            fun scan(node: Any?) {
+                when (node) {
+                    is Map<*, *> -> {
+                        (node["attributedDescription"] as? Map<*, *>)?.get("content")
+                            ?.toString()?.takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+                        val description = node["description"]
+                        if (description is Map<*, *>) {
+                            ytText(description).takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+                        }
+                        node.values.forEach { scan(it) }
+                    }
+                    is List<*> -> node.forEach { scan(it) }
+                }
+            }
+            scan(root)
+            candidates.maxByOrNull { descriptionCreditScore(it) }
+        } catch (e: Exception) {
+            log("getSongDescription next error: ${e.message}")
+            null
+        }
+    }
+
+    private fun descriptionCreditScore(description: String): Int {
+        val lower = description.lowercase(java.util.Locale.ROOT)
+        val creditTerms = listOf(
+            "provided to youtube by", "producer", "composer", "lyricist", "writer",
+            "associated performer", "vocals", "mixer", "mixing", "mastering",
+            "engineer", "recording", "publisher", "released on", "auto-generated"
+        )
+        val matchedTerms = creditTerms.count { lower.contains(it) }
+        return matchedTerms * 10_000 + description.length.coerceAtMost(10_000)
     }
 
     // ── Main entry ────────────────────────────────────────────────────────────
@@ -476,6 +553,121 @@ object InnerTube {
         return true
     }
 
+    private fun ytText(node: Any?): String {
+        val map = node as? Map<*, *> ?: return ""
+        (map["simpleText"] as? String)?.let { return it }
+        val runs = map["runs"] as? List<*> ?: return ""
+        return runs.mapNotNull { (it as? Map<*, *>)?.get("text")?.toString() }
+            .joinToString("")
+            .trim()
+    }
+
+    private fun musicArtistText(textNode: Any?): String {
+        val map = textNode as? Map<*, *> ?: return ""
+        val runs = map["runs"] as? List<*> ?: return ytText(textNode)
+
+        val linkedArtists = runs.mapNotNull { runNode ->
+            val run = runNode as? Map<*, *> ?: return@mapNotNull null
+            val text = run["text"]?.toString()?.trim() ?: return@mapNotNull null
+            val browseId = (((run["navigationEndpoint"] as? Map<*, *>)
+                ?.get("browseEndpoint") as? Map<*, *>)?.get("browseId") as? String).orEmpty()
+            val lower = text.lowercase(java.util.Locale.ROOT)
+            val isArtistLikeBrowse = browseId.isNotBlank() &&
+                !browseId.startsWith("MPRE") &&
+                !browseId.startsWith("VL") &&
+                !browseId.startsWith("OL") &&
+                !browseId.startsWith("PL")
+            if (isArtistLikeBrowse && text.isNotBlank() && lower !in setOf("song", "video", "album", "single")) text else null
+        }
+        if (linkedArtists.isNotEmpty()) {
+            return linkedArtists.distinct().joinToString(", ")
+        }
+
+        val raw = ytText(textNode)
+        val cleanFallback = raw
+            .split(Regex("""\s*(?:•|·|â€¢|\|)\s*"""))
+            .map { part ->
+                part.replace(Regex("""^(song|video|album|single)\s*[-:]*\s*""", RegexOption.IGNORE_CASE), "")
+                    .trim()
+            }
+            .firstOrNull { part ->
+                part.isNotBlank() &&
+                    parseDurationSecs(part) == null &&
+                    !part.equals("song", ignoreCase = true) &&
+                    !part.equals("video", ignoreCase = true) &&
+                    !part.equals("album", ignoreCase = true) &&
+                    !part.equals("single", ignoreCase = true)
+            }
+            .orEmpty()
+        if (cleanFallback.isNotBlank()) return cleanFallback
+        return raw.split("•").firstOrNull()
+            ?.replace(Regex("""^(song|video)\s*[-:]*\s*""", RegexOption.IGNORE_CASE), "")
+            ?.trim()
+            .orEmpty()
+    }
+
+    private fun musicFixedDuration(item: Map<*, *>): String {
+        val fixedColumns = item["fixedColumns"] as? List<*> ?: return ""
+        for (column in fixedColumns) {
+            val renderer = ((column as? Map<*, *>)?.get("musicResponsiveListItemFixedColumnRenderer") as? Map<*, *>)
+                ?: continue
+            val text = ytText(renderer["text"])
+            if (parseDurationSecs(text) != null) return text
+        }
+        return ""
+    }
+
+    private fun normalizeArtistText(value: String): String =
+        value.lowercase(java.util.Locale.ROOT)
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+
+    private fun isLooseArtistMusicVideo(artistName: String, item: VideoItem): Boolean {
+        val title = normalizeArtistText(item.title)
+        val author = normalizeArtistText(item.author)
+        val artist = normalizeArtistText(artistName)
+        if (artist.isBlank() || title.isBlank() || item.durationText.isBlank()) return false
+
+        val tokens = artist.split(" ")
+            .filter { it.length > 1 && it !in setOf("the", "a", "an", "and") }
+        val tokenMatches = tokens.count { token -> title.contains(token) || author.contains(token) }
+        val hasArtistMatch = title.contains(artist) ||
+            author.contains(artist) ||
+            (tokens.isNotEmpty() && tokenMatches >= minOf(2, tokens.size))
+        if (!hasArtistMatch) return false
+
+        val seconds = parseDurationSecs(item.durationText)
+        if (seconds != null && (seconds < 60 || seconds > 900)) return false
+
+        val fullText = "$title $author"
+        val junkTerms = listOf(
+            "reaction", "reacts", "reacting", "review", "breakdown", "explained",
+            "meaning", "analysis", "interview", "podcast", "documentary", "essay",
+            "news", "tutorial", "how to", "behind the scenes", "teaser", "promo",
+            "meme", "parody", "comedy", "prank", "vlog", "gaming", "gameplay",
+            "roast", "standup", "unboxing", "shorts", "tiktok", "reels",
+            "compilation", "full album", "greatest hits", "best of", "top 10",
+            "playlist", "1 hour", "1hour", "1 hr", "1hr", "loop", "looped",
+            "mashup", "karaoke", "instrumental", "cover"
+        )
+        return junkTerms.none { fullText.contains(it) }
+    }
+
+    private fun artistUploadScore(artistName: String, item: VideoItem): Int {
+        val artist = normalizeArtistText(artistName)
+        val title = normalizeArtistText(item.title)
+        val author = normalizeArtistText(item.author)
+        var score = 0
+        if (author.contains(artist)) score += 40
+        if (title.contains(artist)) score += 30
+        if (author.contains("topic") || author.contains("vevo")) score += 15
+        if (listOf("unreleased", "leak", "leaked", "demo", "rare", "loosie").any { title.contains(it) }) score += 12
+        if (listOf("audio", "song", "track", "lyrics", "lyric").any { title.contains(it) }) score += 8
+        val seconds = parseDurationSecs(item.durationText)
+        if (seconds != null && seconds in 120..480) score += 4
+        return score
+    }
+
     /** Parse "3:45" or "1:02:30" to total seconds */
     private fun parseDurationSecs(dur: String): Int? {
         if (dur.isBlank()) return null
@@ -489,7 +681,14 @@ object InnerTube {
 
     // ── Search ────────────────────────────────────────────────────────────────
     /** Search for music only. Hits YouTube Music API for 100% pure audio results. */
+    private val searchCache = android.util.LruCache<String, Pair<Long, List<VideoItem>>>(50)
+
     fun search(query: String): List<VideoItem> {
+        val normalizedQuery = query.trim()
+        val cached = searchCache.get(normalizedQuery)
+        if (cached != null && System.currentTimeMillis() - cached.first < 5 * 60 * 1000) {
+            return cached.second
+        }
         val ytMusicBase = "https://music.youtube.com/youtubei/v1"
         val body = mapOf(
             "context" to mapOf("client" to mapOf(
@@ -497,7 +696,7 @@ object InnerTube {
                 "clientVersion" to "1.20231214.00.00",
                 "hl" to "en", "gl" to "IN"
             )),
-            "query" to query,
+            "query" to normalizedQuery,
             "params" to "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D" // YouTube Music 'Songs' filter
         )
         val raw = try {
@@ -556,7 +755,93 @@ object InnerTube {
             }
             scan(root)
         } catch (e: Exception) { log("Search parse: ${e.message}") }
-        return songs.distinctBy { it.videoId }.take(30)
+        val result = songs.distinctBy { it.videoId }.take(30)
+        if (result.isNotEmpty()) {
+            searchCache.put(normalizedQuery, Pair(System.currentTimeMillis(), result))
+        }
+        return result
+    }
+
+    /** Search regular YouTube for artist uploads that are not indexed as official YouTube Music songs. */
+    fun searchYouTubeArtistUploads(artistName: String): List<VideoItem> {
+        val cleanArtist = artistName.trim()
+        if (cleanArtist.isBlank()) return emptyList()
+
+        val queries = listOf(
+            "$cleanArtist unreleased song",
+            "$cleanArtist leaked song",
+            "$cleanArtist rare track",
+            "$cleanArtist unofficial audio"
+        )
+
+        return queries
+            .flatMap { searchYouTubeVideosForArtist(it, cleanArtist) }
+            .distinctBy { it.videoId }
+            .sortedByDescending { artistUploadScore(cleanArtist, it) }
+            .take(40)
+    }
+
+    private fun searchYouTubeVideosForArtist(query: String, artistName: String): List<VideoItem> {
+        val body = mapOf(
+            "context" to mapOf("client" to mapOf(
+                "clientName" to "WEB",
+                "clientVersion" to "2.20231219.04.00",
+                "hl" to "en",
+                "gl" to "IN"
+            )),
+            "query" to query,
+            "params" to "EgIQAQ%3D%3D"
+        )
+        val raw = try {
+            http.newCall(Request.Builder()
+                .url("$BASE/search?prettyPrint=false")
+                .post(gson.toJson(body).toRequestBody(JSON))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("X-YouTube-Client-Name", "1")
+                .header("X-YouTube-Client-Version", "2.20231219.04.00")
+                .header("Origin", "https://www.youtube.com")
+                .header("Referer", "https://www.youtube.com/")
+                .build()
+            ).execute().use { it.body?.string() }
+        } catch (e: Exception) {
+            log("YouTube artist upload search error: ${e.message}")
+            null
+        } ?: return emptyList()
+
+        val videos = mutableListOf<VideoItem>()
+        try {
+            val root = gson.fromJson(raw, Map::class.java)
+            fun scan(node: Any?) {
+                when (node) {
+                    is Map<*, *> -> {
+                        val renderer = (node["videoRenderer"]
+                            ?: node["compactVideoRenderer"]
+                            ?: node["gridVideoRenderer"]) as? Map<*, *>
+                        if (renderer != null) {
+                            val videoId = renderer["videoId"] as? String
+                            val title = ytText(renderer["title"])
+                            val author = ytText(renderer["ownerText"])
+                                .ifBlank { ytText(renderer["shortBylineText"]) }
+                                .ifBlank { ytText(renderer["longBylineText"]) }
+                            val duration = ytText(renderer["lengthText"])
+                            if (!videoId.isNullOrBlank() && title.isNotBlank()) {
+                                val item = VideoItem(videoId, title, author, duration)
+                                if (isLooseArtistMusicVideo(artistName, item)) {
+                                    videos.add(item)
+                                }
+                            }
+                        }
+                        node.values.forEach { scan(it) }
+                    }
+                    is List<*> -> node.forEach { scan(it) }
+                }
+            }
+            scan(root)
+        } catch (e: Exception) {
+            log("YouTube artist upload parse error: ${e.message}")
+        }
+        return videos.distinctBy { it.videoId }
     }
 
     // ── YouTube Music Browse and Search API ───────────────────────────────────
@@ -740,16 +1025,15 @@ object InnerTube {
                             val flexCols = mrli["flexColumns"] as? List<*>
                             val col0 = flexCols?.getOrNull(0) as? Map<*, *>
                             val col0Renderer = col0?.get("musicResponsiveListItemFlexColumnRenderer") as? Map<*, *>
-                            val title = ((col0Renderer?.get("text") as? Map<*, *>)?.get("runs") as? List<*>)
-                                ?.firstOrNull()?.let { (it as? Map<*, *>)?.get("text") as? String } ?: ""
+                            val title = ytText(col0Renderer?.get("text"))
                             
                             val col1 = flexCols?.getOrNull(1) as? Map<*, *>
                             val col1Renderer = col1?.get("musicResponsiveListItemFlexColumnRenderer") as? Map<*, *>
-                            val author = ((col1Renderer?.get("text") as? Map<*, *>)?.get("runs") as? List<*>)
-                                ?.firstOrNull()?.let { (it as? Map<*, *>)?.get("text") as? String } ?: ""
+                            val author = musicArtistText(col1Renderer?.get("text"))
+                            val duration = musicFixedDuration(mrli)
                             
                             if (videoId.isNotEmpty() && title.isNotEmpty()) {
-                                songs.add(VideoItem(videoId, title, author, ""))
+                                songs.add(VideoItem(videoId, title, author, duration))
                             }
                         } else {
                             node.values.forEach { scan(it) }
@@ -1286,7 +1570,10 @@ object InnerTube {
 
     /** Get top songs for an artist by name */
     fun getArtistTopSongs(artistName: String): List<VideoItem> =
-        search("$artistName top songs")
+        (search("$artistName top songs") + searchYouTubeArtistUploads(artistName))
+            .distinctBy { it.videoId }
+            .sortedByDescending { artistUploadScore(artistName, it) }
+            .take(50)
 
     // ── Channel browse (artist banner + bio) ─────────────────────────────────
     data class ChannelData(val bannerUrl: String = "", val bio: String = "", val subscriberCount: String = "", val title: String = "", val avatarUrl: String = "")
@@ -1590,20 +1877,20 @@ object InnerTube {
                             if (!id.isNullOrBlank()) {
                                 val flexCols = responsiveRenderer["flexColumns"] as? List<*>
                                 
-                                fun colText(index: Int): String? {
+                                fun colTextNode(index: Int): Any? {
                                     val col = flexCols?.getOrNull(index) as? Map<*, *> ?: return null
                                     val flex = col["musicResponsiveListItemFlexColumnRenderer"] as? Map<*, *> ?: return null
-                                    val textNode = flex["text"] as? Map<*, *> ?: return null
-                                    return (textNode["simpleText"] as? String)
-                                        ?: (textNode["runs"] as? List<*>)?.mapNotNull { (it as? Map<*, *>)?.get("text") as? String }?.joinToString("")
+                                    return flex["text"]
                                 }
+                                fun colText(index: Int): String? = ytText(colTextNode(index)).takeIf { it.isNotBlank() }
                                 
                                 val t = colText(0) ?: ""
                                 val a = colText(1)?.split("•")?.firstOrNull()?.trim() ?: ""
-                                val dur = colText(2) ?: ""
+                                val parsedArtists = musicArtistText(colTextNode(1)).ifBlank { a }
+                                val dur = (colText(2) ?: "").ifBlank { musicFixedDuration(responsiveRenderer) }
                                 
                                 if (t.isNotBlank()) {
-                                    songs.add(VideoItem(id, t, a, dur))
+                                    songs.add(VideoItem(id, t, parsedArtists, dur))
                                 }
                             }
                         } else {

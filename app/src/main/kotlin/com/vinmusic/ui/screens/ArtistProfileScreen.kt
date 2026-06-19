@@ -57,20 +57,45 @@ fun ArtistProfileScreen(
 
     // ── Data fetching ─────────────────────────────────────────────────────────
 
-    // Top songs — use two queries and merge for richer results
+    // Top songs — official releases only. Leak/unreleased/demo/rare songs are
+    // EXCLUDED from the artist profile; they remain reachable only through an
+    // explicit user search on the Search screen.
     LaunchedEffect(artist.name) {
         songsLoading = true
         withContext(Dispatchers.IO) {
             try {
+                // Terms that mark a song as unofficial — these are filtered OUT
+                // of the artist profile (but kept available via explicit search).
+                val leakTerms = listOf(
+                    "unreleased", "leak", "leaked", "demo", "rare", "loosie",
+                    "snippet", "teaser", "preview", "unofficial", "vibe", "cdq leak"
+                )
+                fun isLeak(item: VideoItem): Boolean {
+                    val t = item.title.lowercase()
+                    return leakTerms.any { t.contains(it) }
+                }
+
                 val q1 = InnerTube.search("${artist.name} songs")
                 val q2 = InnerTube.search("${artist.name} best hits")
-                val merged = (q1 + q2)
+                fun score(item: VideoItem): Int {
+                    val title = item.title.lowercase()
+                    val author = item.author.lowercase()
+                    val artistName = artist.name.lowercase()
+                    var rank = 0
+                    if (author.contains(artistName)) rank += 40
+                    if (title.contains(artistName)) rank += 30
+                    if (author.contains("topic") || author.contains("vevo")) rank += 15
+                    if (listOf("audio", "song", "track", "lyrics", "lyric").any { title.contains(it) }) rank += 8
+                    return rank
+                }
+                // Official-only: drop leaks, dedupe, rank, and cap at 50.
+                val officialSongs = (q1 + q2)
+                    .filterNot { isLeak(it) }
                     .distinctBy { it.videoId }
-                    .filter { it.author.contains(artist.name, ignoreCase = true) || artist.name.contains(it.author, ignoreCase = true) }
-                    .ifEmpty { (q1 + q2).distinctBy { it.videoId } }
-                    .take(25)
+                    .sortedByDescending { score(it) }
+                    .take(50)
                 withContext(Dispatchers.Main) {
-                    topSongs = merged
+                    topSongs = officialSongs
                     songsLoading = false
                 }
             } catch (e: Exception) {
@@ -314,14 +339,14 @@ fun ArtistProfileScreen(
                     Spacer(Modifier.height(18.dp))
 
                     // Stats & Socials Row
-                    val cleanSubs = subs.replace("subscribers", "", ignoreCase = true).trim()
+                    val cleanSubs = artistMonthlyListenersCount(subs)
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Subscribers
+                        // Listener stats
                         if (cleanSubs.isNotEmpty()) {
                             Column {
                                 Text(
@@ -331,7 +356,7 @@ fun ArtistProfileScreen(
                                     color = Color.White
                                 )
                                 Text(
-                                    text = "Subscribers",
+                                    text = "Monthly Listeners",
                                     fontSize = 12.sp,
                                     color = Color.White.copy(0.4f),
                                     fontWeight = FontWeight.Medium
@@ -626,6 +651,17 @@ fun ArtistProfileScreen(
             }
         }
     }
+}
+
+private fun artistMonthlyListenersCount(source: String): String {
+    return source
+        .replace(Regex("""@\S+"""), "")
+        .replace("subscribers", "", ignoreCase = true)
+        .replace("subscriber", "", ignoreCase = true)
+        .replace(Regex("""\bartist\b""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""[•|·]+"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
 }
 
 private suspend fun resolveAlbumSongs(album: AlbumItem, context: android.content.Context): List<VideoItem> {

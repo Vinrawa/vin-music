@@ -59,10 +59,10 @@ class RecommendationRepository @Inject constructor(
         }
     }
 
-    private fun loadCacheStr(key: String): String? {
+    private fun loadCacheStr(key: String, allowStale: Boolean = false): String? {
         try {
             val time = prefs.getLong("${key}_time", 0L)
-            if (System.currentTimeMillis() - time > CACHE_EXPIRY_MS) {
+            if (!allowStale && System.currentTimeMillis() - time > CACHE_EXPIRY_MS) {
                 prefs.edit().remove(key).remove("${key}_time").apply()
                 return null
             }
@@ -77,18 +77,30 @@ class RecommendationRepository @Inject constructor(
         saveCacheStr(key, gson.toJson(list))
     }
 
-    private fun loadVideoItems(key: String): List<VideoItem>? {
-        val json = loadCacheStr(key) ?: return null
+    private fun loadVideoItems(key: String, allowStale: Boolean = true): List<VideoItem>? {
+        val json = loadCacheStr(key, allowStale = allowStale) ?: return null
         val type = object : TypeToken<List<VideoItem>>() {}.type
         return gson.fromJson(json, type)
+    }
+
+    /**
+     * Clears the cached Quick Picks so the next [getQuickPicks] call regenerates
+     * a fresh list. Used by the "refresh Quick Picks after every 2 songs" hook.
+     */
+    fun invalidateQuickPicksCache() {
+        try {
+            prefs.edit().remove("quick_picks_v2").remove("quick_picks_v2_time").apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to invalidate Quick Picks cache: ${e.message}")
+        }
     }
 
     private fun saveArtistItems(key: String, list: List<ArtistItem>) {
         saveCacheStr(key, gson.toJson(list))
     }
 
-    private fun loadArtistItems(key: String): List<ArtistItem>? {
-        val json = loadCacheStr(key) ?: return null
+    private fun loadArtistItems(key: String, allowStale: Boolean = true): List<ArtistItem>? {
+        val json = loadCacheStr(key, allowStale = allowStale) ?: return null
         val type = object : TypeToken<List<ArtistItem>>() {}.type
         return gson.fromJson(json, type)
     }
@@ -162,7 +174,7 @@ class RecommendationRepository @Inject constructor(
     /** Official YouTube Music home shelves (FEmusic_home) — requires cookie for best results. */
     suspend fun getYouTubeMusicHomeSections(): List<YTMusicHomeSection> = withContext(Dispatchers.IO) {
         val cacheKey = "yt_home_sections"
-        val cachedJson = loadCacheStr(cacheKey)
+        val cachedJson = loadCacheStr(cacheKey, allowStale = true)
         if (cachedJson != null) {
             try {
                 val type = object : TypeToken<List<YTMusicHomeSectionCache>>() {}.type
@@ -193,7 +205,7 @@ class RecommendationRepository @Inject constructor(
     /** Official user library playlists (FEmusic_liked_playlists) — requires cookie. */
     suspend fun getLibraryPlaylists(): List<com.vinmusic.innertube.AlbumItem> = withContext(Dispatchers.IO) {
         val cacheKey = "library_playlists"
-        val cached = loadCacheStr(cacheKey)
+        val cached = loadCacheStr(cacheKey, allowStale = true)
         if (cached != null) {
             try {
                 val type = object : TypeToken<List<com.vinmusic.innertube.AlbumItem>>() {}.type
@@ -923,7 +935,7 @@ class RecommendationRepository @Inject constructor(
      */
     suspend fun getGenreMixes(): List<SpotifyMix> = withContext(Dispatchers.IO) {
         val cacheKey = "genre_mixes_v3"
-        val cachedJson = loadCacheStr(cacheKey)
+        val cachedJson = loadCacheStr(cacheKey, allowStale = true)
         if (cachedJson != null) {
             try {
                 val type = object : TypeToken<List<SpotifyMix>>() {}.type

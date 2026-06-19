@@ -5,6 +5,10 @@ import androidx.media3.common.audio.AudioProcessor.AudioFormat
 import androidx.media3.common.audio.AudioProcessor.UnhandledAudioFormatException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 
 class EightDAudioProcessor : BaseAudioProcessor() {
     var enabled: Boolean = false
@@ -16,13 +20,30 @@ class EightDAudioProcessor : BaseAudioProcessor() {
         }
 
     private var theta = 0.0
-    private val speed = 0.12 // Panning rotation speed (lower is more relaxing, ~8s per rotation)
+    private val rotationHz = 0.16 // Audible orbit without turning into tremolo.
+    private var sourceDelay = DoubleArray(1)
+    private var lowPassDelay = DoubleArray(1)
+    private var writeIndex = 0
+    private var lowPassState = 0.0
+    private var configuredSampleRate = 44_100
 
     override fun onConfigure(inputAudioFormat: AudioFormat): AudioFormat {
         if (inputAudioFormat.encoding != androidx.media3.common.C.ENCODING_PCM_16BIT) {
             throw UnhandledAudioFormatException(inputAudioFormat)
         }
+        configuredSampleRate = inputAudioFormat.sampleRate.coerceAtLeast(1)
+        resizeDelayLines(configuredSampleRate)
         return inputAudioFormat
+    }
+
+    override fun onFlush() {
+        clearState()
+    }
+
+    override fun onReset() {
+        sourceDelay = DoubleArray(1)
+        lowPassDelay = DoubleArray(1)
+        clearState()
     }
 
     override fun queueInput(inputBuffer: ByteBuffer) {
@@ -40,6 +61,11 @@ class EightDAudioProcessor : BaseAudioProcessor() {
         val sampleRate = inputAudioFormat.sampleRate
 
         if (channelCount == 2) {
+            if (sampleRate != configuredSampleRate || sourceDelay.size <= 1) {
+                configuredSampleRate = sampleRate.coerceAtLeast(1)
+                resizeDelayLines(configuredSampleRate)
+            }
+
             val outputBuffer = replaceOutputBuffer(remaining)
             inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
             outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
@@ -48,44 +74,116 @@ class EightDAudioProcessor : BaseAudioProcessor() {
             while (inputBuffer.position() + 3 < limit) {
                 val leftVal = inputBuffer.getShort().toDouble()
                 val rightVal = inputBuffer.getShort().toDouble()
+                val mid = (leftVal + rightVal) * 0.5
 
-                // Calculate pan position (-1.0 to 1.0)
-                val pan = Math.sin(theta)
-                
-                // Equal power panning curve
-                val panAngle = (pan + 1.0) * Math.PI / 4.0 // 0 to PI/2
-                val gainL = Math.cos(panAngle)
-                val gainR = Math.sin(panAngle)
+                lowPassState += 0.12 * (mid - lowPassState)
+                sourceDelay[writeIndex] = mid
+                lowPassDelay[writeIndex] = lowPassState
 
-                // Create a mono mix to pan across ears
-                val mono = (leftVal + rightVal) * 0.5
-                
-                // Extremeness controls how much we collapse to the panned mono mix.
-                // At pan=0 (center), we keep true stereo. At extremes, we use the panned mono mix.
-                val extremeness = Math.abs(pan)
-                
-                // 1.414 compensates for the equal power drop so volume stays consistent
-                val targetL = mono * gainL * 1.414
-                val targetR = mono * gainR * 1.414
+                val pan = sin(theta) // -1 = left, +1 = right.
+                val frontBack = cos(theta) // +1 = front, -1 = rear.
+                val maxItdSamples = (sampleRate * 0.00072).coerceAtLeast(1.0)
+                val itd = pan * maxItdSamples
+                val leftDelay = if (itd > 0.0) itd else 0.0
+                val rightDelay = if (itd < 0.0) -itd else 0.0
 
-                // Crossfade between original stereo and panned mix
-                val outL = leftVal * (1.0 - extremeness) + targetL * extremeness
-                val outR = rightVal * (1.0 - extremeness) + targetR * extremeness
+                val leftSource = readDelay(sourceDelay, leftDelay)
+                val rightSource = readDelay(sourceDelay, rightDelay)
+                val leftShadow = readDelay(lowPassDelay, leftDelay)
+                val rightShadow = readDelay(lowPassDelay, rightDelay)
 
-                outputBuffer.putShort(outL.toInt().coerceIn(-32768, 32767).toShort())
-                outputBuffer.putShort(outR.toInt().coerceIn(-32768, 32767).toShort())
+                val panAngle = (pan + 1.0) * PI / 4.0
+                val floor = 0.12
+                val rawLeftGain = floor + (1.0 - floor) * cos(panAngle)
+                val rawRightGain = floor + (1.0 - floor) * sin(panAngle)
+                val energyNorm = 1.0 / kotlin.math.sqrt((rawLeftGain * rawLeftGain + rawRightGain * rawRightGain) * 0.5)
+                val leftGain = rawLeftGain * energyNorm
+                val rightGain = rawRightGain * energyNorm
 
-                // Increment panning angle per stereo frame
-                theta += (2.0 * Math.PI * speed) / sampleRate
-                if (theta > 2.0 * Math.PI) {
-                    theta -= 2.0 * Math.PI
+                val rightSide = pan.coerceAtLeast(0.0)
+                val leftSide = (-pan).coerceAtLeast(0.0)
+                val rearDistance = ((1.0 - frontBack) * 0.5).coerceIn(0.0, 1.0)
+                val leftShadowMix = (0.50 * rightSide + 0.20 * rearDistance).coerceIn(0.0, 0.82)
+                val rightShadowMix = (0.50 * leftSide + 0.20 * rearDistance).coerceIn(0.0, 0.82)
+                val leftHeadShadow = leftSource * (1.0 - leftShadowMix) + leftShadow * leftShadowMix
+                val rightHeadShadow = rightSource * (1.0 - rightShadowMix) + rightShadow * rightShadowMix
+
+                val roomDelayA = sampleRate * 0.014
+                val roomDelayB = sampleRate * 0.031
+                val roomDelayC = sampleRate * 0.049
+                val roomA = readDelay(sourceDelay, roomDelayA) * 0.020
+                val roomB = readDelay(sourceDelay, roomDelayB) * 0.014
+                val roomC = readDelay(lowPassDelay, roomDelayC) * 0.008
+                val roomWidth = 0.5 + 0.42 * frontBack
+                val distanceGain = 1.0 - (0.12 * rearDistance)
+
+                val spatialL = (leftHeadShadow * leftGain + roomA * (1.0 - roomWidth) + roomB * roomWidth + roomC * rearDistance) * distanceGain
+                val spatialR = (rightHeadShadow * rightGain + roomA * roomWidth + roomB * (1.0 - roomWidth) + roomC * rearDistance) * distanceGain
+
+                val dryBlend = 0.04
+                val wetBlend = 0.96
+                val outL = leftVal * dryBlend + spatialL * wetBlend
+                val outR = rightVal * dryBlend + spatialR * wetBlend
+
+                outputBuffer.putShort(softClipToShort(outL))
+                outputBuffer.putShort(softClipToShort(outR))
+
+                writeIndex++
+                if (writeIndex >= sourceDelay.size) writeIndex = 0
+
+                theta += (2.0 * PI * rotationHz) / sampleRate
+                if (theta > 2.0 * PI) {
+                    theta -= 2.0 * PI
                 }
             }
+            inputBuffer.position(limit)
             outputBuffer.flip()
         } else {
             val outputBuffer = replaceOutputBuffer(remaining)
             outputBuffer.put(inputBuffer)
             outputBuffer.flip()
         }
+    }
+
+    private fun resizeDelayLines(sampleRate: Int) {
+        val frames = (sampleRate * 0.08).coerceAtLeast(128.0).toInt()
+        sourceDelay = DoubleArray(frames)
+        lowPassDelay = DoubleArray(frames)
+        clearState()
+    }
+
+    private fun clearState() {
+        theta = 0.0
+        writeIndex = 0
+        lowPassState = 0.0
+        sourceDelay.fill(0.0)
+        lowPassDelay.fill(0.0)
+    }
+
+    private fun readDelay(buffer: DoubleArray, delaySamples: Double): Double {
+        if (buffer.isEmpty()) return 0.0
+        val safeDelay = delaySamples.coerceIn(0.0, (buffer.size - 2).coerceAtLeast(0).toDouble())
+        val baseDelay = safeDelay.toInt()
+        val fraction = safeDelay - baseDelay
+        val indexA = floorMod(writeIndex - baseDelay, buffer.size)
+        val indexB = floorMod(indexA - 1, buffer.size)
+        return buffer[indexA] * (1.0 - fraction) + buffer[indexB] * fraction
+    }
+
+    private fun floorMod(value: Int, mod: Int): Int {
+        val result = value % mod
+        return if (result < 0) result + mod else result
+    }
+
+    private fun softClipToShort(value: Double): Short {
+        val normalized = (value / 32768.0).coerceIn(-2.0, 2.0)
+        val magnitude = abs(normalized)
+        val clipped = if (magnitude <= 0.96) {
+            normalized
+        } else {
+            val softened = 0.96 + ((magnitude - 0.96) / (1.0 + magnitude - 0.96)) * 0.04
+            if (normalized < 0.0) -softened else softened
+        }
+        return (clipped * 32767.0).toInt().coerceIn(-32768, 32767).toShort()
     }
 }

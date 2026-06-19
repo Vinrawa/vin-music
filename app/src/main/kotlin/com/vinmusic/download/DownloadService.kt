@@ -43,7 +43,7 @@ class DownloadService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
 
     private val activeJobs = ConcurrentHashMap<String, Job>()
-    private val maxParallelDownloads = 8
+    private val maxParallelDownloads = 3
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -167,7 +167,15 @@ class DownloadService : Service() {
             Log.d(TAG, "Fetching stream URL for download: $videoId")
             val prefs = applicationContext.getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
             val quality = prefs.getString("download_quality", "High (256 kbps)")
-            val url = InnerTube.getStreamUrl(videoId, quality)
+            fun resolveDownloadUrl(): String? {
+                repeat(2) { attempt ->
+                    val resolved = InnerTube.getStreamUrl(videoId, quality)
+                    if (!resolved.isNullOrBlank()) return resolved
+                    if (attempt == 0) Thread.sleep(350)
+                }
+                return null
+            }
+            val url = resolveDownloadUrl()
             if (url == null) {
                 Log.e(TAG, "Failed to fetch stream URL for download: $videoId")
                 db.downloadDao().insert(entity.copy(status = "failed"))
@@ -228,7 +236,8 @@ class DownloadService : Service() {
                     .setUpstreamDataSourceFactory(httpDataSourceFactory)
                     .createDataSource()
 
-                val uriParsed = android.net.Uri.parse(url)
+                var activeUrl = url
+                var uriParsed = android.net.Uri.parse(activeUrl)
                 val clenStr = uriParsed.getQueryParameter("clen")
                 val contentLength = clenStr?.toLongOrNull() ?: -1L
 
@@ -243,7 +252,7 @@ class DownloadService : Service() {
                         cacheDataSource.close()
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to resolve content length: ${e.message}")
-                        totalLength = 10 * 1024 * 1024L // 10MB fallback
+                        totalLength = -1L
                     }
                 }
 
@@ -252,31 +261,84 @@ class DownloadService : Service() {
                 val chunkSize = 1024 * 1024L // 1MB chunks
                 var bytesCached = 0L
 
-                while (bytesCached < totalLength) {
+                if (totalLength <= 0L) {
+                    var streamCached = false
+                    var lastError: Exception? = null
+                    repeat(2) { attempt ->
+                        if (streamCached) return@repeat
+                        val streamSpec = DataSpec.Builder()
+                            .setUri(uriParsed)
+                            .setKey(videoId)
+                            .setLength(-1L)
+                            .build()
+                        val streamWriter = CacheWriter(
+                            cacheDataSource,
+                            streamSpec,
+                            ByteArray(128 * 1024),
+                            null
+                        )
+                        try {
+                            db.downloadDao().insert(downloadingEntity.copy(progress = 10))
+                            updateNotification()
+                            streamWriter.cache()
+                            streamCached = true
+                        } catch (e: Exception) {
+                            lastError = e
+                            Log.e(TAG, "Error caching unknown-length stream attempt ${attempt + 1}: ${e.message}")
+                            val refreshed = resolveDownloadUrl()
+                            if (!refreshed.isNullOrBlank()) {
+                                activeUrl = refreshed
+                                uriParsed = android.net.Uri.parse(activeUrl)
+                            }
+                        }
+                    }
+                    if (!streamCached) {
+                        throw lastError ?: IllegalStateException("Failed to cache unknown-length stream")
+                    }
+                    bytesCached = cache.getCachedBytes(videoId, 0, -1).coerceAtLeast(0L)
+                    db.downloadDao().insert(downloadingEntity.copy(progress = 95, sizeBytes = bytesCached))
+                    updateNotification()
+                }
+
+                while (totalLength > 0L && bytesCached < totalLength) {
                     yield() // Check for coroutine cancellation gracefully
 
                     val chunkEnd = minOf(bytesCached + chunkSize, totalLength)
                     val chunkLength = chunkEnd - bytesCached
 
-                    val chunkDataSpec = DataSpec.Builder()
-                        .setUri(uriParsed)
-                        .setKey(videoId)
-                        .setPosition(bytesCached)
-                        .setLength(chunkLength)
-                        .build()
+                    var chunkCached = false
+                    var lastError: Exception? = null
+                    repeat(2) { attempt ->
+                        if (chunkCached) return@repeat
+                        val chunkDataSpec = DataSpec.Builder()
+                            .setUri(uriParsed)
+                            .setKey(videoId)
+                            .setPosition(bytesCached)
+                            .setLength(chunkLength)
+                            .build()
 
-                    val chunkWriter = CacheWriter(
-                        cacheDataSource,
-                        chunkDataSpec,
-                        ByteArray(128 * 1024), // 128KB buffer for caching chunks
-                        null
-                    )
+                        val chunkWriter = CacheWriter(
+                            cacheDataSource,
+                            chunkDataSpec,
+                            ByteArray(128 * 1024),
+                            null
+                        )
 
-                    try {
-                        chunkWriter.cache()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error caching chunk starting at $bytesCached: ${e.message}")
-                        throw e
+                        try {
+                            chunkWriter.cache()
+                            chunkCached = true
+                        } catch (e: Exception) {
+                            lastError = e
+                            Log.e(TAG, "Error caching chunk starting at $bytesCached attempt ${attempt + 1}: ${e.message}")
+                            val refreshed = resolveDownloadUrl()
+                            if (!refreshed.isNullOrBlank()) {
+                                activeUrl = refreshed
+                                uriParsed = android.net.Uri.parse(activeUrl)
+                            }
+                        }
+                    }
+                    if (!chunkCached) {
+                        throw lastError ?: IllegalStateException("Failed to cache chunk at $bytesCached")
                     }
 
                     bytesCached = chunkEnd
@@ -297,6 +359,11 @@ class DownloadService : Service() {
                 if (finalCachedBytes < 100_000L) {
                     Log.e(TAG, "Download verification failed: $videoId only has $finalCachedBytes bytes cached")
                     db.downloadDao().insert(downloadingEntity.copy(status = "failed", progress = 0))
+                    return@launch
+                }
+                if (totalLength > 0L && finalCachedBytes < (totalLength * 0.97).toLong()) {
+                    Log.e(TAG, "Download verification failed: $videoId cached $finalCachedBytes of expected $totalLength bytes")
+                    db.downloadDao().insert(downloadingEntity.copy(status = "failed", progress = 0, sizeBytes = finalCachedBytes))
                     return@launch
                 }
                 

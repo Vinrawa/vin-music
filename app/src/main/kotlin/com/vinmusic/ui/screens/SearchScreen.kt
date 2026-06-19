@@ -90,24 +90,33 @@ fun SearchScreen(
     var searchHistory by remember { mutableStateOf(getSearchHistory(context)) }
 
     val scope      = rememberCoroutineScope()
-    var searchJob: Job? = remember { null }
-    var suggJob:   Job? = remember { null }
+    var searchJob by remember { mutableStateOf<Job?>(null) }
+    var suggJob by remember { mutableStateOf<Job?>(null) }
 
     fun loadMoreSongs(q: String) {
         if (isLoadingMore) return
         isLoadingMore = true
         scope.launch(Dispatchers.IO) {
             val existing = allResults.songs.map { it.videoId }.toSet() + moreSongs.map { it.videoId }.toSet()
-            val extras = listOf(
-                "$q full discography songs",
-                "$q deep cuts b-sides",
-                "$q rare unreleased songs audio"
-            ).map { async { InnerTube.search(it) } }.awaitAll().flatten()
-            val nextMoreSongs = (moreSongs + extras).distinctBy { it.videoId }
-                .filter { it.videoId !in existing }
-            withContext(Dispatchers.Main) {
-                moreSongs = nextMoreSongs
-                isLoadingMore = false
+            try {
+                val extras = listOf(
+                    "$q official songs",
+                    "$q popular songs audio",
+                    "$q rare unreleased songs audio"
+                ).map { query ->
+                    async { runCatching { InnerTube.search(query) }.getOrDefault(emptyList()) }
+                }.awaitAll().flatten()
+                    .filterNot { com.vinmusic.recommendation.RecommendationManager.isNonMusicVideo(it.title, it.author) }
+                    .filterNot { com.vinmusic.recommendation.RecommendationManager.isCompilationTrack(it.title, it.durationText) }
+                val nextMoreSongs = (moreSongs + extras).distinctBy { it.videoId.ifBlank { "${it.title}|${it.author}" } }
+                    .filter { it.videoId !in existing }
+                withContext(Dispatchers.Main) {
+                    moreSongs = nextMoreSongs
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    isLoadingMore = false
+                }
             }
         }
     }
@@ -121,14 +130,31 @@ fun SearchScreen(
         searchRecs = emptyList(); recsLabel = ""
         searchJob?.cancel()
         searchJob = scope.launch(Dispatchers.IO) {
-            val r = InnerTube.searchAll(q)
+            val fastSongs = runCatching {
+                withTimeout(5_500L) { InnerTube.search(q) }
+            }.getOrDefault(emptyList())
+            if (fastSongs.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    allResults = AllSearchResults(songs = fastSongs)
+                    isLoading = false
+                }
+            }
+
+            val r = runCatching {
+                withTimeout(9_000L) { InnerTube.searchAll(q) }
+            }.getOrElse {
+                AllSearchResults(songs = fastSongs)
+            }
+            val merged = r.copy(
+                songs = (fastSongs + r.songs).distinctBy { it.videoId }
+            )
             withContext(Dispatchers.Main) {
-                allResults = r
+                allResults = merged
                 isLoading = false
             }
 
-            if (r.artists.isNotEmpty()) {
-                val artist = r.artists[0]
+            if (merged.artists.isNotEmpty()) {
+                val artist = merged.artists[0]
                 scope.launch(Dispatchers.IO) {
                     var mergedReleases = emptyList<AlbumItem>()
                     try {
@@ -158,16 +184,18 @@ fun SearchScreen(
                 }
             }
 
-            if (r.songs.isEmpty()) {
+            if (merged.songs.isEmpty()) {
                 val words = q.trim().split(" ").filter { it.length > 2 }
                 val recQuery = when {
-                    r.artists.isNotEmpty() -> "${r.artists[0].name} top songs audio"
+                    merged.artists.isNotEmpty() -> "${merged.artists[0].name} top songs audio"
                     words.isNotEmpty()     -> "${words.take(3).joinToString(" ")} song audio"
                     else                   -> "top hindi songs 2025 audio"
                 }
-                val recs = withContext(Dispatchers.IO) { InnerTube.search(recQuery) }
+                val recs = withContext(Dispatchers.IO) {
+                    runCatching { withTimeout(5_500L) { InnerTube.search(recQuery) } }.getOrDefault(emptyList())
+                }
                 withContext(Dispatchers.Main) {
-                    recsLabel = if (r.artists.isNotEmpty()) "Songs by ${r.artists[0].name}" else "You might like"
+                    recsLabel = if (merged.artists.isNotEmpty()) "Songs by ${merged.artists[0].name}" else "You might like"
                     searchRecs = recs
                 }
             }
@@ -205,7 +233,7 @@ fun SearchScreen(
                         suggJob = scope.launch {
                             delay(300)
                             val suggs = withContext(Dispatchers.IO) {
-                                InnerTube.getSuggestions(q)
+                                runCatching { InnerTube.getSuggestions(q) }.getOrDefault(emptyList())
                             }
                             suggestions = suggs
                         }
@@ -345,7 +373,7 @@ fun SearchScreen(
                                             Column(Modifier.weight(1f)) {
                                                 Text(a.name, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = VinColors.Primary)
                                                 if (a.subscriberCount.isNotEmpty())
-                                                    Text(a.subscriberCount, fontSize = 13.sp, color = VinColors.Secondary)
+                                                    Text(searchMonthlyListenersText(a.subscriberCount), fontSize = 13.sp, color = VinColors.Secondary)
                                                 Text("Tap to view profile →", fontSize = 12.sp, color = VinColors.AccentLight)
                                             }
                                         }
@@ -516,7 +544,7 @@ private fun ArtistCard(artist: ArtistItem, onClick: () -> Unit) {
             color = VinColors.Primary, fontWeight = FontWeight.Medium,
             modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
         if (artist.subscriberCount.isNotEmpty())
-            Text(artist.subscriberCount, fontSize = 10.sp, color = VinColors.Secondary, maxLines = 1)
+            Text(searchMonthlyListenersText(artist.subscriberCount), fontSize = 10.sp, color = VinColors.Secondary, maxLines = 1)
     }
 }
 
@@ -538,10 +566,22 @@ private fun ArtistListItem(artist: ArtistItem, onClick: () -> Unit) {
             Text(artist.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                 color = VinColors.Primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (artist.subscriberCount.isNotEmpty())
-                Text(artist.subscriberCount, fontSize = 12.sp, color = VinColors.Secondary)
+                Text(searchMonthlyListenersText(artist.subscriberCount), fontSize = 12.sp, color = VinColors.Secondary)
         }
         Icon(Icons.Default.ChevronRight, null, tint = VinColors.Secondary)
     }
+}
+
+private fun searchMonthlyListenersText(source: String): String {
+    val compact = source
+        .replace(Regex("""@\S+"""), "")
+        .replace("subscribers", "", ignoreCase = true)
+        .replace("subscriber", "", ignoreCase = true)
+        .replace(Regex("""\bartist\b""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""[•|·]+"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+    return if (compact.isBlank()) "" else "$compact Monthly Listeners"
 }
 
 @Composable

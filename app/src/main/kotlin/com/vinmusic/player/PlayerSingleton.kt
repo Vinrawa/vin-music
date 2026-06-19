@@ -41,6 +41,9 @@ object PlayerSingleton {
 
     /** The active MediaSession (set by VinMusicService) */
     @Volatile var mediaSession: MediaSession? = null
+    @Volatile var notificationMediaItem: MediaItem? = null
+    @Volatile var currentSongLikedForNotification: Boolean = false
+    @Volatile var onNotificationActionsChanged: (() -> Unit)? = null
 
     val actionEvents = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 10)
 
@@ -235,15 +238,17 @@ object PlayerSingleton {
                     errorRetryCount++
                     scope.launch {
                         nextStreamUrlDeferred = null
-                        playSong(currentSong!!)
-                        // We must seek after preparation, but ExoPlayer allows seeking before prepare if media item is set
-                        playerInstance.seekTo(pos)
+                        // Pass the resume position into playSong so it is applied
+                        // via setMediaSource(..., startPositionMs) AFTER prepare.
+                        // Calling seekTo() here used to race ahead of prepare() and
+                        // was discarded, making the song restart from 0.
+                        playSong(currentSong!!, startPositionMs = pos)
                     }
                     return
                 }
                 
                 isLoading    = false
-                errorMessage = "[Error] $msg"
+                errorMessage = "Playback error. Tap a song to retry."
                 playerInstance.stop()
                 releaseWakeLocks()
             }
@@ -504,24 +509,18 @@ object PlayerSingleton {
         return builder.build()
     }
 
-    private fun showPendingSongInSession(song: VideoItem) {
-        try {
-            player.stop()
-            player.setMediaItem(buildMediaItem(song))
-        } catch (e: Exception) {
-            Log.w(TAG, "Pending media item update failed: ${e.message}")
-        }
-    }
-
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    fun playSong(song: VideoItem) {
+    fun playSong(song: VideoItem, startPositionMs: Long = 0L) {
         context?.let { acquireWakeLocks(it) }
         fetchJob?.cancel()
+        val safeStartPositionMs = startPositionMs.coerceAtLeast(0L)
 
         // Log end of previous song
         recordEnd()
 
         currentSong   = song
+        currentSongLikedForNotification = false
+        onNotificationActionsChanged?.invoke()
         context?.let { com.vinmusic.widget.MusicWidgetProvider.updateAllWidgets(it) }
         isLoading     = true
         isPlaying     = false
@@ -529,7 +528,7 @@ object PlayerSingleton {
         val prefetchedUrlDeferred = nextStreamUrlDeferred
         nextStreamUrlDeferred = null
 
-        showPendingSongInSession(song)
+        notificationMediaItem = buildMediaItem(song)
 
 
 
@@ -540,6 +539,16 @@ object PlayerSingleton {
         recordPlay(song)
 
         val database = db ?: return
+
+        scope.launch(Dispatchers.IO) {
+            val liked = database.likedSongDao().isLiked(song.videoId)
+            withContext(Dispatchers.Main) {
+                if (currentSong?.videoId == song.videoId) {
+                    currentSongLikedForNotification = liked
+                    onNotificationActionsChanged?.invoke()
+                }
+            }
+        }
 
         // Save to history + Metrolist-style related cache for recommendations
         scope.launch(Dispatchers.IO) {
@@ -579,32 +588,20 @@ object PlayerSingleton {
                     Log.d(TAG, "Playing fully cached offline song (device is offline): videoId=${song.videoId}")
                     url = "https://music.youtube.com/cache/${song.videoId}"
 
-                    val artBytesDeferred = async(Dispatchers.IO) {
-                        val ctx = context ?: return@async null
-                        var localBytes: ByteArray? = null
+                    val ctx = context
+                    if (ctx != null) {
                         try {
                             val database = com.vinmusic.data.db.VinDatabase.getInstance(ctx)
                             val dl = database.downloadDao().get(song.videoId)
                             if (dl?.thumbnailPath != null) {
                                 val file = java.io.File(dl.thumbnailPath)
-                                if (file.exists()) localBytes = file.readBytes()
+                                if (file.exists()) artBytes = file.readBytes()
                             }
-                            // Fallback: check standard filesDir directory
-                            if (localBytes == null) {
+                            if (artBytes == null) {
                                 val cachePath = java.io.File(ctx.filesDir, "thumbnails/${song.videoId}.jpg")
-                                if (cachePath.exists()) localBytes = cachePath.readBytes()
+                                if (cachePath.exists()) artBytes = cachePath.readBytes()
                             }
                         } catch (e: Exception) {}
-                        
-                        localBytes ?: try {
-                            InnerTube.loadThumbnailBytes(song.thumbnailHd)
-                        } catch (e: Exception) {
-                            null
-                        }
-                    }
-                    
-                    if (artBytes == null) {
-                        artBytes = runCatching { artBytesDeferred.await() }.getOrNull()
                     }
                 } else {
                     errorMessage = null
@@ -640,13 +637,6 @@ object PlayerSingleton {
                         } catch (e: Exception) {}
                     }
 
-                    // 2. If not offline, launch async fetch
-                    val artBytesDeferred = if (artBytes == null) {
-                        async(Dispatchers.IO) {
-                            try { InnerTube.loadThumbnailBytes(song.thumbnailHd) } catch (e: Exception) { null }
-                        }
-                    } else null
-
                     var fetchedUrl = urlDeferred.await()
                     
                     // Graceful Fallback: If network stream fetch fails but song is cached, fall back to offline playback instead of failing!
@@ -658,18 +648,11 @@ object PlayerSingleton {
 
                     if (fetchedUrl == null) {
                         isLoading    = false
-                        errorMessage = "[Error] ${InnerTube.lastDebugMsg}"
-                        Log.e(TAG, "Stream URL is NULL for ${song.videoId}")
+                        errorMessage = "Couldn't load this track. Check your connection and try again."
+                        Log.e(TAG, "Stream URL is NULL for ${song.videoId} | ${InnerTube.lastDebugMsg}")
                         return@launch
                     }
                     url = fetchedUrl
-                    
-                    if (artBytes == null && artBytesDeferred != null) {
-                        artBytes = runCatching { artBytesDeferred.await() }.getOrNull()
-                    }
-
-                    // Asynchronously load artwork bytes in the background and update the player item without stopping playback
-
                 }
 
                 withContext(Dispatchers.Main) {
@@ -683,9 +666,10 @@ object PlayerSingleton {
                     }
 
                     val mediaItem = buildMediaItem(song, url, artBytes)
+                    notificationMediaItem = mediaItem
 
                     Log.d(TAG, "Setting media item: ${url.take(80)}")
-                    player.stop()
+                    player.playWhenReady = true
                     
                     if (isCachedComplete) {
                         val cache = if (isDownloadCacheValid) getDownloadCache(ctx) else getCache(ctx)
@@ -701,7 +685,7 @@ object PlayerSingleton {
                                     .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
                                 val mediaSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(cacheFactory)
                                     .createMediaSource(mediaItem)
-                                player.setMediaSource(mediaSource)
+                                player.setMediaSource(mediaSource, safeStartPositionMs)
                             } else {
                                 Log.d(TAG, "Offline playback: using cache=${if (isDownloadCacheValid) "download" else "player"}, totalCachedBytes=$totalCachedBytes for videoId=${song.videoId}")
                                 val cacheFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
@@ -743,13 +727,13 @@ object PlayerSingleton {
                                     }
                                 val mediaSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(cacheFactory)
                                     .createMediaSource(mediaItem)
-                                player.setMediaSource(mediaSource)
+                                player.setMediaSource(mediaSource, safeStartPositionMs)
                             }
                         } else {
-                            player.setMediaItem(mediaItem)
+                            player.setMediaItem(mediaItem, safeStartPositionMs)
                         }
                     } else {
-                        player.setMediaItem(mediaItem)
+                        player.setMediaItem(mediaItem, safeStartPositionMs)
                     }
                     
                     player.prepare()
@@ -763,9 +747,7 @@ object PlayerSingleton {
                 Log.e(TAG, "Error in playSong fetch: ${e.message}", e)
                 withContext(Dispatchers.Main) {
                     isLoading = false
-                    errorMessage = "[Error] ${e.message ?: "Playback failed"}"
-                    player.stop()
-                    player.clearMediaItems()
+                    errorMessage = "Couldn't play this track. Check your connection and try again."
                     releaseWakeLocks()
                 }
             }
@@ -1006,6 +988,14 @@ object PlayerSingleton {
                     )
                 )
             }
+
+            withContext(Dispatchers.Main) {
+                if (currentSong?.videoId == song.videoId) {
+                    currentSongLikedForNotification = nextLiked
+                    onNotificationActionsChanged?.invoke()
+                    context?.let { com.vinmusic.widget.MusicWidgetProvider.updateAllWidgets(it) }
+                }
+            }
         }
     }
 
@@ -1071,25 +1061,10 @@ object PlayerSingleton {
     private fun setupAudioEffects(sessionId: Int) {
         releaseAudioEffects()
         try {
-            virtualizer = android.media.audiofx.Virtualizer(0, sessionId).apply {
-                if (strengthSupported) {
-                    setStrength(1000.toShort())
-                }
-                enabled = true
-            }
-            Log.d(TAG, "Virtualizer enabled on session $sessionId")
+            _player?.setAuxEffectInfo(androidx.media3.common.AuxEffectInfo(0, 0.0f))
+            Log.d(TAG, "8D custom processor active on session $sessionId")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize Virtualizer: ${e.message}")
-        }
-        try {
-            presetReverb = android.media.audiofx.PresetReverb(0, sessionId).apply {
-                preset = android.media.audiofx.PresetReverb.PRESET_LARGEHALL
-                enabled = true
-            }
-            _player?.setAuxEffectInfo(androidx.media3.common.AuxEffectInfo(presetReverb?.id ?: 0, 1.0f))
-            Log.d(TAG, "PresetReverb (Large Hall) enabled on session $sessionId")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize PresetReverb: ${e.message}")
+            Log.e(TAG, "Failed to clear aux audio effects: ${e.message}")
         }
     }
 

@@ -64,15 +64,37 @@ fun FullPlayerScreen(
 
     var activePanel      by remember { mutableStateOf<String?>(null) }
     var currentModel     by remember(song.videoId) { mutableStateOf<Any>(song.thumbnailHd) }
+    val panelScope = rememberCoroutineScope()
+    var creditsDescription by remember(song.videoId) { mutableStateOf(vm.currentSongDescription) }
+
+    LaunchedEffect(song.videoId, vm.currentSongDescription) {
+        if (!vm.currentSongDescription.isNullOrBlank()) {
+            creditsDescription = vm.currentSongDescription
+        }
+    }
+
+    fun openCreditsPanel() {
+        activePanel = "Credits"
+        if (creditsDescription.isNullOrBlank()) {
+            panelScope.launch(Dispatchers.IO) {
+                val desc = runCatching { InnerTube.getSongDescription(song.videoId) }.getOrNull()
+                if (!desc.isNullOrBlank()) {
+                    withContext(Dispatchers.Main) {
+                        creditsDescription = desc
+                    }
+                }
+            }
+        }
+    }
     
     // Dynamic Color Harmonization Palette State
     var currentPalette by remember(song.videoId) {
         mutableStateOf(
             ColorExtractor.MusicPalette(
-                gradTop = Color(0x33C5A880),
-                gradMid = Color(0x1FC5A880),
+                gradTop = Color(0x336EA8FF),
+                gradMid = Color(0x1F6EA8FF),
                 gradBottom = Color(0xFF0E0E11),
-                accent = Color(0xFFC5A880)
+                accent = Color(0xFF6EA8FF)
             )
         )
     }
@@ -228,9 +250,8 @@ fun FullPlayerScreen(
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.88f)
-                .graphicsLayer(alpha = 0.6f)
+                .fillMaxSize()
+                .graphicsLayer(alpha = 0.72f)
         )
 
         // ── 2. Dynamic translucent gradient overlay ──
@@ -240,8 +261,9 @@ fun FullPlayerScreen(
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            animatedGradTop.copy(alpha = 0.6f),
-                            VinColors.BgColor.copy(alpha = 0.95f)
+                            Color.Black.copy(alpha = 0.12f),
+                            Color.Black.copy(alpha = 0.50f),
+                            VinColors.BgColor.copy(alpha = 0.96f)
                         )
                     )
                 )
@@ -983,8 +1005,9 @@ fun FullPlayerScreen(
             // 4. Credits Card
             CreditsCard(
                 author = song.author, 
-                description = vm.currentSongDescription,
-                onArtistClick = onArtistNameClick
+                description = creditsDescription,
+                onArtistClick = onArtistNameClick,
+                onOpenCredits = { openCreditsPanel() }
             )
 
             Spacer(Modifier.height(48.dp)) // Extra padding at bottom for beautiful scroll scroll space
@@ -1013,7 +1036,7 @@ fun FullPlayerScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .fillMaxHeight(0.75f)
+                            .fillMaxHeight(if (activePanel == "Credits") 0.96f else 0.75f)
                             .align(Alignment.BottomCenter)
                             .clip(RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp))
                             .background(VinColors.Surface)
@@ -1034,16 +1057,18 @@ fun FullPlayerScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = when (activePanel) {
-                                            "Lyrics" -> Icons.Default.Lyrics
-                                            "Queue"  -> Icons.AutoMirrored.Filled.QueueMusic
-                                            else     -> Icons.Default.Tune
-                                        },
-                                        contentDescription = null,
-                                        tint = VinColors.AccentLight,
-                                        modifier = Modifier.size(22.dp)
-                                    )
+                                    if (activePanel != "Credits") {
+                                        Icon(
+                                            imageVector = when (activePanel) {
+                                                "Lyrics" -> Icons.Default.Lyrics
+                                                "Queue"  -> Icons.AutoMirrored.Filled.QueueMusic
+                                                else     -> Icons.Default.Tune
+                                            },
+                                            contentDescription = null,
+                                            tint = VinColors.AccentLight,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
                                     Text(
                                         text = activePanel ?: "",
                                         fontSize = 18.sp,
@@ -1070,6 +1095,10 @@ fun FullPlayerScreen(
                                     "Lyrics" -> LyricsPanel(vm)
                                     "Queue"  -> QueuePanel(vm)
                                     "Remix"  -> RemixPanel(vm)
+                                    "Credits" -> FullCreditsPanel(
+                                        author = song.author,
+                                        description = creditsDescription
+                                    )
                                 }
                             }
                         }
@@ -1192,7 +1221,7 @@ fun LyricsPanel(vm: PlayerViewModel) {
                         modifier = Modifier.weight(1f, fill = false)
                     )
 
-                    if (vm.lyricsResult is LyricsResult.Synced) {
+                    if (vm.lyricsResult is LyricsResult.Synced || vm.lyricsResult is LyricsResult.Plain) {
                         // Offset capsule
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -1339,14 +1368,14 @@ fun LyricsPanel(vm: PlayerViewModel) {
                         color = VinColors.AccentLight,
                         modifier = Modifier.align(Alignment.Center)
                     )
-                    vm.lyricsResult is LyricsResult.Synced -> {
-                        val synced = vm.lyricsResult as LyricsResult.Synced
+                    vm.lyricsResult is LyricsResult.Synced || vm.lyricsResult is LyricsResult.Plain -> {
+                        val timelineLines = vm.currentLyricsTimeline()
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
                             verticalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
-                            itemsIndexed(synced.lines) { idx, line ->
+                            itemsIndexed(timelineLines) { idx, line ->
                                 val isActive = idx == vm.currentLyricIndex
                                 
                                 val scale by animateFloatAsState(
@@ -1374,91 +1403,25 @@ fun LyricsPanel(vm: PlayerViewModel) {
                                             transformOrigin = TransformOrigin(0f, 0.5f)
                                         }
                                         .alpha(alpha)
-                                        .clickable { vm.seekToMs(line.timeMs) }
+                                        .clickable { vm.seekToMs(line.timeMs - vm.lyricOffsetMs) }
                                         .padding(vertical = 4.dp)
                                 ) {
-                                    if (isActive) {
-                                        val words = remember(line.text) { 
-                                            line.text.split(Regex("\\s+")).filter { it.isNotEmpty() } 
-                                        }
-                                        val nextLineStart = synced.lines.getOrNull(idx + 1)?.timeMs ?: (line.timeMs + 6000L)
-                                        val lineDuration = (nextLineStart - line.timeMs).coerceAtLeast(1000L)
-                                        val wordDuration = lineDuration / words.size.coerceAtLeast(1)
-
-                                        @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
-                                        FlowRow(
-                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            words.forEachIndexed { wordIdx, wordText ->
-                                                val wordStart = line.timeMs + (wordIdx * wordDuration)
-                                                val wordEnd = wordStart + wordDuration
-                                                
-                                                // Calculate progress of this word being sung
-                                                val wordProgress = if (vm.currentTimeMs < wordStart) {
-                                                    0f
-                                                } else if (vm.currentTimeMs >= wordEnd) {
-                                                    1f
-                                                } else {
-                                                    ((vm.currentTimeMs - wordStart).toFloat() / wordDuration).coerceIn(0f, 1f)
-                                                }
-
-                                                // Zoom active word slightly
-                                                val isWordActive = vm.currentTimeMs in wordStart until wordEnd
-                                                val wordScale by animateFloatAsState(
-                                                    targetValue = if (isWordActive) 1.12f else 1.0f,
-                                                    animationSpec = spring(stiffness = Spring.StiffnessMedium),
-                                                    label = "wordScale"
-                                                )
-
-                                                // Mix grey text and white text smoothly based on progress
-                                                val textAlpha = 0.4f + 0.6f * wordProgress
-
-                                                Text(
-                                                    text = wordText,
-                                                    fontSize = 18.sp,
-                                                    fontWeight = FontWeight.ExtraBold,
-                                                    color = Color.White.copy(alpha = textAlpha),
-                                                    modifier = Modifier.graphicsLayer {
-                                                        scaleX = wordScale
-                                                        scaleY = wordScale
-                                                        transformOrigin = TransformOrigin(0f, 0.5f)
-                                                    },
-                                                    style = androidx.compose.ui.text.TextStyle(
-                                                        shadow = if (wordProgress > 0.1f) Shadow(
-                                                            color = Color.White.copy(alpha = 0.35f * wordProgress),
-                                                            offset = Offset(0f, 0f),
-                                                            blurRadius = 12.dp.value
-                                                        ) else null
-                                                    ),
-                                                    lineHeight = 24.sp
-                                                )
-                                            }
-                                        }
-                                    } else {
-                                        Text(
-                                            text = line.text,
-                                            fontSize = 18.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = color,
-                                            style = androidx.compose.ui.text.TextStyle(
-                                                shadow = if (isActive) Shadow(
-                                                    color = Color.White.copy(alpha = 0.35f),
-                                                    offset = Offset(0f, 0f),
-                                                    blurRadius = 12.dp.value
-                                                ) else null
-                                            ),
-                                            lineHeight = 24.sp
-                                        )
-                                    }
+                                    Text(
+                                        text = line.text,
+                                        fontSize = 18.sp,
+                                        fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                        color = color,
+                                        style = androidx.compose.ui.text.TextStyle(
+                                            shadow = if (isActive) Shadow(
+                                                color = Color.White.copy(alpha = 0.35f),
+                                                offset = Offset(0f, 0f),
+                                                blurRadius = 12.dp.value
+                                            ) else null
+                                        ),
+                                        lineHeight = 24.sp
+                                    )
                                 }
                             }
-                        }
-                    }
-                    vm.lyricsResult is LyricsResult.Plain -> {
-                        val plain = vm.lyricsResult as LyricsResult.Plain
-                        Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                            Text(plain.text, color = VinColors.Primary, fontSize = 15.sp, lineHeight = 26.sp)
                         }
                     }
                     else -> {
@@ -1717,6 +1680,18 @@ fun RemixPanel(vm: PlayerViewModel) {
                     active = vm.isSlowedReverb,
                     onClick = {
                         vm.toggleSlowedReverb()
+                    }
+                )
+            }
+            item {
+                SmartEQPresetChip(
+                    name = "Concert Hall",
+                    icon = "",
+                    gradient = Brush.linearGradient(listOf(Color(0xFFD0A04E), Color(0xFF17120C))),
+                    active = vm.concertHallEnabled,
+                    onClick = {
+                        val preset = EQ_PRESETS.find { it.name == "Concert Hall" }
+                        if (preset != null) vm.applyPreset(preset) else vm.updateConcertHallEnabled(!vm.concertHallEnabled)
                     }
                 )
             }
@@ -2123,9 +2098,8 @@ fun LyricsPreviewCard(vm: PlayerViewModel, onExpand: () -> Unit) {
                         CircularProgressIndicator(color = VinColors.AccentLight, modifier = Modifier.size(24.dp))
                     }
                 }
-                vm.lyricsResult is LyricsResult.Synced -> {
-                    val synced = vm.lyricsResult as LyricsResult.Synced
-                    val lines = synced.lines
+                vm.lyricsResult is LyricsResult.Synced || vm.lyricsResult is LyricsResult.Plain -> {
+                    val lines = vm.currentLyricsTimeline()
                     val activeIndex = vm.currentLyricIndex
                     
                     val displayLines = remember(activeIndex, lines) {
@@ -2162,23 +2136,6 @@ fun LyricsPreviewCard(vm: PlayerViewModel, onExpand: () -> Unit) {
                         }
                     }
                 }
-                vm.lyricsResult is LyricsResult.Plain -> {
-                    val plain = vm.lyricsResult as LyricsResult.Plain
-                    val lines = remember(plain.text) { plain.text.lines().filter { it.isNotBlank() }.take(3) }
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        lines.forEach { text ->
-                            Text(
-                                text = text,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = VinColors.Primary.copy(alpha = 0.7f)
-                            )
-                        }
-                    }
-                }
                 else -> {
                     Text(
                         text = "Lyrics not available for this song.",
@@ -2201,17 +2158,36 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
     
     var isFollowing by remember { mutableStateOf(false) }
     var artistImageUrl by remember { mutableStateOf<String?>(null) }
+    var officialAudience by remember { mutableStateOf("") }
+    var isVerifiedArtist by remember { mutableStateOf(false) }
     
     LaunchedEffect(cleanName) {
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
+        artistImageUrl = null
+        officialAudience = ""
+        isVerifiedArtist = false
+        val resolved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
                 val res = com.vinmusic.innertube.InnerTube.searchAll(cleanName)
-                val thumb = res.artists.firstOrNull()?.thumbnail
-                if (!thumb.isNullOrBlank()) {
-                    artistImageUrl = thumb
+                val artist = res.artists.maxByOrNull { artistSearchScore(cleanName, it.name, it.subscriberCount) }
+                if (artist == null) {
+                    null
+                } else {
+                    val channelData = if (artist.thumbnail.isBlank() || artist.subscriberCount.isBlank()) {
+                        runCatching { com.vinmusic.innertube.InnerTube.fetchChannelData(artist.channelId) }.getOrNull()
+                    } else {
+                        null
+                    }
+                    Triple(
+                        artist.thumbnail.ifBlank { channelData?.avatarUrl.orEmpty() },
+                        formatMonthlyListenersText(artist.subscriberCount.ifBlank { channelData?.subscriberCount.orEmpty() }),
+                        shouldShowVerifiedArtist(cleanName, artist.name, artist.subscriberCount.ifBlank { channelData?.subscriberCount.orEmpty() })
+                    )
                 }
-            } catch (e: Exception) {}
-        }
+            }.getOrNull()
+        } ?: return@LaunchedEffect
+        artistImageUrl = resolved.first.takeIf { it.isNotBlank() }
+        officialAudience = resolved.second
+        isVerifiedArtist = resolved.third
     }
     
     Box(
@@ -2226,7 +2202,7 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(110.dp)
+                    .height(132.dp)
                     .background(
                         Brush.linearGradient(
                             colors = listOf(
@@ -2250,13 +2226,13 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.Bottom,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        .padding(horizontal = 16.dp, vertical = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(64.dp)
+                            .size(78.dp)
                             .clip(CircleShape)
                             .border(2.dp, Color.White, CircleShape)
                             .background(VinColors.White10),
@@ -2272,41 +2248,62 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
                         } else {
                             Text(
                                 text = cleanName.take(1).uppercase(),
-                                fontSize = 28.sp,
+                                fontSize = 34.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = Color.White
                             )
                         }
                     }
                     
-                    Column {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
+                            Text(
+                                text = cleanName,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            if (isVerifiedArtist) {
+                                VerifiedArtistBadge()
+                            }
+                        }
+                        if (officialAudience.isNotBlank()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = officialAudience,
+                                fontSize = 12.sp,
+                                color = Color.White.copy(alpha = 0.72f),
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(if (isFollowing) Color.White.copy(alpha = 0.2f) else Color.White)
+                            .border(1.dp, if (isFollowing) Color.White else Color.Transparent, RoundedCornerShape(22.dp))
+                            .clickable { isFollowing = !isFollowing }
+                            .padding(horizontal = 18.dp, vertical = 9.dp)
+                    ) {
                         Text(
-                            text = cleanName,
-                            fontSize = 18.sp,
+                            text = if (isFollowing) "Following" else "Follow",
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            color = if (isFollowing) Color.White else Color.Black
                         )
                     }
-                }
-                
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(12.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(if (isFollowing) Color.White.copy(alpha = 0.2f) else Color.White)
-                        .border(1.dp, if (isFollowing) Color.White else Color.Transparent, RoundedCornerShape(20.dp))
-                        .clickable { isFollowing = !isFollowing }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = if (isFollowing) "Following" else "Follow",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isFollowing) Color.White else Color.Black
-                    )
                 }
             }
             
@@ -2433,14 +2430,19 @@ fun ExploreTrackItem(song: VideoItem, onClick: () -> Unit) {
     }
 }
 
-//  Credits Card 
+//  Credits Card
 @Composable
-fun CreditsCard(author: String, description: String?, onArtistClick: (String) -> Unit) {
+fun CreditsCard(
+    author: String,
+    description: String?,
+    onArtistClick: (String) -> Unit,
+    onOpenCredits: () -> Unit
+) {
     val contributors = remember(author) { parseContributors(author) }
-    val extraCredits = remember(description) { parseDescriptionCredits(description) }
-    
-    if (contributors.isEmpty() && extraCredits.isEmpty()) return
-    
+    val allCredits = remember(author, description) { buildFullSongCredits(author, description) }
+
+    if (contributors.isEmpty() && allCredits.isEmpty()) return
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -2457,76 +2459,188 @@ fun CreditsCard(author: String, description: String?, onArtistClick: (String) ->
             .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(24.dp))
             .padding(20.dp)
     ) {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
+        Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Icon(
-                    imageVector = Icons.Default.Info, 
-                    contentDescription = null, 
-                    tint = VinColors.AccentLight, 
-                    modifier = Modifier.size(18.dp)
-                )
-                Text(
-                    text = "SONG CREDITS",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = VinColors.AccentLight,
-                    letterSpacing = 1.sp
-                )
-            }
-            
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                // Performing Artists
-                if (contributors.isNotEmpty()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = VinColors.AccentLight,
+                        modifier = Modifier.size(18.dp)
+                    )
                     Text(
-                        text = "Performing Artists",
+                        text = "SONG CREDITS",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White.copy(alpha = 0.9f),
-                        letterSpacing = 0.5.sp,
+                        color = VinColors.AccentLight,
+                        letterSpacing = 1.sp
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(22.dp))
+                        .border(1.dp, VinColors.AccentLight.copy(alpha = 0.65f), RoundedCornerShape(22.dp))
+                        .clickable { onOpenCredits() }
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Groups,
+                            contentDescription = null,
+                            tint = VinColors.AccentLight,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Credits",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = VinColors.AccentLight
+                        )
+                    }
+                }
+            }
+
+            if (contributors.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Text(
+                        text = "Performed by",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White.copy(alpha = 0.74f),
+                        letterSpacing = 0.3.sp,
                         modifier = Modifier.padding(horizontal = 8.dp)
                     )
-                    
+
                     CreditRowItem(name = contributors[0], role = "Main Artist") {
                         onArtistClick(contributors[0])
                     }
-                    
+
                     contributors.drop(1).forEach { name ->
                         CreditRowItem(name = name, role = "Featured Artist") {
                             onArtistClick(name)
                         }
                     }
                 }
-                
-                // Divider if both are present
-                if (contributors.isNotEmpty() && extraCredits.isNotEmpty()) {
-                    HorizontalDivider(
-                        color = VinColors.GlassBorder, 
-                        modifier = Modifier.padding(vertical = 4.dp, horizontal = 8.dp)
-                    )
-                }
-                
-                // Additional Credits from Description
-                if (extraCredits.isNotEmpty()) {
-                    Text(
-                        text = "Production & Writing",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White.copy(alpha = 0.9f),
-                        letterSpacing = 0.5.sp,
-                        modifier = Modifier.padding(horizontal = 8.dp)
-                    )
-                    
-                    extraCredits.forEach { (role, name) ->
-                        CreditRowItem(name = name, role = role) {
-                            onArtistClick(name)
-                        }
-                    }
-                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VerifiedArtistBadge() {
+    Box(
+        modifier = Modifier
+            .size(18.dp)
+            .clip(CircleShape)
+            .background(VinColors.AccentLight),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.Check,
+            contentDescription = "Verified",
+            tint = Color.Black,
+            modifier = Modifier.size(12.dp)
+        )
+    }
+}
+
+private fun artistSearchScore(query: String, name: String, audience: String): Int {
+    val cleanQuery = normalizeCreditToken(query)
+    val cleanName = normalizeCreditToken(name)
+    var score = 0
+    if (cleanName == cleanQuery) score += 100
+    if (cleanName.contains(cleanQuery) || cleanQuery.contains(cleanName)) score += 40
+    score += officialAudienceNumber(audience).coerceAtMost(10_000_000.0).div(100_000).toInt()
+    return score
+}
+
+private fun shouldShowVerifiedArtist(query: String, name: String, audience: String): Boolean {
+    val cleanQuery = normalizeCreditToken(query)
+    val cleanName = normalizeCreditToken(name)
+    val closeMatch = cleanName == cleanQuery || cleanName.contains(cleanQuery) || cleanQuery.contains(cleanName)
+    return closeMatch && cleanName.isNotBlank()
+}
+
+private fun formatMonthlyListenersText(sourceText: String): String {
+    val raw = sourceText.trim()
+    if (raw.isBlank()) return ""
+    val compact = raw
+        .replace(Regex("""@\S+"""), "")
+        .replace("subscribers", "", ignoreCase = true)
+        .replace("subscriber", "", ignoreCase = true)
+        .replace(Regex("""\bartist\b""", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("""[•|·]+"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+    if (compact.isBlank()) return ""
+    return "$compact Monthly Listeners"
+}
+
+private fun officialAudienceNumber(text: String): Double {
+    val match = Regex("""([\d,.]+)\s*([KMB])?""", RegexOption.IGNORE_CASE).find(text) ?: return 0.0
+    val base = match.groupValues[1].replace(",", "").toDoubleOrNull() ?: return 0.0
+    val mult = when (match.groupValues.getOrNull(2)?.uppercase()) {
+        "K" -> 1_000.0
+        "M" -> 1_000_000.0
+        "B" -> 1_000_000_000.0
+        else -> 1.0
+    }
+    return base * mult
+}
+
+@Composable
+fun FullCreditsPanel(author: String, description: String?) {
+    val credits = remember(author, description) { buildFullSongCredits(author, description) }
+
+    if (credits.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No credits found.", color = VinColors.Secondary, fontSize = 14.sp)
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        items(credits, key = { "${it.first}|${it.second}" }) { (role, name) ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(VinColors.White10)
+                    .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(14.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Text(
+                    text = role,
+                    fontSize = 12.sp,
+                    color = VinColors.AccentLight,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = name,
+                    fontSize = 16.sp,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }
@@ -2598,6 +2712,19 @@ fun CreditRowItem(name: String, role: String, onClick: () -> Unit) {
     }
 }
 
+fun buildFullSongCredits(author: String, description: String?): List<Pair<String, String>> {
+    val contributors = parseContributors(author)
+    val credits = mutableListOf<Pair<String, String>>()
+    contributors.forEachIndexed { index, name ->
+        credits.add((if (index == 0) "Main Artist" else "Featured Artist") to name)
+    }
+    credits.addAll(parseDescriptionCredits(description))
+    return credits
+        .map { cleanCreditRole(it.first) to cleanCreditName(it.second) }
+        .filter { it.first.isNotBlank() && it.second.isNotBlank() }
+        .distinctBy { "${normalizeCreditToken(it.first)}|${normalizeCreditToken(it.second)}" }
+}
+
 fun parseContributors(author: String): List<String> {
     val cleanAuthor = author.replace("-topic", "", ignoreCase = true).replace("- topic", "", ignoreCase = true).trim()
     val separators = Regex("""\s*(?:feat\.?|ft\.?|&|,|and)\s*""", RegexOption.IGNORE_CASE)
@@ -2606,42 +2733,119 @@ fun parseContributors(author: String): List<String> {
         .filter { it.isNotEmpty() }
 }
 
+private fun cleanCreditRole(value: String): String =
+    value
+        .replace("Â·", " ")
+        .replace("â€¢", " ")
+        .replace("℗", "Phonographic copyright")
+        .replace("©", "Copyright")
+        .trim()
+        .trim(':', '-', '–', '—', '.', ',', ';')
+        .replace(Regex("""\s+"""), " ")
+        .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+
+private fun cleanCreditName(value: String): String =
+    value
+        .replace("Â·", " ")
+        .replace("â€¢", " ")
+        .trim()
+        .trim(':', '-', '–', '—', '.', ',', ';')
+        .replace(Regex("""\s+"""), " ")
+
+private fun normalizeCreditToken(value: String): String =
+    value.lowercase()
+        .replace(Regex("""[^a-z0-9]+"""), " ")
+        .trim()
+
 fun parseDescriptionCredits(description: String?): List<Pair<String, String>> {
     if (description.isNullOrEmpty()) return emptyList()
-    val lines = description.lines()
+    val lines = description
+        .replace("\\n", "\n")
+        .replace("\u00A0", " ")
+        .lines()
     val credits = mutableListOf<Pair<String, String>>()
     val creditKeywords = listOf(
-        "producer", "composer", "lyricist", "lyric", "vocal", "singer", "performer", 
-        "mixer", "mixing", "mastering", "writer", "arranger", "music", "artist", 
-        "engineer", "guitar", "bass", "drum", "keyboard", "piano", "synth", 
-        "conductor", "brass", "string", "harp", "flute", "percussion"
+        "producer", "composer", "lyricist", "lyric", "vocal", "singer", "performer",
+        "associated performer", "featured", "featuring", "mixer", "mixing", "mastering",
+        "writer", "arranger", "music", "artist", "engineer", "recording", "studio",
+        "programmer", "programming", "guitar", "bass", "drum", "keyboard", "piano",
+        "synth", "conductor", "brass", "string", "harp", "flute", "percussion",
+        "publisher", "label", "released on", "provided by", "a&r"
     )
-    val nameSeparators = Regex("""\s*(?:&|,|\band\b)\s*""", RegexOption.IGNORE_CASE)
+    val roleSeparators = Regex("""\s*(?::|-|\u2013|\u2014|\u2022|·)\s*""")
+    val nameSeparators = Regex("""\s*(?:&|,|;|\band\b)\s*""", RegexOption.IGNORE_CASE)
+
+    fun cleanRole(value: String): String =
+        value.trim()
+            .removePrefix("•")
+            .removePrefix("-")
+            .trim()
+            .replace(Regex("""\s+"""), " ")
+
+    fun cleanName(value: String): String =
+        value.trim()
+            .trim('.', ',', ';', '-', '•')
+            .replace(Regex("""\s+"""), " ")
+
+    fun addCredit(roleRaw: String, namesRaw: String) {
+        val role = cleanRole(roleRaw)
+        val names = namesRaw
+            .removePrefix(":")
+            .trim()
+        if (role.isBlank() || names.isBlank()) return
+        val isMusicCredit = creditKeywords.any { role.contains(it, ignoreCase = true) }
+        if (!isMusicCredit) return
+
+        names.split(nameSeparators)
+            .map { cleanName(it) }
+            .filter { name ->
+                name.isNotEmpty() &&
+                    name.length < 90 &&
+                    !name.contains("http", ignoreCase = true) &&
+                    !name.equals("auto-generated by youtube", ignoreCase = true)
+            }
+            .forEach { name -> credits.add(role to name) }
+    }
     
     for (line in lines) {
-        val split = line.split(":", limit = 2)
-        if (split.size == 2) {
-            val role = split[0].trim()
-            val namesRaw = split[1].trim()
-            if (role.isNotEmpty() && namesRaw.isNotEmpty()) {
-                val isMusicCredit = creditKeywords.any { role.contains(it, ignoreCase = true) }
-                if (isMusicCredit) {
-                    val individualNames = namesRaw.split(nameSeparators)
-                        .map { it.trim() }
-                        .filter { it.isNotEmpty() && it.length < 60 }
-                    for (name in individualNames) {
-                        credits.add(role to name)
-                    }
-                }
-            }
-        } else if (line.trim().startsWith("Provided to YouTube by")) {
-            val provider = line.substringAfter("Provided to YouTube by").trim()
-            if (provider.isNotEmpty() && provider.length < 60) {
+        val trimmed = line.trim()
+        if (trimmed.isBlank()) continue
+        if (trimmed.contains("auto-generated by youtube", ignoreCase = true)) continue
+
+        if (trimmed.startsWith("Provided to YouTube by", ignoreCase = true)) {
+            val provider = trimmed.substringAfter("Provided to YouTube by").trim()
+            if (provider.isNotEmpty() && provider.length < 90) {
                 credits.add("Provided by" to provider)
+            }
+            continue
+        }
+
+        if (trimmed.startsWith("℗") || trimmed.startsWith("©")) {
+            val role = if (trimmed.startsWith("℗")) "Phonographic copyright" else "Copyright"
+            credits.add(role to trimmed.drop(1).trim())
+            continue
+        }
+
+        val colonSplit = trimmed.split(":", limit = 2)
+        if (colonSplit.size == 2) {
+            addCredit(colonSplit[0], colonSplit[1])
+            continue
+        }
+
+        val looseSplit = roleSeparators.split(trimmed, limit = 2)
+        if (looseSplit.size == 2) {
+            addCredit(looseSplit[0], looseSplit[1])
+            continue
+        }
+
+        val releasedOn = Regex("""released\s+on\s+(.+)""", RegexOption.IGNORE_CASE).find(trimmed)
+        if (releasedOn != null) {
+            releasedOn.groupValues.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                credits.add("Released on" to it)
             }
         }
     }
-    return credits.distinctBy { it.first + it.second }
+    return credits.distinctBy { "${it.first.lowercase()}|${it.second.lowercase()}" }
 }
 
 @Composable

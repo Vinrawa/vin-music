@@ -50,7 +50,7 @@ fun MiniPlayer(
     val ctx = LocalContext.current
 
     // Dynamic dominant color extraction for progress bar
-    var dominantColor by remember(song.videoId) { mutableStateOf(VinColors.Accent) }
+    var dominantColor by remember(song.videoId) { mutableStateOf(Color(0xFF6EA8FF)) }
     LaunchedEffect(song.thumbnail) {
         try {
             val palette = ColorExtractor.extractColorsFromUrl(ctx, song.thumbnail)

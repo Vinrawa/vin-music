@@ -35,12 +35,104 @@ import coil3.compose.AsyncImage
 import com.vinmusic.data.db.PlaylistEntity
 import com.vinmusic.data.db.PlaylistSongEntity
 import com.vinmusic.data.db.VinDatabase
+import com.vinmusic.innertube.AlbumItem
+import com.vinmusic.innertube.InnerTube
 import com.vinmusic.innertube.VideoItem
 import com.vinmusic.player.PlayerViewModel
+import com.vinmusic.recommendation.RecommendationManager
 import com.vinmusic.ui.theme.VinColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private fun smartPlaylistQueries(playlistName: String, songs: List<PlaylistSongEntity>): List<String> {
+    val genericNames = setOf("playlist", "new playlist", "imported playlist", "favorites", "liked", "custom playlist")
+    val seedArtists = songs
+        .groupBy { RecommendationManager.normalizeArtistName(it.author) }
+        .filter { it.key.isNotBlank() }
+        .entries
+        .sortedByDescending { it.value.size }
+        .take(3)
+        .map { it.key }
+
+    val similarArtists = seedArtists
+        .flatMap { seed -> RecommendationManager.SIMILAR_ARTISTS_MAP[seed].orEmpty() }
+        .map { RecommendationManager.normalizeArtistName(it) }
+        .filter { it.isNotBlank() && it !in seedArtists }
+        .distinct()
+        .take(6)
+
+    val inferred = songs
+        .map { RecommendationManager.inferMetadata(VideoItem(it.videoId, it.title, it.author, it.durationText)) }
+    val genre = inferred.groupingBy { it.genre.lowercase() }.eachCount().maxByOrNull { it.value }?.key
+        ?.takeIf { it.isNotBlank() && it != "unknown" }
+    val mood = inferred.groupingBy { it.mood.lowercase() }.eachCount().maxByOrNull { it.value }?.key
+        ?.takeIf { it.isNotBlank() && it != "unknown" }
+
+    val queries = LinkedHashSet<String>()
+    if (similarArtists.size >= 2) {
+        queries.add("${similarArtists.take(4).joinToString(" ")} ${genre ?: "music"} playlist")
+        seedArtists.firstOrNull()?.let { seed ->
+            queries.add("$seed ${similarArtists.take(3).joinToString(" ")} playlist")
+        }
+        if (genre != null) queries.add("$genre ${similarArtists.take(3).joinToString(" ")} community playlist")
+        if (mood != null) queries.add("$mood ${similarArtists.take(3).joinToString(" ")} playlist")
+    }
+
+    val cleanName = playlistName.trim()
+    if (cleanName.isNotEmpty() && cleanName.lowercase() !in genericNames && seedArtists.none { cleanName.lowercase() == it }) {
+        queries.add("$cleanName similar artists playlist")
+    }
+
+    if (queries.isEmpty()) {
+        if (genre != null) queries.add("$genre community playlist")
+        queries.add("music discovery similar artists playlist")
+    }
+    return queries.take(5)
+}
+
+private fun playlistRecommendationScore(
+    playlist: AlbumItem,
+    seedArtists: Set<String>,
+    similarArtists: Set<String>,
+    genreWords: Set<String>
+): Int {
+    val text = "${playlist.title} ${playlist.author} ${playlist.songCount}".lowercase()
+    val junk = listOf(
+        "1 hour", "1hr", "2 hour", "3 hour", "hour loop", "loop", "nonstop", "non-stop",
+        "all songs", "full album", "discography", "best of", "greatest hits", "only", "radio edit"
+    )
+    if (junk.any { text.contains(it) }) return Int.MIN_VALUE
+    if (playlist.playlistId.isBlank() || !(playlist.playlistId.startsWith("PL") || playlist.playlistId.startsWith("VL"))) return Int.MIN_VALUE
+
+    val seedHits = seedArtists.count { it.isNotBlank() && text.contains(it) }
+    val similarHits = similarArtists.count { it.isNotBlank() && text.contains(it) }
+    val genreHits = genreWords.count { it.isNotBlank() && text.contains(it) }
+
+    if (seedHits > 0 && similarHits == 0 && genreHits == 0) return Int.MIN_VALUE
+    if (seedArtists.isNotEmpty() &&
+        text.matches(Regex(""".*\b(${seedArtists.joinToString("|") { Regex.escape(it) }})\b.*playlist.*""")) &&
+        similarHits == 0
+    ) {
+        return Int.MIN_VALUE
+    }
+
+    var score = 0
+    score += similarHits * 35
+    score += genreHits * 14
+    score += if (playlist.author.isNotBlank()) 8 else 0
+    score += if (playlist.thumbnail.isNotBlank()) 6 else 0
+    score -= seedHits * 10
+    return score
+}
+
+private fun filterRecommendedPlaylistSongs(songs: List<VideoItem>): List<VideoItem> {
+    return songs
+        .filter { !RecommendationManager.isCompilationTrack(it.title, it.durationText) }
+        .filter { !RecommendationManager.isNonMusicVideo(it.title, it.author) }
+        .filter { !RecommendationManager.isUnofficialContent(it.title, it.author) }
+        .distinctBy { it.videoId }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,26 +185,30 @@ fun PlaylistDetailScreen(
         }
         isLoadingRecommendations = true
         withContext(Dispatchers.IO) {
-            val queries = mutableListOf<String>()
-            val plName = pl.name.trim()
-            val genericNames = listOf("playlist", "new playlist", "imported playlist", "favorites", "liked", "custom playlist")
-            if (plName.isNotEmpty() && !genericNames.any { plName.lowercase() == it }) {
-                queries.add("$plName playlist")
-            }
-            
-            // Extract top artist
-            val topArtist = songs.groupBy { it.author }
+            val seedArtists = songs
+                .groupBy { RecommendationManager.normalizeArtistName(it.author) }
                 .filter { it.key.isNotBlank() }
-                .maxByOrNull { it.value.size }?.key?.trim()
-            if (!topArtist.isNullOrEmpty()) {
-                queries.add("$topArtist playlist")
-            }
-            
-            val allResults = mutableListOf<com.vinmusic.innertube.AlbumItem>()
-            for (query in queries.take(2)) {
+                .entries
+                .sortedByDescending { it.value.size }
+                .take(3)
+                .map { it.key }
+                .toSet()
+            val similarArtists = seedArtists
+                .flatMap { RecommendationManager.SIMILAR_ARTISTS_MAP[it].orEmpty() }
+                .map { RecommendationManager.normalizeArtistName(it) }
+                .filter { it.isNotBlank() && it !in seedArtists }
+                .toSet()
+            val genreWords = songs
+                .map { RecommendationManager.inferMetadata(VideoItem(it.videoId, it.title, it.author, it.durationText)) }
+                .flatMap { listOf(it.genre, it.mood, it.language) }
+                .map { it.lowercase() }
+                .filter { it.isNotBlank() && it != "unknown" }
+                .toSet()
+
+            val allResults = mutableListOf<AlbumItem>()
+            for (query in smartPlaylistQueries(pl.name, songs)) {
                 try {
-                    val searchResult = com.vinmusic.innertube.InnerTube.searchAll(query)
-                    allResults.addAll(searchResult.albums)
+                    allResults.addAll(InnerTube.searchCommunityPlaylists(query))
                 } catch (e: Exception) {
                     android.util.Log.e("VIN_STREAM", "Failed recommendation search for $query", e)
                 }
@@ -120,7 +216,12 @@ fun PlaylistDetailScreen(
             
             val uniquePlaylists = allResults
                 .distinctBy { it.playlistId }
-                .filter { it.playlistId.startsWith("PL") || it.playlistId.startsWith("VL") }
+                .map { playlist ->
+                    playlist to playlistRecommendationScore(playlist, seedArtists, similarArtists, genreWords)
+                }
+                .filter { it.second > Int.MIN_VALUE }
+                .sortedByDescending { it.second }
+                .map { it.first }
                 .take(8)
             
             withContext(Dispatchers.Main) {
@@ -137,9 +238,10 @@ fun PlaylistDetailScreen(
             recommendedPlaylistSongs = emptyList()
             withContext(Dispatchers.IO) {
                 try {
-                    val (_, playlistSongs) = com.vinmusic.innertube.InnerTube.getPlaylistSongs(recommendedPl.playlistId)
+                    val (_, playlistSongs) = InnerTube.getPlaylistSongs(recommendedPl.playlistId)
+                    val curatedSongs = filterRecommendedPlaylistSongs(playlistSongs)
                     withContext(Dispatchers.Main) {
-                        recommendedPlaylistSongs = playlistSongs
+                        recommendedPlaylistSongs = curatedSongs
                         isLoadingPlaylistSongs = false
                     }
                 } catch (e: Exception) {
@@ -152,6 +254,42 @@ fun PlaylistDetailScreen(
             recommendedPlaylistSongs = emptyList()
             isLoadingPlaylistSongs = false
         }
+    }
+
+    selectedRecommendedPlaylist?.let { recommendedPl ->
+        HomeRemotePlaylistDetailScreen(
+            playlist = recommendedPl,
+            songs = recommendedPlaylistSongs,
+            isLoading = isLoadingPlaylistSongs,
+            onBack = { selectedRecommendedPlaylist = null },
+            onPlaySong = { song, queue ->
+                vm.setQueue(queue, queue.indexOfFirst { it.videoId == song.videoId }.coerceAtLeast(0))
+            },
+            onImport = {
+                if (recommendedPlaylistSongs.isNotEmpty()) {
+                    scope.launch(Dispatchers.IO) {
+                        val playlistDbId = db.playlistDao().insertPlaylist(PlaylistEntity(name = recommendedPl.title))
+                        recommendedPlaylistSongs.forEachIndexed { index, song ->
+                            db.playlistDao().insertSong(
+                                PlaylistSongEntity(
+                                    playlistId = playlistDbId,
+                                    videoId = song.videoId,
+                                    title = song.title,
+                                    author = song.author,
+                                    durationText = song.durationText,
+                                    position = index
+                                )
+                            )
+                        }
+                        withContext(Dispatchers.Main) {
+                            android.widget.Toast.makeText(ctx, "Imported '${recommendedPl.title}' successfully!", android.widget.Toast.LENGTH_LONG).show()
+                            selectedRecommendedPlaylist = null
+                        }
+                    }
+                }
+            }
+        )
+        return
     }
 
     // Rename playlist dialog

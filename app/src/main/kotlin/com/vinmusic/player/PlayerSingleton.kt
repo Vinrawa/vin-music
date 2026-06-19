@@ -25,6 +25,9 @@ import kotlinx.coroutines.*
 import java.io.File
 import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
+import coil3.request.SuccessResult
+import coil3.request.allowHardware
+import coil3.toBitmap
 
 /**
  * Singleton that holds the ONE ExoPlayer instance shared between
@@ -509,6 +512,61 @@ object PlayerSingleton {
         return builder.build()
     }
 
+    // ── Artwork Helpers ──────────────────────────────────────────────────────────
+
+    /**
+     * Try to load artwork bytes from Coil's disk cache.
+     * Coil caches thumbnails when they're loaded in the UI, so this avoids
+     * a network round-trip for songs the user has already seen.
+     */
+    private suspend fun loadArtBytesFromCoilCache(ctx: Context, videoId: String, thumbnail: String, thumbnailHd: String): ByteArray? {
+        return try {
+            val loader = SingletonImageLoader.get(ctx)
+            // Try HD first, then standard
+            val urls = listOfNotNull(
+                thumbnailHd.takeIf { it.isNotBlank() },
+                thumbnail.takeIf { it.isNotBlank() },
+                "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+            )
+            for (url in urls) {
+                val request = ImageRequest.Builder(ctx)
+                    .data(url)
+                    .allowHardware(false)
+                    .build()
+                val result = loader.execute(request)
+                if (result is SuccessResult) {
+                    val bitmap = result.image.toBitmap()
+                    val stream = java.io.ByteArrayOutputStream()
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, stream)
+                    return stream.toByteArray()
+                }
+            }
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "Coil cache artwork load failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Save artwork bytes to local thumbnail file for future instant loading
+     * (both online and offline playback).
+     */
+    private fun saveArtBytesToLocal(ctx: Context?, videoId: String, artBytes: ByteArray) {
+        if (ctx == null || artBytes.isEmpty()) return
+        try {
+            val thumbnailDir = File(ctx.filesDir, "thumbnails")
+            if (!thumbnailDir.exists()) thumbnailDir.mkdirs()
+            val thumbnailFile = File(thumbnailDir, "$videoId.jpg")
+            if (!thumbnailFile.exists() || thumbnailFile.length() == 0L) {
+                thumbnailFile.writeBytes(artBytes)
+                Log.d(TAG, "Saved artwork to local thumbnail file: ${thumbnailFile.absolutePath}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to save artwork locally: ${e.message}")
+        }
+    }
+
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun playSong(song: VideoItem, startPositionMs: Long = 0L) {
         context?.let { acquireWakeLocks(it) }
@@ -595,13 +653,19 @@ object PlayerSingleton {
                             val dl = database.downloadDao().get(song.videoId)
                             if (dl?.thumbnailPath != null) {
                                 val file = java.io.File(dl.thumbnailPath)
-                                if (file.exists()) artBytes = file.readBytes()
+                                if (file.exists() && file.length() > 0) artBytes = file.readBytes()
                             }
                             if (artBytes == null) {
                                 val cachePath = java.io.File(ctx.filesDir, "thumbnails/${song.videoId}.jpg")
-                                if (cachePath.exists()) artBytes = cachePath.readBytes()
+                                if (cachePath.exists() && cachePath.length() > 0) artBytes = cachePath.readBytes()
                             }
-                        } catch (e: Exception) {}
+                            // Fallback: try Coil disk cache for offline songs too
+                            if (artBytes == null) {
+                                artBytes = loadArtBytesFromCoilCache(ctx, song.videoId, song.thumbnail, song.thumbnailHd)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Offline artwork load failed: ${e.message}")
+                        }
                     }
                 } else {
                     errorMessage = null
@@ -627,14 +691,35 @@ object PlayerSingleton {
                             val dl = database.downloadDao().get(song.videoId)
                             if (dl?.thumbnailPath != null) {
                                 val file = java.io.File(dl.thumbnailPath)
-                                if (file.exists()) artBytes = file.readBytes()
+                                if (file.exists() && file.length() > 0) artBytes = file.readBytes()
                             }
                             // Fallback: check standard filesDir directory
                             if (artBytes == null) {
                                 val cachePath = java.io.File(ctx.filesDir, "thumbnails/${song.videoId}.jpg")
-                                if (cachePath.exists()) artBytes = cachePath.readBytes()
+                                if (cachePath.exists() && cachePath.length() > 0) artBytes = cachePath.readBytes()
                             }
-                        } catch (e: Exception) {}
+                            // Fallback: try Coil disk cache (populated from UI browsing)
+                            if (artBytes == null) {
+                                artBytes = loadArtBytesFromCoilCache(ctx, song.videoId, song.thumbnail, song.thumbnailHd)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Artwork disk load failed: ${e.message}")
+                        }
+                    }
+
+                    // 2. IMMEDIATELY update notification with artwork bytes (before stream URL fetch)
+                    // This makes the cover appear instantly instead of waiting 2-5s for stream URL
+                    if (artBytes != null) {
+                        withContext(Dispatchers.Main) {
+                            if (currentSong?.videoId == song.videoId) {
+                                notificationMediaItem = buildMediaItem(song, null, artBytes)
+                                // ForwardingPlayer reads notificationMediaItem automatically;
+                                // the notification will pick up artwork bytes when it refreshes
+                                // after the stream URL is set.
+                            }
+                        }
+                        // Save to local thumbnail file for future offline use
+                        saveArtBytesToLocal(ctx, song.videoId, artBytes)
                     }
 
                     var fetchedUrl = urlDeferred.await()

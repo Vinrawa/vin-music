@@ -1,63 +1,151 @@
 package com.vinmusic.lyrics
 
 import com.google.gson.Gson
+import com.google.gson.JsonObject
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.w3c.dom.Element
 import org.w3c.dom.Node
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import javax.xml.parsers.DocumentBuilderFactory
 
-object BetterLyricsClient {
+/**
+ * Client for the Unison lyrics API (unison.boidu.dev).
+ *
+ * Supports two lookup strategies:
+ *   1. **Direct** — `GET /lyrics?v={videoId}` (fastest, uses YTM video ID)
+ *   2. **Search** — `GET /lyrics/search?q={query}` (fallback when videoId lookup fails)
+ *
+ * Response format: `{ success: true, data: { lyrics, format, syncType, videoId, ... } }`
+ *   - format: "ttml" → word-level rich sync
+ *   - format: "lrc"  → line-level sync
+ *   - format: "plain" → unsynced text
+ */
+object UnisonClient {
     private val gson = Gson()
     @Volatile private var disabledUntilMs: Long = 0L
     private val http = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(4, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
-    fun fetch(title: String, artist: String, durationMs: Long, album: String? = null): LyricsResult? {
-        if (System.currentTimeMillis() < disabledUntilMs) return null
+    private const val BASE_HOST = "unison.boidu.dev"
 
-        val urlBuilder = HttpUrl.Builder()
+    fun isAvailable(): Boolean = System.currentTimeMillis() >= disabledUntilMs
+
+    /**
+     * Fetch lyrics via direct videoId lookup, falling back to search.
+     * Returns null if the API is disabled or returns no usable lyrics.
+     */
+    fun fetch(videoId: String, title: String, artist: String, durationMs: Long = 0L): LyricsResult? {
+        if (!isAvailable()) return null
+
+        // Strategy A: Direct lookup by videoId
+        if (videoId.isNotBlank()) {
+            val direct = fetchByVideoId(videoId)
+            if (direct != null) return direct
+        }
+
+        // Strategy B: Search by title + artist
+        if (title.isNotBlank()) {
+            val query = if (artist.isNotBlank()) "$title $artist" else title
+            return fetchBySearch(query)
+        }
+
+        return null
+    }
+
+    // ── Strategy A: Direct lookup ────────────────────────────────────────────
+
+    private fun fetchByVideoId(videoId: String): LyricsResult? {
+        val url = HttpUrl.Builder()
             .scheme("https")
-            .host("lyrics-api.boidu.dev")
-            .addPathSegment("getLyrics")
-            .addQueryParameter("s", title)
-            .addQueryParameter("a", artist)
+            .host(BASE_HOST)
+            .addPathSegment("lyrics")
+            .addQueryParameter("v", videoId)
+            .build()
 
-        if (durationMs > 0L) {
-            urlBuilder.addQueryParameter("d", (durationMs / 1000L).toString())
-        }
-        if (!album.isNullOrBlank()) {
-            urlBuilder.addQueryParameter("al", album)
-        }
+        val body = executeRequest(url) ?: return null
+        return parseUnisonResponse(body)
+    }
 
+    // ── Strategy B: Search ────────────────────────────────────────────────────
+
+    private fun fetchBySearch(query: String): LyricsResult? {
+        val encoded = URLEncoder.encode(query.trim(), "UTF-8")
+        val url = HttpUrl.Builder()
+            .scheme("https")
+            .host(BASE_HOST)
+            .addPathSegments("lyrics/search")
+            .addQueryParameter("q", encoded)
+            .build()
+
+        val body = executeRequest(url) ?: return null
+        return parseUnisonResponse(body)
+    }
+
+    // ── HTTP ─────────────────────────────────────────────────────────────────
+
+    private fun executeRequest(url: HttpUrl): String? {
         val request = Request.Builder()
-            .url(urlBuilder.build())
+            .url(url)
             .header("User-Agent", "VinMusic/2.0")
             .header("Accept", "application/json")
             .build()
 
-        val body = http.newCall(request).execute().use { response ->
+        return http.newCall(request).execute().use { response ->
             if (response.code == 401 || response.code == 403) {
                 disabledUntilMs = System.currentTimeMillis() + TimeUnit.HOURS.toMillis(12)
-                return null
+                return@use null
             }
-            if (!response.isSuccessful) return null
+            if (!response.isSuccessful) return@use null
             response.body?.string()
-        } ?: return null
+        }
+    }
 
-        val json = gson.fromJson(body, Map::class.java) ?: return null
-        val ttml = (json["ttml"] as? String)?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        val lines = BetterLyricsTtmlParser.parse(ttml)
-        return if (lines.isNotEmpty()) LyricsResult.Synced(lines, "BetterLyrics") else null
+    // ── Response parsing ─────────────────────────────────────────────────────
+
+    private fun parseUnisonResponse(body: String): LyricsResult? {
+        val json = gson.fromJson(body, JsonObject::class.java) ?: return null
+        val success = json.get("success")?.asBoolean ?: false
+        if (!success) return null
+
+        val data = json.getAsJsonObject("data") ?: return null
+        val lyrics = data.get("lyrics")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val format = data.get("format")?.asString ?: "plain"
+        val syncType = data.get("syncType")?.asString ?: ""
+        val source = "Unison"
+
+        return when (format) {
+            "ttml" -> {
+                val lines = TtmlParser.parse(lyrics, forceRichSync = syncType == "richsync")
+                if (lines.isNotEmpty()) LyricsResult.Synced(lines, source) else null
+            }
+            "lrc" -> {
+                val lines = LyricsHelper.parseLrc(lyrics)
+                if (lines.isNotEmpty()) LyricsResult.Synced(lines, source) else null
+            }
+            else -> {
+                // "plain" or unknown
+                LyricsResult.Plain(lyrics, source)
+            }
+        }
     }
 }
 
-private object BetterLyricsTtmlParser {
-    fun parse(ttml: String): List<LyricsLine> {
+// ── TTML Parser (shared, used by Unison for richsync lyrics) ──────────────────
+
+internal object TtmlParser {
+    /**
+     * Parse TTML string into synced lyrics lines.
+     * Filters out background vocal spans (ttm:role="x-bg").
+     *
+     * @param forceRichSync If true, mark all lines as richSync regardless of word timings
+     *   (used when the API declares syncType="richsync" even if timing data is sparse).
+     */
+    fun parse(ttml: String, forceRichSync: Boolean = false): List<LyricsLine> {
         return runCatching {
             val factory = DocumentBuilderFactory.newInstance().apply {
                 isNamespaceAware = true
@@ -84,13 +172,6 @@ private object BetterLyricsTtmlParser {
                     ?: 0L
 
                 val text = if (words.isNotEmpty()) {
-                    // TTML word spans are space-delimited by spec: the space lives in
-                    // text nodes *between* <span> siblings, not inside any span. So
-                    // span.textContent ("I") has no trailing space inside it, which is
-                    // why the old joinToString("") produced "Ifoundalove". Joining with
-                    // a single space is the TTML-correct rendering. (hasTrailingSpace
-                    // is still detected from inter-span text nodes below so it stays
-                    // accurate for any karaoke UI that needs it.)
                     words.joinToString(" ") { it.text }.trim()
                 } else {
                     p.textContent?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
@@ -103,7 +184,8 @@ private object BetterLyricsTtmlParser {
                         timeMs = lineStart,
                         text = text,
                         endTimeMs = lineEnd.takeIf { it > lineStart } ?: 0L,
-                        words = words
+                        words = words,
+                        isRichSync = forceRichSync || (words.isNotEmpty() && words.any { it.endMs > 0 })
                     )
                 }
             }
@@ -112,10 +194,17 @@ private object BetterLyricsTtmlParser {
         }.getOrElse { emptyList() }
     }
 
+    /**
+     * Collect word-level `<span>` elements, filtering out background vocals.
+     */
     private fun collectTimedWords(root: Element): List<WordTiming> {
         val spans = mutableListOf<Element>()
         collectElements(root, "span", spans)
         return spans.mapNotNull { span ->
+            // Filter background vocals (ttm:role="x-bg")
+            val role = span.getAttribute("ttm:role")
+            if (role == "x-bg") return@mapNotNull null
+
             val start = parseTime(attr(span, "begin")) ?: return@mapNotNull null
             val end = parseTime(attr(span, "end"))
                 ?: parseTime(attr(span, "dur"))?.let { start + it }
@@ -125,9 +214,7 @@ private object BetterLyricsTtmlParser {
             val text = collapsed.trim()
             if (text.isBlank()) return@mapNotNull null
             // Detect whether a whitespace text node follows this span inside the
-            // parent <p> — that's where TTML stores inter-word spaces (e.g.
-            // "<span>I</span> <span>found</span>"). Reading the sibling keeps
-            // hasTrailingSpace accurate even though span.textContent itself has none.
+            // parent <p> — that's where TTML stores inter-word spaces.
             val next = span.nextSibling
             val trailingSpace = next is org.w3c.dom.Text &&
                 next.textContent.any { it.isWhitespace() }
@@ -135,7 +222,8 @@ private object BetterLyricsTtmlParser {
                 text = text,
                 startMs = start,
                 endMs = end.takeIf { it > start } ?: 0L,
-                hasTrailingSpace = trailingSpace
+                hasTrailingSpace = trailingSpace,
+                isBgVocal = false  // BG vocals are filtered out; field kept for Phase 2
             )
         }.sortedBy { it.startMs }
     }

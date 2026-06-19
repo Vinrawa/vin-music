@@ -562,6 +562,18 @@ object InnerTube {
             .trim()
     }
 
+    /** Parse duration string like "3:45" or "1:02:30" into total seconds. Returns 0 on failure. */
+    private fun parseDurationSeconds(dur: String): Long {
+        if (dur.isBlank()) return 0L
+        val parts = dur.split(":").mapNotNull { it.trim().toIntOrNull() }
+        return when (parts.size) {
+            3 -> parts[0] * 3600L + parts[1] * 60L + parts[2]
+            2 -> parts[0] * 60L + parts[1]
+            1 -> parts[0].toLong()
+            else -> 0L
+        }
+    }
+
     private fun musicArtistText(textNode: Any?): String {
         val map = textNode as? Map<*, *> ?: return ""
         val runs = map["runs"] as? List<*> ?: return ytText(textNode)
@@ -1777,16 +1789,37 @@ object InnerTube {
                 ?.get("contents") as? List<*> ?: return AllSearchResults()
 
             // Fetch true music songs via our dedicated YTM search,
-            // while parsing artists and albums from standard YouTube search.
+            // while parsing artists, albums, and videos from standard YouTube search.
             val songs   = search(query).toMutableList()
+            val videos  = mutableListOf<VideoItem>()
             val artists = mutableListOf<ArtistItem>()
             val albums  = mutableListOf<AlbumItem>()
+            val songVideoIds = songs.map { it.videoId }.toSet()
 
             for (sec in secs) {
                 val items = ((sec as? Map<*, *>)?.get("itemSectionRenderer") as? Map<*, *>)
                     ?.get("contents") as? List<*> ?: continue
                 for (item in items) {
                     val m = item as? Map<*, *> ?: continue
+
+                    // Video (user uploads, unreleased, leaked, non-official content)
+                    val renderer = (m["videoRenderer"]
+                        ?: m["compactVideoRenderer"]
+                        ?: m["gridVideoRenderer"]) as? Map<*, *>
+                    if (renderer != null) {
+                        val vid   = renderer["videoId"] as? String ?: ""
+                        val title = ytText(renderer["title"])
+                        val author = ytText(renderer["ownerText"])
+                            .ifBlank { ytText(renderer["shortBylineText"]) }
+                        val dur   = ytText(renderer["lengthText"])
+                        if (vid.isNotBlank() && title.isNotBlank() && vid !in songVideoIds) {
+                            // Exclude very short items (< 30s) — likely intros/outros/ads
+                            val durSec = parseDurationSeconds(dur)
+                            if (durSec >= 30) {
+                                videos.add(VideoItem(vid, title, author, dur))
+                            }
+                        }
+                    }
 
                     // Artist/Channel
                     m["channelRenderer"]?.let { c ->
@@ -1825,7 +1858,7 @@ object InnerTube {
                     }
                 }
             }
-            val finalResults = AllSearchResults(songs, artists, albums)
+            val finalResults = AllSearchResults(songs, videos.distinctBy { it.videoId }.take(30), artists, albums)
             searchAllCache.put(query, Pair(System.currentTimeMillis(), finalResults))
             finalResults
         } catch (e: Exception) { AllSearchResults() }
@@ -2390,6 +2423,7 @@ class AlbumItem(
 
 data class AllSearchResults(
     val songs:   List<VideoItem>   = emptyList(),
+    val videos:  List<VideoItem>   = emptyList(),
     val artists: List<ArtistItem>  = emptyList(),
     val albums:  List<AlbumItem>   = emptyList(),
     val singles: List<AlbumItem>   = emptyList()

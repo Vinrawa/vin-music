@@ -708,26 +708,26 @@ fun SettingsScreen(
             SettingsDropdown(
                 title = "Provider Selection",
                 current = when(lyricsProvider) {
+                    "YouTube Music" -> "YouTube Music Only"
+                    "BetterLyrics" -> "BetterLyrics Only"
                     "LrcLib" -> "LRCLIB Only"
-                    "Paxsenix" -> "Paxsenix Only"
                     "KuGou" -> "KuGou Only"
-                    "SimpMusic" -> "SimpMusic Only"
                     else -> "Auto (Recommended)"
                 },
-                options = listOf("Auto (Recommended)", "LRCLIB Only", "Paxsenix Only", "KuGou Only", "SimpMusic Only")
+                options = listOf("Auto (Recommended)", "YouTube Music Only", "BetterLyrics Only", "LRCLIB Only", "KuGou Only")
             ) { selected ->
                 val code = when(selected) {
+                    "YouTube Music Only" -> "YouTube Music"
+                    "BetterLyrics Only" -> "BetterLyrics"
                     "LRCLIB Only" -> "LrcLib"
-                    "Paxsenix" -> "Paxsenix"
                     "KuGou Only" -> "KuGou"
-                    "SimpMusic Only" -> "SimpMusic"
                     else -> "Auto"
                 }
                 lyricsProvider = code
                 prefs.edit().putString("lyrics_provider", code).apply()
             }
             HorizontalDivider(color = VinColors.GlassBorder, modifier = Modifier.padding(vertical = 4.dp))
-            SettingsInfo(title = "Source Priority", value = "SimpMusic → LrcLib → KuGou → Paxsenix (when Auto)")
+            SettingsInfo(title = "Source Priority", value = "YouTube Music -> BetterLyrics -> LrcLib -> KuGou -> Genius (when Auto)")
             HorizontalDivider(color = VinColors.GlassBorder, modifier = Modifier.padding(vertical = 4.dp))
             SettingsInfo(title = "Synced Lyrics", value = "Tap any lyric line to seek to that position")
         }

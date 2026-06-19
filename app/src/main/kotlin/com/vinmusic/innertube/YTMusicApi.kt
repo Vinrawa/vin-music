@@ -118,6 +118,91 @@ object YTMusicApi {
 
     fun getCookie(): String? = appContext?.let { YTMusicSession.getCookie(it) }
 
+    /** Display-only account info (email + primary flag + total account count). */
+    data class AccountInfo(
+        val email: String?,
+        val isPrimary: Boolean,
+        val count: Int,
+    )
+
+    // Best-effort primary-account marker for the account_menu endpoint. This is
+    // a reverse-engineered guess — if a real capture confirms a different key,
+    // swap it here (single substitution point). The parser stays defensive: if
+    // this key never matches, the UI falls back to "(1 of N)" for multi-account.
+    private const val PRIMARY_MARKER_KEY = "isPrimary"
+
+    /**
+     * Display-only: fetch the signed-in account's email + count from YTM's
+     * account_menu endpoint using the stored cookie. Used ONLY for the
+     * "Connected as <email>" label — never fed to Firebase or any auth flow.
+     * Returns AccountInfo(email=null, ...) on any failure (caller degrades to a
+     * no-email label). Single network call + single recursive scan.
+     */
+    fun getAccountInfo(ctx: Context): AccountInfo {
+        val cookie = YTMusicSession.getCookie(ctx) ?: return AccountInfo(null, false, 0)
+        val body = mapOf(
+            "context" to webRemixContext(),
+            "deviceTheme" to "DEVICE_THEME_SUPPORTED",
+            "userInterfaceTheme" to "USER_INTERFACE_THEME_DARK"
+        )
+        val raw = try {
+            buildRequest("$BASE/account/account_menu?prettyPrint=false", body)
+                .build().let { http.newCall(it).execute().use { it.body?.string() } }
+        } catch (e: Exception) {
+            Log.e(TAG, "getAccountInfo request failed: ${e.message}")
+            return AccountInfo(null, false, 0)
+        } ?: return AccountInfo(null, false, 0)
+
+        return parseAccountInfo(raw)
+    }
+
+    /**
+     * Defensive recursive scan of account_menu JSON. Collects every node whose
+     * key is "email" with a value matching an email regex, tracking whether it
+     * sits under the primary-marker. Returns the primary email if any was
+     * flagged, else the first email; count is distinct emails found.
+     */
+    private fun parseAccountInfo(raw: String): AccountInfo {
+        return try {
+            val root = gson.fromJson(raw, Map::class.java)
+                ?: return AccountInfo(null, false, 0)
+            val emailRegex = Regex("""[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}""")
+            val seen = LinkedHashMap<String, Boolean>() // email -> isPrimary
+
+            fun scan(node: Any?, inPrimary: Boolean = false) {
+                when (node) {
+                    is Map<*, *> -> {
+                        var primaryHere = inPrimary
+                        val primaryFlag = node[PRIMARY_MARKER_KEY]
+                        if (primaryFlag is Boolean && primaryFlag) primaryHere = true
+                        if (primaryFlag is String && primaryFlag.lowercase() in listOf("primary", "active", "true", "selected")) primaryHere = true
+
+                        val emailVal = node["email"]
+                        if (emailVal is String && emailRegex.matches(emailVal)) {
+                            val prev = seen[emailVal] ?: false
+                            seen[emailVal] = prev || primaryHere
+                        }
+                        node.values.forEach { scan(it, primaryHere) }
+                    }
+                    is List<*> -> node.forEach { scan(it, inPrimary) }
+                }
+            }
+            scan(root)
+
+            if (seen.isEmpty()) return AccountInfo(null, false, 0)
+            val primaryEntry = seen.entries.firstOrNull { it.value }
+            val chosen = primaryEntry ?: seen.entries.first()
+            AccountInfo(
+                email = chosen.key,
+                isPrimary = chosen.value,
+                count = seen.size
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "parseAccountInfo failed: ${e.message}")
+            AccountInfo(null, false, 0)
+        }
+    }
+
     fun findUrlInNode(node: Any?): String? {
         when (node) {
             is Map<*, *> -> {

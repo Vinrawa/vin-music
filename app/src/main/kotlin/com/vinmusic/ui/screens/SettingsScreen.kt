@@ -129,6 +129,11 @@ fun SettingsScreen(
         val cm = CookieManager.getInstance()
         ytCookieConnected = false
         ytAccountEmail = null
+        // Safety timeout: if removeAllCookies callback never fires (known
+        // WebView bug on some OEMs), open the WebView anyway after 500ms.
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (!showYtWebViewLogin) showYtWebViewLogin = true
+        }, 500)
         cm.removeAllCookies { _ ->
             cm.flush()
             showYtWebViewLogin = true
@@ -847,25 +852,23 @@ fun SettingsScreen(
                 title = "Provider Selection",
                 current = when(lyricsProvider) {
                     "YouTube Music" -> "YouTube Music Only"
-                    "BetterLyrics" -> "BetterLyrics Only"
+                    "Unison" -> "Unison Only"
                     "LrcLib" -> "LRCLIB Only"
-                    "KuGou" -> "KuGou Only"
                     else -> "Auto (Recommended)"
                 },
-                options = listOf("Auto (Recommended)", "YouTube Music Only", "BetterLyrics Only", "LRCLIB Only", "KuGou Only")
+                options = listOf("Auto (Recommended)", "Unison Only", "YouTube Music Only", "LRCLIB Only")
             ) { selected ->
                 val code = when(selected) {
                     "YouTube Music Only" -> "YouTube Music"
-                    "BetterLyrics Only" -> "BetterLyrics"
+                    "Unison Only" -> "Unison"
                     "LRCLIB Only" -> "LrcLib"
-                    "KuGou Only" -> "KuGou"
                     else -> "Auto"
                 }
                 lyricsProvider = code
                 prefs.edit().putString("lyrics_provider", code).apply()
             }
             HorizontalDivider(color = VinColors.GlassBorder, modifier = Modifier.padding(vertical = 4.dp))
-            SettingsInfo(title = "Source Priority", value = "YouTube Music -> BetterLyrics -> LrcLib -> KuGou -> Genius (when Auto)")
+            SettingsInfo(title = "Source Priority", value = "Unison → LrcLib → YouTube Music → Genius (when Auto)")
             HorizontalDivider(color = VinColors.GlassBorder, modifier = Modifier.padding(vertical = 4.dp))
             SettingsInfo(title = "Synced Lyrics", value = "Tap any lyric line to seek to that position")
         }

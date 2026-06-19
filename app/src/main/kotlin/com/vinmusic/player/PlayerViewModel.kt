@@ -21,6 +21,7 @@ import com.vinmusic.innertube.VideoItem
 import com.vinmusic.lyrics.LyricsHelper
 import com.vinmusic.lyrics.LyricsLine
 import com.vinmusic.lyrics.LyricsResult
+import com.vinmusic.lyrics.qualityOf
 import kotlinx.coroutines.*
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -188,6 +189,7 @@ class PlayerViewModel @Inject constructor(
     private var progressJob: Job? = null
     private var syncLyricsJob: Job? = null
     private var lyricsJob:   Job? = null
+    private var lyricsUpgradeJob: Job? = null
     private var previousLyricsVideoId: String? = null
     private var lyricsSuppressedForVideoId: String? = null
     private var cachedPlainTimelineText: String? = null
@@ -201,6 +203,8 @@ class PlayerViewModel @Inject constructor(
     private fun resetLyricsState(song: VideoItem?) {
         lyricsJob?.cancel()
         lyricsJob = null
+        lyricsUpgradeJob?.cancel()
+        lyricsUpgradeJob = null
         lyricsResult = LyricsResult.NotFound
         isLyricsLoading = false
         isTransliterating = false
@@ -299,13 +303,15 @@ class PlayerViewModel @Inject constructor(
                     }
 
                     // Fetch palette in parallel (don't block next song change)
-                    launch {
+                    launch(Dispatchers.IO) {
                         try {
                             val ctx = getApplication<Application>()
                             val url = song.thumbnailHd.takeIf { it.isNotBlank() } ?: song.thumbnail
                             val extracted = com.vinmusic.ui.utils.ColorExtractor.extractColorsFromUrl(ctx, url)
-                            if (currentSong?.videoId == song.videoId) {
-                                currentPalette = extracted
+                            withContext(Dispatchers.Main) {
+                                if (currentSong?.videoId == song.videoId) {
+                                    currentPalette = extracted
+                                }
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to extract palette", e)
@@ -313,11 +319,13 @@ class PlayerViewModel @Inject constructor(
                     }
 
                     // Fetch description in parallel
-                    launch {
+                    launch(Dispatchers.IO) {
                         try {
                             val desc = com.vinmusic.innertube.InnerTube.getSongDescription(song.videoId)
-                            if (currentSong?.videoId == song.videoId) {
-                                currentSongDescription = desc
+                            withContext(Dispatchers.Main) {
+                                if (currentSong?.videoId == song.videoId) {
+                                    currentSongDescription = desc
+                                }
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to load description", e)
@@ -616,7 +624,14 @@ class PlayerViewModel @Inject constructor(
 
     private fun cleanCachedSyncedLines(lines: List<LyricsLine>): List<LyricsLine> {
         return lines
-            .map { it.copy(text = it.text.trim()) }
+            .map {
+                it.copy(
+                    text = it.text.trim(),
+                    words = it.words
+                        ?.filter { word -> word.text.isNotBlank() }
+                        ?.sortedBy { word -> word.startMs }
+                )
+            }
             .filter { it.text.isNotEmpty() && !isNonLyricDisplayLine(it.text) }
             .sortedBy { it.timeMs }
     }
@@ -689,6 +704,13 @@ class PlayerViewModel @Inject constructor(
                             updateSyncedLyricIndex()
                             isLyricsLoading = false
                         }
+                    }
+
+                    // Quality upgrade: if cached result is Plain, kick off a
+                    // background fetch. If network returns Synced (higher quality),
+                    // replace cache and update UI seamlessly.
+                    if (res is LyricsResult.Plain) {
+                        upgradeCachedLyrics(song.videoId, song.title, song.author, fetchVideoId)
                     }
                     return@launch
                 }
@@ -788,6 +810,52 @@ class PlayerViewModel @Inject constructor(
     // checkAndResetLyricsForNewSong removed — song changes are now handled
     // reliably via the snapshotFlow collector with proper job cancellation.
 
+    /**
+     * Background quality upgrade: fetches lyrics from network and replaces
+     * cache if the new result is higher quality than the cached Plain.
+     * Non-blocking — the user already sees the cached Plain lyrics.
+     */
+    private fun upgradeCachedLyrics(
+        videoId: String,
+        title: String,
+        author: String,
+        fetchVideoId: String
+    ) {
+        lyricsUpgradeJob?.cancel()
+        lyricsUpgradeJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val prefs = getApplication<Application>().getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
+                val provider = prefs.getString("lyrics_provider", "Auto") ?: "Auto"
+                val fetched = LyricsHelper.fetch(title, author, videoId, provider, knownSongDurationMs())
+                val newRes = normalizeLyricsResult(fetched)
+
+                // Only upgrade if: song still playing AND new result is higher quality
+                if (currentSong?.videoId != fetchVideoId) return@launch
+                if (qualityOf(newRes) <= qualityOf(LyricsResult.Plain("", ""))) return@launch
+                // newRes quality must be > 1 (Plain) → i.e., Synced
+
+                if (newRes is LyricsResult.Synced) {
+                    // Replace cache
+                    db.cachedLyricsDao().insert(CachedLyricsEntity(
+                        videoId, "synced", com.google.gson.Gson().toJson(newRes.lines)
+                    ))
+                    // Update UI on Main thread
+                    withContext(Dispatchers.Main) {
+                        if (currentSong?.videoId == fetchVideoId) {
+                            lyricsResult = newRes
+                            updateSyncedLyricIndex()
+                            Log.d(TAG, "Lyrics quality upgraded: Plain → Synced via ${newRes.source}")
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Lyrics quality upgrade failed", e)
+            }
+        }
+    }
+
     // ── Like ──────────────────────────────────────────────────────────────────
 
     fun toggleLike(song: VideoItem) {
@@ -855,6 +923,10 @@ class PlayerViewModel @Inject constructor(
     }
 
     private fun applyEQInternal() {
+        val gains = listOf(eqSubBass, eqBass, eqLowMid, eqMid, eqTreble, eqAir)
+        val hasBandEq = gains.any { kotlin.math.abs(it) >= 0.05f }
+        eqEnabled = hasBandEq
+
         prefs.edit().apply {
             putBoolean("eq_enabled", eqEnabled)
             putFloat("eq_60hz", eqSubBass)
@@ -868,7 +940,6 @@ class PlayerViewModel @Inject constructor(
 
         equalizer?.runCatching {
             enabled = eqEnabled
-            val gains = listOf(eqSubBass, eqBass, eqLowMid, eqMid, eqTreble, eqAir)
             val targetsMilliHz = listOf(60_000, 250_000, 1_000_000, 4_000_000, 8_000_000, 16_000_000)
             val range = bandLevelRange
             val minLevel = range.getOrNull(0)?.toInt() ?: -1500

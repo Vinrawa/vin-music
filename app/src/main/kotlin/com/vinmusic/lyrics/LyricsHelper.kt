@@ -12,20 +12,40 @@ data class WordTiming(
     val text: String,
     val startMs: Long,
     val endMs: Long = 0L,
-    val hasTrailingSpace: Boolean = true
+    val hasTrailingSpace: Boolean = true,
+    val isBgVocal: Boolean = false
 )
 
 data class LyricsLine(
     val timeMs: Long,
     val text: String,
     val endTimeMs: Long = 0L,
-    val words: List<WordTiming>? = null
-)
+    val words: List<WordTiming>? = null,
+    val isRichSync: Boolean = false
+) {
+    companion object {
+        /** Build a LyricsLine with isRichSync auto-detected from word timings. */
+        fun withRichSync(line: LyricsLine, forceRichSync: Boolean = false): LyricsLine {
+            val rich = forceRichSync ||
+                (line.words?.isNotEmpty() == true && line.words.any { it.endMs > 0 })
+            return if (rich == line.isRichSync) line else line.copy(isRichSync = rich)
+        }
+    }
+}
 
 sealed class LyricsResult {
     data class Synced(val lines: List<LyricsLine>, val source: String) : LyricsResult()
     data class Plain(val text: String, val source: String) : LyricsResult()
     object NotFound : LyricsResult()
+}
+
+/** Quality score for cache comparison. Higher = better. */
+fun qualityOf(result: LyricsResult?): Int = when (result) {
+    is LyricsResult.Synced -> {
+        if (result.lines.any { it.isRichSync }) 3 else 2
+    }
+    is LyricsResult.Plain -> 1
+    else -> 0
 }
 
 object LyricsHelper {
@@ -111,13 +131,12 @@ object LyricsHelper {
         if (provider != "Auto") {
             try {
                 when (provider) {
+                    "Unison" -> { tryUnison(videoId, title, artist, durationMs)?.let { return it } }
                     "YouTube Music" -> { tryYouTubeMusic(videoId)?.let { return it } }
-                    "BetterLyrics" -> { tryBetterLyrics(title, artist, durationMs)?.let { return it } }
                     "LrcLib" -> {
                         tryLrcLibGet(t, a, durationMs)?.let { return it }
                         tryLrcLibSearch(t, a, durationMs)?.let { return it }
                     }
-                    "KuGou" -> { tryKugou(t, a)?.let { return it } }
                     "Genius" -> { tryGenius(t, a)?.let { return it } }
                 }
             } catch (e: Exception) {
@@ -126,23 +145,23 @@ object LyricsHelper {
             return LyricsResult.NotFound
         }
 
-        // Auto: sequential provider fallback — try each provider in order and
-        // return the FIRST usable result.
+        // Auto: quality-tier based provider waterfall.
         //
-        // Order: YouTube Music → BetterLyrics → LrcLib → KuGou → Genius
-        // YTM is #1 because it returns perfectly-synced lyrics from the SAME
-        // source as the playing song (no drift, official/Musixmatch-backed).
-        // Synced results return immediately. A Plain result from an early
-        // provider is remembered as a fallback while we keep trying later
-        // providers for a Synced version.
+        // Quality tiers (higher = better):
+        //   Tier 3 — RichSync (word-level): Unison(richsync) → LrcLib(synced+words) → YTM
+        //   Tier 2 — LineSync (line-level): Unison(linesync) → LrcLib(synced) → YTM
+        //   Tier 1 — Plain:                 Unison(plain) → Genius
+        //
+        // We run ALL providers and pick the best quality result.
+        // Provider order is the tiebreaker within the same tier.
         val providers: List<Pair<String, () -> LyricsResult?>> = listOf(
-            "YouTube Music" to { tryYouTubeMusic(videoId) },
-            "BetterLyrics"  to { tryBetterLyrics(title, artist, durationMs) },
+            "Unison"        to { tryUnison(videoId, title, artist, durationMs) },
             "LrcLib"        to { tryLrcLibGet(t, a, durationMs) ?: tryLrcLibSearch(t, a, durationMs) },
-            "KuGou"         to { tryKugou(t, a) },
+            "YouTube Music" to { tryYouTubeMusic(videoId) },
             "Genius"        to { tryGenius(t, a) }
         )
 
+        var bestSynced: LyricsResult.Synced? = null
         var fallbackPlain: LyricsResult.Plain? = null
         for ((name, provider) in providers) {
             if (isBlacklisted(name)) continue
@@ -155,25 +174,31 @@ object LyricsHelper {
             }
             when (res) {
                 is LyricsResult.Synced -> {
-                    android.util.Log.d("LyricsHelper", "Lyrics found via $name (synced)")
-                    return res
+                    // Keep best quality: richsync > linesync, first-wins as tiebreaker
+                    val isNewRichSync = res.lines.any { it.isRichSync }
+                    val currentIsRichSync = bestSynced?.lines?.any { it.isRichSync } == true
+                    if (bestSynced == null || (isNewRichSync && !currentIsRichSync)) {
+                        bestSynced = res
+                        android.util.Log.d("LyricsHelper", "Better synced candidate via $name (richSync=$isNewRichSync)")
+                    }
                 }
                 is LyricsResult.Plain -> {
-                    android.util.Log.d("LyricsHelper", "Lyrics found via $name (plain) — keeping as fallback")
+                    android.util.Log.d("LyricsHelper", "Plain lyrics found via $name — keeping as fallback")
                     if (fallbackPlain == null) fallbackPlain = res
                 }
                 else -> { /* NotFound or null — try next provider */ }
             }
         }
-        return fallbackPlain ?: LyricsResult.NotFound
+        return bestSynced ?: fallbackPlain ?: LyricsResult.NotFound
     }
 
-    private fun tryBetterLyrics(title: String, artist: String, durationMs: Long): LyricsResult? {
-        if (title.isBlank() || artist.isBlank()) return null
+    private fun tryUnison(videoId: String, title: String, artist: String, durationMs: Long): LyricsResult? {
         val exactArtist = artist.replace(" - Topic", "", ignoreCase = true).trim()
+        val cleanedTitle = cleanTitle(title).ifBlank { title.trim() }
         val cleanedArtist = cleanArtist(artist).ifBlank { exactArtist }
-        return BetterLyricsClient.fetch(
-            title = cleanTitle(title).ifBlank { title.trim() },
+        return UnisonClient.fetch(
+            videoId = videoId,
+            title = cleanedTitle,
             artist = cleanedArtist,
             durationMs = durationMs
         )
@@ -445,129 +470,6 @@ object LyricsHelper {
         return false
     }
 
-    private fun mergeSyncedWithGeniusText(
-        synced: LyricsResult.Synced,
-        title: String,
-        artist: String
-    ): LyricsResult.Synced? {
-        val genius = tryGenius(title, artist) as? LyricsResult.Plain ?: return null
-        val geniusLines = sanitizePlainLyrics(genius.text)
-            .lines()
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-        val syncedLines = synced.lines
-            .filter { it.text.isNotBlank() }
-            .sortedBy { it.timeMs }
-
-        if (geniusLines.size < 4 || syncedLines.size < 4) return null
-
-        val averageSyncedWords = syncedLines
-            .map { it.text.split(Regex("\\s+")).count { word -> word.isNotBlank() } }
-            .average()
-        if (averageSyncedWords <= 2.4 && syncedLines.size > geniusLines.size) {
-            return LyricsResult.Synced(
-                mapTextLinesToTimeline(geniusLines, syncedLines),
-                "${synced.source} timeline + Genius"
-            )
-        }
-
-        val merged = mutableListOf<LyricsLine>()
-        var plainCursor = 0
-        var matched = 0
-
-        syncedLines.forEachIndexed { index, syncedLine ->
-            val searchStart = plainCursor.coerceAtMost(geniusLines.lastIndex)
-            val searchEnd = (plainCursor + 8).coerceAtMost(geniusLines.lastIndex)
-            var bestIndex = -1
-            var bestScore = 0.0
-
-            for (candidateIndex in searchStart..searchEnd) {
-                val score = lyricLineSimilarity(syncedLine.text, geniusLines[candidateIndex])
-                if (score > bestScore) {
-                    bestScore = score
-                    bestIndex = candidateIndex
-                }
-            }
-
-            if (bestIndex >= 0 && bestScore >= 0.46) {
-                merged.add(LyricsLine(syncedLine.timeMs, geniusLines[bestIndex]))
-                plainCursor = bestIndex + 1
-                matched++
-            } else {
-                val ratioIndex = ((index.toDouble() / syncedLines.size.toDouble()) * geniusLines.size)
-                    .toInt()
-                    .coerceIn(0, geniusLines.lastIndex)
-                val ratioScore = lyricLineSimilarity(syncedLine.text, geniusLines[ratioIndex])
-                if (ratioScore >= 0.58) {
-                    merged.add(LyricsLine(syncedLine.timeMs, geniusLines[ratioIndex]))
-                    plainCursor = (ratioIndex + 1).coerceAtLeast(plainCursor)
-                    matched++
-                } else {
-                    merged.add(syncedLine)
-                }
-            }
-        }
-
-        val confidence = matched.toDouble() / syncedLines.size.toDouble()
-        if (confidence < 0.42) {
-            if (geniusLines.size < 2) return null
-            val lastSyncedIndex = (syncedLines.size - 1).coerceAtLeast(1)
-            val lastGeniusIndex = (geniusLines.size - 1).coerceAtLeast(0)
-            val orderMapped = syncedLines.mapIndexed { index, syncedLine ->
-                val ratioIndex = ((index.toDouble() / lastSyncedIndex.toDouble()) * lastGeniusIndex.toDouble())
-                    .toInt()
-                    .coerceIn(0, geniusLines.lastIndex)
-                LyricsLine(syncedLine.timeMs, geniusLines[ratioIndex])
-            }.distinctBy { "${it.timeMs}|${it.text}" }
-            return LyricsResult.Synced(orderMapped, "${synced.source} timeline + Genius")
-        }
-        return LyricsResult.Synced(merged, "${synced.source} + Genius")
-    }
-
-    private fun mapTextLinesToTimeline(
-        textLines: List<String>,
-        timeline: List<LyricsLine>
-    ): List<LyricsLine> {
-        if (textLines.isEmpty() || timeline.isEmpty()) return emptyList()
-        val lastTextIndex = (textLines.size - 1).coerceAtLeast(1)
-        val lastTimelineIndex = (timeline.size - 1).coerceAtLeast(0)
-        return textLines.mapIndexed { index, text ->
-            val timelineIndex = if (textLines.size == 1) {
-                0
-            } else {
-                ((index.toDouble() / lastTextIndex.toDouble()) * lastTimelineIndex.toDouble())
-                    .toInt()
-                    .coerceIn(0, timeline.lastIndex)
-            }
-            LyricsLine(timeline[timelineIndex].timeMs, text)
-        }.distinctBy { "${it.timeMs}|${it.text}" }
-    }
-
-    private fun lyricLineSimilarity(left: String, right: String): Double {
-        val a = lyricTokens(left)
-        val b = lyricTokens(right)
-        if (a.isEmpty() || b.isEmpty()) return 0.0
-        val common = a.intersect(b).size.toDouble()
-        val union = a.union(b).size.toDouble().coerceAtLeast(1.0)
-        val jaccard = common / union
-        val leftNorm = a.joinToString(" ")
-        val rightNorm = b.joinToString(" ")
-        val containsBoost = if (leftNorm.contains(rightNorm) || rightNorm.contains(leftNorm)) 0.22 else 0.0
-        return (jaccard + containsBoost).coerceAtMost(1.0)
-    }
-
-    private fun lyricTokens(text: String): Set<String> {
-        return text
-            .lowercase()
-            .replace(Regex("""\([^)]*\)|\[[^]]*]"""), " ")
-            .replace(Regex("""[^a-z0-9\u0900-\u097F\u0A00-\u0A7F\s']"""), " ")
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-            .split(" ")
-            .filter { it.length > 1 }
-            .toSet()
-    }
-
     fun get(url: String): String? {
         val request = Request.Builder()
             .url(url)
@@ -576,46 +478,6 @@ object LyricsHelper {
         val response = http.newCall(request).execute()
         if (!response.isSuccessful) return null
         return response.use { it.body?.string() }
-    }
-
-    // ── KuGou Music Scraper ────────────────────────────────────────────────────
-    private fun tryKugou(title: String, artist: String): LyricsResult? {
-        val query = if (artist.isNotEmpty()) "$title $artist".trim() else title
-        val searchUrl = "http://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=${enc(query)}"
-        val searchResp = get(searchUrl) ?: return null
-        return try {
-            val searchJson = gson.fromJson(searchResp, Map::class.java) ?: return null
-            val candidates = searchJson["candidates"] as? List<*> ?: return null
-            if (candidates.isEmpty()) return null
-
-            val firstCand = candidates[0] as? Map<*, *> ?: return null
-            val id = (firstCand["id"] as? Number)?.toLong() ?: return null
-            val accesskey = firstCand["accesskey"] as? String ?: return null
-
-            val downloadUrl = "http://lyrics.kugou.com/download?ver=1&client=pc&id=$id&accesskey=$accesskey&fmt=lrc&charset=utf8"
-            val downloadResp = get(downloadUrl) ?: return null
-            val downloadJson = gson.fromJson(downloadResp, Map::class.java) ?: return null
-            val base64Content = downloadJson["content"] as? String ?: return null
-            if (base64Content.isBlank()) return null
-
-            val decodedBytes = android.util.Base64.decode(base64Content, android.util.Base64.DEFAULT)
-            val lrcString = String(decodedBytes, Charsets.UTF_8)
-
-            if (lrcString.isNotBlank()) {
-                val lines = parseLrc(lrcString)
-                if (lines.isNotEmpty()) {
-                    LyricsResult.Synced(lines, "KuGou")
-                } else {
-                    sanitizePlainLyrics(lrcString)
-                        .takeIf { it.isNotBlank() }
-                        ?.let { LyricsResult.Plain(it, "KuGou") }
-                }
-            } else {
-                null
-            }
-        } catch (_: Exception) {
-            null
-        }
     }
 
     fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")

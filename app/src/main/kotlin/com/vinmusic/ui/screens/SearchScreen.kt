@@ -58,7 +58,7 @@ private fun deleteSearchHistoryItem(context: Context, query: String, onUpdate: (
     onUpdate(currentHistory)
 }
 
-private enum class SearchTab { ALL, SONGS, ARTISTS, ALBUMS }
+private enum class SearchTab { ALL, SONGS, VIDEOS, ARTISTS, ALBUMS }
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -278,7 +278,7 @@ fun SearchScreen(
             Column(Modifier.fillMaxSize()) {
                 // ── Tabs ──────────────────────────────────────────────────────────────
                 val allSongs   = allResults.songs + moreSongs
-                val hasResults = allResults.songs.isNotEmpty() || allResults.artists.isNotEmpty() || allResults.albums.isNotEmpty()
+                val hasResults = allResults.songs.isNotEmpty() || allResults.videos.isNotEmpty() || allResults.artists.isNotEmpty() || allResults.albums.isNotEmpty()
                 if (hasResults || isLoading) {
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -290,6 +290,7 @@ fun SearchScreen(
                             val label = when (tab) {
                                 SearchTab.ALL     -> "All"
                                 SearchTab.SONGS   -> if (allSongs.isNotEmpty()) "Songs (${allSongs.size}+)" else "Songs"
+                                SearchTab.VIDEOS  -> if (allResults.videos.isNotEmpty()) "Videos (${allResults.videos.size}+)" else "Videos"
                                 SearchTab.ARTISTS -> "Artists"
                                 SearchTab.ALBUMS  -> "Albums"
                             }
@@ -401,6 +402,25 @@ fun SearchScreen(
                                             onMore = { onSongMore(song) })
                                     }
                                 }
+                                // 4. Videos (user uploads, unreleased, leaked content)
+                                if (allResults.videos.isNotEmpty()) {
+                                    item { SearchSectionHeader("Videos") }
+                                    items(allResults.videos.take(5)) { video ->
+                                        SongListItem(song = video, isPlaying = vm.currentSong?.videoId == video.videoId,
+                                            onClick = { onSongClick(video, allResults.videos) },
+                                            onMore = { onSongMore(video) })
+                                    }
+                                    if (allResults.videos.size > 5) {
+                                        item {
+                                            TextButton(
+                                                onClick = { activeTab = SearchTab.VIDEOS },
+                                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                                            ) {
+                                                Text("See all ${allResults.videos.size} videos →", color = VinColors.Accent, fontSize = 13.sp)
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             // ── SONGS tab: all songs + load more ─────────────────────
@@ -442,6 +462,24 @@ fun SearchScreen(
                                 } else {
                                     items(allResults.artists) { artist ->
                                         ArtistListItem(artist) { selectedArtist = artist }
+                                    }
+                                }
+                            }
+
+                            // ── VIDEOS tab: user uploads, unreleased, leaked ────────────
+                            SearchTab.VIDEOS -> {
+                                if (allResults.videos.isEmpty()) {
+                                    item { SearchEmptyState("No videos found") }
+                                } else {
+                                    item {
+                                        Text("${allResults.videos.size} videos found",
+                                            fontSize = 13.sp, color = VinColors.Secondary,
+                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                                    }
+                                    items(allResults.videos) { video ->
+                                        SongListItem(song = video, isPlaying = vm.currentSong?.videoId == video.videoId,
+                                            onClick = { onSongClick(video, allResults.videos) },
+                                            onMore = { onSongMore(video) })
                                     }
                                 }
                             }

@@ -19,6 +19,9 @@ import com.vinmusic.player.PlayerSingleton
 import kotlinx.coroutines.*
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 class DownloadService : Service() {
 
@@ -187,20 +190,22 @@ class DownloadService : Service() {
             // Create a copying entity storing the stream url in filePath
             var thumbnailPath: String? = null
             val tUrl = entity.thumbnailUrl
-            if (tUrl != null) {
-                try {
-                    // Prioritize the provided thumbnail URL (which is usually the square YouTube Music album art)
+            try {
+                // Prioritize the provided thumbnail URL (which is usually the square YouTube Music album art)
+                if (tUrl != null) {
                     thumbnailPath = downloadThumbnail(videoId, tUrl)
-                    // Fallback to the standard 16:9 YouTube video thumbnail if the first one fails
-                    if (thumbnailPath == null) {
-                        val fallbackUrl = "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg"
-                        thumbnailPath = downloadThumbnail(videoId, fallbackUrl)
-                    }
-                    Log.d(TAG, "Thumbnail downloaded for $videoId: $thumbnailPath")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to download thumbnail for $videoId: ${e.message}")
-                    // Continue with download even if thumbnail fails
                 }
+                // Fallback to YouTube video thumbnails (maxres → hq)
+                if (thumbnailPath == null) {
+                    thumbnailPath = downloadThumbnail(videoId, "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg")
+                }
+                if (thumbnailPath == null) {
+                    thumbnailPath = downloadThumbnail(videoId, "https://i.ytimg.com/vi/$videoId/hqdefault.jpg")
+                }
+                Log.d(TAG, "Thumbnail downloaded for $videoId: $thumbnailPath")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to download thumbnail for $videoId: ${e.message}")
+                // Continue with download even if thumbnail fails
             }
             
             val downloadingEntity = entity.copy(status = "downloading", progress = 0, filePath = url, thumbnailPath = thumbnailPath)
@@ -486,6 +491,13 @@ class DownloadService : Service() {
         }
     }
 
+    private val thumbnailHttp = OkHttpClient.Builder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
     private suspend fun downloadThumbnail(videoId: String, thumbnailUrl: String): String? = withContext(Dispatchers.IO) {
         try {
             val thumbnailDir = File(applicationContext.filesDir, "thumbnails")
@@ -495,13 +507,30 @@ class DownloadService : Service() {
             
             val thumbnailFile = File(thumbnailDir, "$videoId.jpg")
             
-            java.net.URL(thumbnailUrl).openStream().use { input ->
+            val request = Request.Builder()
+                .url(thumbnailUrl)
+                .header("User-Agent", "VinMusic/2.0")
+                .build()
+
+            val body = thumbnailHttp.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use null
+                response.body?.byteStream()
+            } ?: return@withContext null
+
+            body.use { input ->
                 thumbnailFile.outputStream().use { output ->
                     input.copyTo(output)
                 }
             }
             
-            Log.d(TAG, "Thumbnail saved: ${thumbnailFile.absolutePath}")
+            // Validate: delete if empty/corrupt
+            if (thumbnailFile.length() == 0L) {
+                thumbnailFile.delete()
+                Log.w(TAG, "Thumbnail was 0 bytes, deleted: $videoId")
+                return@withContext null
+            }
+            
+            Log.d(TAG, "Thumbnail saved (${thumbnailFile.length()} bytes): ${thumbnailFile.absolutePath}")
             return@withContext thumbnailFile.absolutePath
         } catch (e: Exception) {
             Log.e(TAG, "Error downloading thumbnail for $videoId: ${e.message}")

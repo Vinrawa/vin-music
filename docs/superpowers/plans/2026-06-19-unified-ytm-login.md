@@ -62,7 +62,7 @@ Open `account_menu_response.json`. Look for:
 2. The primary/active marker — check for any of: `isPrimary`, `selected`, `isActive`, `accountType`, or a top-level `activeAccount` wrapper. Note EXACTLY which key (if any) flags the primary account.
 3. If multiple accounts are present, note how the array is structured (e.g. `actions[0].getMultiPageMenuAction.menuRenderer.sections[0].accountSectionListRenderer`).
 
-Record the real key names. These replace the guesses (`isPrimary`/`selected`/`activeAccount`) in Task 3.
+Record the real key names. These replace the guesses (`isPrimary`) in Task 1's `parseAccountEmail()` (NOT Task 3 — the hardcoded `isPrimary` lives in Task 1's parsing code).
 
 - [ ] **Step 3: Clean up the scratch files**
 
@@ -86,25 +86,38 @@ If no valid cookie is available in this environment, note in the spec that the p
 **Files:**
 - Modify: `app/src/main/kotlin/com/vinmusic/innertube/YTMusicApi.kt` (add method near `getCookie()` at line 119)
 
-- [ ] **Step 1: Add the method**
+- [ ] **Step 1: If Task 0 captured a real primary-marker key, note it**
 
-Insert after the existing `fun getCookie()` (line 119) so it sits with the other account-related helpers:
+Task 0's job was to confirm which key (if any) flags the primary account. Before inserting the code below, look at Task 0's recorded findings:
+- If a real key was confirmed (e.g. `"isSelected"`, `"accountType": "primary"`), use that in the `PRIMARY_MARKER_KEY` constant below.
+- If Task 0 couldn't run (no cookie available) or found no marker, leave `PRIMARY_MARKER_KEY = "isPrimary"` as a best-effort guess — the parser stays defensive and the UI falls back to `(1 of N)` when multiple emails appear with no primary flag.
+
+- [ ] **Step 2: Add the data class + single fetch/scan method**
+
+Insert after the existing `fun getCookie()` (line 119). This replaces the earlier two-method design — one fetch, one recursive scan, returns everything in `AccountInfo`. Avoids the redundant second network round-trip:
 
 ```kotlin
+/** Display-only account info (email + primary flag + total account count). */
+data class AccountInfo(
+    val email: String?,
+    val isPrimary: Boolean,
+    val count: Int,
+)
+
+// Best-effort primary-account marker. If Task 0 captured a real key, replace
+// this value with it. The parser is defensive — if this key never matches,
+// the UI falls back to "(1 of N)" when multiple emails are present.
+private const val PRIMARY_MARKER_KEY = "isPrimary"
+
 /**
- * Display-only: fetch the signed-in account's email from YTM's account_menu
- * endpoint using the stored cookie. Used ONLY for the "Connected as <email>"
- * label — never fed to Firebase or any auth flow. Returns null on any failure
- * (the caller degrades gracefully to a no-email label).
- *
- * NOTE: the primary-account marker key was captured from a real response in
- * Task 0. If that verification wasn't possible, parsing stays defensive
- * (recursive email scan + "(1 of N)" fallback).
+ * Display-only: fetch the signed-in account's email + count from YTM's
+ * account_menu endpoint using the stored cookie. Used ONLY for the
+ * "Connected as <email>" label — never fed to Firebase or any auth flow.
+ * Returns AccountInfo(email=null, isPrimary=false, count=0) on any failure
+ * (the caller degrades gracefully to a no-email label). Single network call.
  */
-fun getAccountEmail(ctx: Context): String? {
-    val cookie = YTMusicSession.getCookie(ctx) ?: return null
-    // Build an authenticated POST. buildRequest already injects Cookie +
-    // Authorization: SAPISIDHASH, so we reuse it with an empty body context.
+fun getAccountInfo(ctx: Context): AccountInfo {
+    val cookie = YTMusicSession.getCookie(ctx) ?: return AccountInfo(null, false, 0)
     val body = mapOf(
         "context" to webRemixContext(),
         "deviceTheme" to "DEVICE_THEME_SUPPORTED",
@@ -114,40 +127,38 @@ fun getAccountEmail(ctx: Context): String? {
         buildRequest("$BASE/account/account_menu?prettyPrint=false", body)
             .build().let { http.newCall(it).execute().use { it.body?.string() } }
     } catch (e: Exception) {
-        Log.e(TAG, "getAccountEmail request failed: ${e.message}")
-        return null
-    } ?: return null
+        Log.e(TAG, "getAccountInfo request failed: ${e.message}")
+        return AccountInfo(null, false, 0)
+    } ?: return AccountInfo(null, false, 0)
 
-    return parseAccountEmail(raw)
+    return parseAccountInfo(raw)
 }
 
 /**
- * Defensive recursive scan of the account_menu JSON. Looks for any node whose
- * key is "email" with a value matching an email regex. Collects ALL matches
- * (multiple accounts possible). If exactly one, returns it. If several, tries
- * to pick the one flagged primary per Task 0's confirmed key; if no primary
- * marker, returns the first and the caller appends " (1 of N)".
+ * Defensive recursive scan of account_menu JSON. Collects every node whose
+ * key is "email" with a value matching an email regex, tracking whether it
+ * sits under the primary-marker. Returns the primary email if any was flagged,
+ * else the first email; count is the number of distinct emails found.
  */
-private fun parseAccountEmail(raw: String): String? {
+private fun parseAccountInfo(raw: String): AccountInfo {
     return try {
-        val root = gson.fromJson(raw, Map::class.java) ?: return null
+        val root = gson.fromJson(raw, Map::class.java) ?: return AccountInfo(null, false, 0)
         val emailRegex = Regex("""[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}""")
-        val emails = mutableListOf<Pair<String, Boolean>>() // (email, isPrimary)
+        val seen = LinkedHashMap<String, Boolean>() // email -> isPrimary
 
         fun scan(node: Any?, inPrimary: Boolean = false) {
             when (node) {
                 is Map<*, *> -> {
                     var primaryHere = inPrimary
-                    // Primary marker — replace this key name with the one
-                    // confirmed in Task 0. Common candidates: isPrimary, selected,
-                    // isActive. Check truthy boolean OR "primary"/"active" string.
-                    val primaryFlag = node["isPrimary"]
+                    val primaryFlag = node[PRIMARY_MARKER_KEY]
                     if (primaryFlag is Boolean && primaryFlag) primaryHere = true
-                    if (primaryFlag is String && primaryFlag.lowercase() in listOf("primary", "active", "true")) primaryHere = true
+                    if (primaryFlag is String && primaryFlag.lowercase() in listOf("primary", "active", "true", "selected")) primaryHere = true
 
                     val emailVal = node["email"]
                     if (emailVal is String && emailRegex.matches(emailVal)) {
-                        emails.add(emailVal to primaryHere)
+                        // Preserve the strongest primary flag seen for this email.
+                        val prev = seen[emailVal] ?: false
+                        seen[emailVal] = prev || primaryHere
                     }
                     node.values.forEach { scan(it, primaryHere) }
                 }
@@ -156,63 +167,31 @@ private fun parseAccountEmail(raw: String): String? {
         }
         scan(root)
 
-        when {
-            emails.isEmpty() -> null
-            emails.any { it.second } -> emails.first { it.second }.first
-            else -> emails.first().first
-        }
+        if (seen.isEmpty()) return AccountInfo(null, false, 0)
+        val primaryEntry = seen.entries.firstOrNull { it.value }
+        val chosen = primaryEntry ?: seen.entries.first()
+        AccountInfo(
+            email = chosen.key,
+            isPrimary = chosen.value,
+            count = seen.size
+        )
     } catch (e: Exception) {
-        Log.e(TAG, "parseAccountEmail failed: ${e.message}")
-        null
+        Log.e(TAG, "parseAccountInfo failed: ${e.message}")
+        AccountInfo(null, false, 0)
     }
-}
-
-/** How many distinct emails were found — used by the UI to append "(1 of N)". */
-fun getAccountEmailCount(ctx: Context): Int {
-    val cookie = YTMusicSession.getCookie(ctx) ?: return 0
-    val body = mapOf(
-        "context" to webRemixContext(),
-        "deviceTheme" to "DEVICE_THEME_SUPPORTED",
-        "userInterfaceTheme" to "USER_INTERFACE_THEME_DARK"
-    )
-    val raw = try {
-        buildRequest("$BASE/account/account_menu?prettyPrint=false", body)
-            .build().let { http.newCall(it).execute().use { it.body?.string() } }
-    } catch (e: Exception) { return 0 } ?: return 0
-    return countEmails(raw)
-}
-
-private fun countEmails(raw: String): Int {
-    return try {
-        val root = gson.fromJson(raw, Map::class.java) ?: return 0
-        val emailRegex = Regex("""[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}""")
-        val seen = mutableSetOf<String>()
-        fun scan(node: Any?) {
-            when (node) {
-                is Map<*, *> -> {
-                    val e = node["email"]
-                    if (e is String && emailRegex.matches(e)) seen.add(e)
-                    node.values.forEach { scan(it) }
-                }
-                is List<*> -> node.forEach { scan(it) }
-            }
-        }
-        scan(root)
-        seen.size
-    } catch (_: Exception) { 0 }
 }
 ```
 
-- [ ] **Step 2: Verify it compiles**
+- [ ] **Step 3: Verify it compiles**
 
 Run: `.\gradlew.bat :app:compileReleaseKotlin 2>&1 | Select-String -Pattern "error:|BUILD" | Select-Object -Last 10`
 Expected: `BUILD SUCCESSFUL` (no new errors)
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add app/src/main/kotlin/com/vinmusic/innertube/YTMusicApi.kt
-git commit -m "feat: add display-only getAccountEmail to YTMusicApi (account_menu scan)"
+git commit -m "feat: add display-only getAccountInfo to YTMusicApi (single account_menu scan)"
 ```
 
 ---
@@ -229,15 +208,27 @@ Near the top of the `SettingsScreen` composable (after the existing `ytCookieCon
 ```kotlin
 // Clears Google-domain cookies so the WebView shows the account chooser
 // instead of silently re-logging-in with the cached account.
+//
+// IMPORTANT — async race fix: CookieManager.removeAllCookies(callback) is
+// asynchronous. If we launch the WebView immediately after calling it, the
+// WebView can load BEFORE the cookie store is actually cleared → silent
+// re-login with the old account (the exact bug this helper exists to fix).
+// So we pass a ValueCallback that defers showYtWebViewLogin = true until the
+// clear completes. We also clear ytCookieConnected up-front so the UI
+// reflects the disconnected state immediately while the chooser is loading.
 val switchAccount = {
     val cm = CookieManager.getInstance()
-    cm.removeAllCookies(null)
-    cm.flush()
-    showYtWebViewLogin = true
+    ytCookieConnected = false
+    ytAccountEmail = null
+    cm.removeAllCookies { _ ->
+        // Invoked on the main thread once the cookie store is cleared.
+        cm.flush()
+        showYtWebViewLogin = true
+    }
 }
 ```
 
-Note: `removeAllCookies` is the simplest correct call. `removeSessionCookies` is a narrower alternative if testing shows it suffices — but `removeAllCookies` guarantees the chooser appears. If a targeted clear to `accounts.google.com` / `.google.com` is preferred later, swap it in; the behavior (chooser appears) is the acceptance criterion.
+Note: `removeAllCookies` is the simplest correct call. `removeSessionCookies` is a narrower alternative if testing shows it suffices — but `removeAllCookies` guarantees the chooser appears. If a targeted clear to `accounts.google.com` / `.google.com` is preferred later, swap it in; the behavior (chooser appears) is the acceptance criterion. The `ValueCallback<Boolean>` defers WebView launch until clear completes — do NOT revert to calling `showYtWebViewLogin = true` synchronously after `removeAllCookies`.
 
 - [ ] **Step 2: Verify it compiles**
 
@@ -269,20 +260,24 @@ Read `app/src/main/kotlin/com/vinmusic/ui/screens/SettingsScreen.kt` around line
 
 Note the exact line numbers — they'll be the replace target.
 
-- [ ] **Step 2: Add a state for the display-only email + account count**
+- [ ] **Step 2: Add a state for the display-only email + a version counter**
 
-Near the other `remember` state declarations (around line 94-96), add:
+Near the other `remember` state declarations (around line 94-96), add. **Do NOT key the `LaunchedEffect` on `ytCookieConnected` (a boolean)** — switch-account and manual-cookie-paste both re-set the cookie while already connected, so the boolean goes `true → true` and the effect never refires, leaving the label stale. Instead use a monotonically-increasing `ytConnectionVersion` that every successful cookie write increments:
 
 ```kotlin
 var ytAccountEmail by remember { mutableStateOf<String?>(null) }
 var ytAccountCount by remember { mutableStateOf(1) }
+var ytConnectionVersion by remember { mutableStateOf(0) }
 
-// Refresh the display-only email whenever connection state changes.
-LaunchedEffect(ytCookieConnected) {
+// Re-fetch the display-only email+count on EVERY connection change, including
+// true → true (switch account / re-paste cookie). Keying on the integer
+// version (not the boolean) guarantees a refire each time.
+LaunchedEffect(ytConnectionVersion) {
     if (ytCookieConnected) {
         kotlinx.coroutines.withContext(Dispatchers.IO) {
-            ytAccountEmail = YTMusicApi.getAccountEmail(ctx)
-            ytAccountCount = YTMusicApi.getAccountEmailCount(ctx).coerceAtLeast(1)
+            val info = YTMusicApi.getAccountInfo(ctx)
+            ytAccountEmail = info.email
+            ytAccountCount = info.count.coerceAtLeast(1)
         }
     } else {
         ytAccountEmail = null
@@ -290,6 +285,8 @@ LaunchedEffect(ytCookieConnected) {
     }
 }
 ```
+
+Every place that writes a successful cookie (WebView capture, manual paste Save, switch-account success) MUST also call `ytConnectionVersion++`. Those call sites are wired up in Steps 3, 5, and Task 2's `switchAccount`.
 
 - [ ] **Step 3: Replace the two-option dialog with a single card**
 
@@ -382,6 +379,7 @@ Box(
                 onClick = {
                     YTMusicSession.setCookie(ctx, ytCookieDraft)
                     ytCookieConnected = true
+                    ytConnectionVersion++   // refire email fetch (true→true case)
                     RecommendationManager.invalidateCache()
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent),
@@ -396,15 +394,26 @@ Box(
 
 Delete the old `if (showYtLoginOptionsDialog) { ... }` block (the two-option picker) and the old `if (showYtCookieDialog) { ... }` block (its field moved inline into the Advanced disclosure above). Keep `showYtWebViewLogin` exactly as-is.
 
-- [ ] **Step 5: Update the toast on successful WebView login**
+- [ ] **Step 5: Update the toast + version counter on successful WebView login**
 
-In the existing cookie-capture block (around line 1234 / 1252 — the `onPageFinished` / `shouldOverrideUrlLoading` handlers that call `YTMusicSession.setCookie`), the toast currently says `"Google YouTube Music Login Successful!"`. Change it to:
+In the existing cookie-capture block (around line 1234 / 1252 — the `onPageFinished` / `shouldOverrideUrlLoading` handlers that call `YTMusicSession.setCookie`), two changes:
+
+1. The toast currently says `"Google YouTube Music Login Successful!"`. Change it to:
 
 ```kotlin
 Toast.makeText(context, "YouTube Music connected", Toast.LENGTH_LONG).show()
 ```
 
 Deliberately no Cloud Sync mention.
+
+2. Right after the existing `ytCookieConnected = true` line in BOTH capture handlers (`onPageStarted` ~line 1230 and `onPageFinished` ~line 1248), add `ytConnectionVersion++` so the email label refires even when the user was already connected and re-logs-in / switches account via the WebView:
+
+```kotlin
+ytCookieConnected = true
+ytConnectionVersion++   // refire email fetch (true→true case)
+```
+
+Without this, switch-account-through-WebView leaves the label stale — same bug as the manual-paste path, same fix.
 
 - [ ] **Step 6: Verify it compiles**
 
@@ -446,8 +455,9 @@ Run through each case from the spec's Testing section:
 2. Cloud Sync card still works as before (its own Google button, durable). Reinstall + reconnect → backup recovers.
 3. Advanced → paste a cookie → YTM connects, email label best-effort.
 4. Multiple accounts → label `Connected as <email> (1 of N)`.
-5. `getAccountEmail` failure (airplane mode right after cookie capture) → label degrades to "YouTube Music connected", no crash.
-6. Switch account → Google cookies cleared → account chooser visible → different account → label updates.
+5. `getAccountInfo` failure (airplane mode right after cookie capture) → label degrades to "YouTube Music connected", no crash.
+6. Switch account → Google cookies cleared → account chooser visible → different account → label updates. **Repeat this 3× back-to-back** (re-connect, switch, re-connect, switch): `removeAllCookies` is async, so this specifically verifies the WebView doesn't occasionally load before the clear completes and silently re-login with the old account.
+7. Stale-label regression check: while already connected, paste a NEW cookie via Advanced → Save → label must update to the new account's email (this is the `true → true` case Fix #1 targets; without `ytConnectionVersion++` it stays stale).
 
 - [ ] **Step 3: Report results**
 
@@ -459,14 +469,16 @@ For each case, note PASS/FAIL. If any FAIL, file the specific symptom before con
 
 **1. Spec coverage:**
 - ✅ Merge two YTM options → Task 3
-- ✅ Display-only email → Task 1 (getAccountEmail) + Task 3 (label)
-- ✅ Multi-account (1 of N) → Task 1 (countEmails) + Task 3 (suffix)
+- ✅ Display-only email → Task 1 (getAccountInfo) + Task 3 (label)
+- ✅ Multi-account (1 of N) → Task 1 (AccountInfo.count) + Task 3 (suffix)
 - ✅ Switch account cookie clearing → Task 2 + Task 3 (button)
 - ✅ Advanced disclosure manual cookie → Task 3
 - ✅ Toast wording → Task 3 Step 5
 - ✅ Cloud Sync untouched → explicitly out of scope, no task touches it
 - ✅ Forward-path note (backend cookie-verify) → spec only, not built
+- ✅ Stale-label fix (true→true) → Task 3 Step 2 (version counter) + Steps 3/5 (ytConnectionVersion++)
+- ✅ Switch-account async race → Task 2 (ValueCallback defers WebView launch) + Task 4 test 6 (3× repeat)
 
-**2. Placeholder scan:** No TBD/TODO. All code blocks complete. The one genuine unknown (account_menu primary-marker key) is handled by Task 0 (capture + confirm) with a defensive fallback in Task 1's parser if Task 0 can't run.
+**2. Placeholder scan:** No TBD/TODO. All code blocks complete. The one genuine unknown (account_menu primary-marker key) is handled by Task 0 (capture + confirm) with an explicit "replace `PRIMARY_MARKER_KEY`" step in Task 1 and a defensive fallback if Task 0 can't run.
 
-**3. Type consistency:** `getAccountEmail(ctx): String?` and `getAccountEmailCount(ctx): Int` defined in Task 1, used in Task 3 with matching signatures. `switchAccount` lambda defined Task 2, used Task 3. `ytAccountEmail`/`ytAccountCount` declared Task 3 Step 2, used Step 3.
+**3. Type consistency:** `getAccountInfo(ctx): AccountInfo` defined in Task 1 (single method, single fetch), used in Task 3 Step 2 with matching signature. `AccountInfo(email, isPrimary, count)` fields consumed in Task 3. `switchAccount` lambda defined Task 2 (now takes the async-safe form), used Task 3. `ytAccountEmail`/`ytAccountCount`/`ytConnectionVersion` declared Task 3 Step 2; `ytConnectionVersion++` added in Steps 3 (manual paste) and 5 (WebView success) — covers both `true→true` paths.

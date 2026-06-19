@@ -97,6 +97,44 @@ fun SettingsScreen(
     var showYtLoginOptionsDialog by remember { mutableStateOf(false) }
     var showYtWebViewLogin by remember { mutableStateOf(false) }
 
+    // Display-only account email + count, refreshed via ytConnectionVersion.
+    // Keying the LaunchedEffect on the integer version (not the boolean) is
+    // deliberate: switch-account and manual-paste both re-set the cookie while
+    // already connected (true -> true), which wouldn't refire a boolean effect.
+    var ytAccountEmail by remember { mutableStateOf<String?>(null) }
+    var ytAccountCount by remember { mutableStateOf(1) }
+    var ytConnectionVersion by remember { mutableStateOf(0) }
+
+    LaunchedEffect(ytConnectionVersion) {
+        if (ytCookieConnected) {
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val info = com.vinmusic.innertube.YTMusicApi.getAccountInfo(ctx)
+                ytAccountEmail = info.email
+                ytAccountCount = info.count.coerceAtLeast(1)
+            }
+        } else {
+            ytAccountEmail = null
+            ytAccountCount = 1
+        }
+    }
+
+    // Clears Google-domain cookies so the WebView shows the account chooser
+    // instead of silently re-logging-in with the cached account.
+    //
+    // Async-race-safe: removeAllCookies(callback) defers showYtWebViewLogin
+    // until the clear completes — calling it synchronously would let the
+    // WebView load before the store is cleared (silent re-login, the exact
+    // bug this helper exists to fix).
+    val switchAccount = {
+        val cm = CookieManager.getInstance()
+        ytCookieConnected = false
+        ytAccountEmail = null
+        cm.removeAllCookies { _ ->
+            cm.flush()
+            showYtWebViewLogin = true
+        }
+    }
+
     var topPlayedSongs by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
 
     DisposableEffect(prefs) {
@@ -341,7 +379,11 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(24.dp))
 
-        // ── YouTube Music (always visible — Metrolist-style cookie login) ─────
+        // ── Connect to YouTube Music (single consolidated card) ─────────────
+        // Replaces the old two-option dialog (WebView "Sign In with Google" +
+        // "Manual Cookie Setup"). Cloud Sync lives in its own separate card
+        // below and is untouched by this.
+        var showAdvancedCookie by remember { mutableStateOf(false) }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -353,38 +395,134 @@ fun SettingsScreen(
                     )
                 )
                 .border(1.dp, VinColors.Accent.copy(alpha = 0.35f), RoundedCornerShape(20.dp))
-                .clickable { showYtLoginOptionsDialog = true }
                 .padding(18.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(VinColors.Accent.copy(alpha = 0.25f)),
-                    contentAlignment = Alignment.Center
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Icon(Icons.Default.MusicNote, null, tint = VinColors.Accent, modifier = Modifier.size(28.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(VinColors.Accent.copy(alpha = 0.25f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.MusicNote, null, tint = VinColors.Accent, modifier = Modifier.size(28.dp))
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Connect to YouTube Music",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = VinColors.Primary
+                        )
+                        val subtitle = if (ytCookieConnected) {
+                            val label = ytAccountEmail ?: "YouTube Music connected"
+                            if (ytAccountCount > 1 && ytAccountEmail != null) "$label (1 of $ytAccountCount)" else label
+                        } else {
+                            "Unlock your YTM home, library and liked songs"
+                        }
+                        Text(
+                            subtitle,
+                            fontSize = 12.sp,
+                            color = VinColors.Secondary,
+                            lineHeight = 16.sp
+                        )
+                    }
                 }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "YouTube Music login",
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = VinColors.Primary
+
+                if (!ytCookieConnected) {
+                    Button(
+                        onClick = { showYtWebViewLogin = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                    ) {
+                        Text("Connect", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                // CONSCIOUS DECISION: Disconnect only clears the
+                                // app's stored cookie — NOT WebView-level Google
+                                // cookies. Distinct from Switch account (which
+                                // DOES clear them to force the chooser). Disconnect
+                                // = "stop using this session"; reconnecting may
+                                // silently resume the same account.
+                                YTMusicSession.setCookie(ctx, null)
+                                ytCookieConnected = false
+                                RecommendationManager.invalidateCache()
+                                Toast.makeText(ctx, "Disconnected YouTube Music", Toast.LENGTH_SHORT).show()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = VinColors.White10),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text("Disconnect", fontSize = 12.sp, color = VinColors.Primary)
+                        }
+                        Button(
+                            onClick = switchAccount,
+                            colors = ButtonDefaults.buttonColors(containerColor = VinColors.White10),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text("Switch account", fontSize = 12.sp, color = VinColors.Primary)
+                        }
+                    }
+                }
+
+                // Advanced disclosure: manual cookie paste (power users).
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showAdvancedCookie = !showAdvancedCookie }
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        if (showAdvancedCookie) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
+                        null, tint = VinColors.Secondary, modifier = Modifier.size(18.dp)
                     )
                     Text(
-                        if (ytCookieConnected) "Connected — personalized recommendations on"
-                        else "Tap here to sign in with Google or setup manually",
-                        fontSize = 12.sp,
-                        color = VinColors.Secondary,
-                        lineHeight = 16.sp
+                        if (showAdvancedCookie) "Hide advanced" else "Advanced (paste cookie)",
+                        fontSize = 12.sp, color = VinColors.Secondary
                     )
                 }
-                Icon(Icons.Default.ChevronRight, null, tint = VinColors.Accent, modifier = Modifier.size(24.dp))
+                if (showAdvancedCookie) {
+                    OutlinedTextField(
+                        value = ytCookieDraft,
+                        onValueChange = { ytCookieDraft = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = {
+                            Text("Paste music.youtube.com cookie...", color = VinColors.Secondary, fontSize = 12.sp)
+                        },
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp, color = VinColors.Primary),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = VinColors.Accent,
+                            unfocusedBorderColor = VinColors.GlassBorder,
+                            focusedContainerColor = VinColors.White10,
+                            unfocusedContainerColor = VinColors.White10
+                        )
+                    )
+                    Button(
+                        onClick = {
+                            YTMusicSession.setCookie(ctx, ytCookieDraft)
+                            ytCookieConnected = true
+                            ytConnectionVersion++   // refire email fetch (true→true case)
+                            RecommendationManager.invalidateCache()
+                            Toast.makeText(ctx, "YouTube Music connected", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                    ) {
+                        Text("Save cookie", fontSize = 12.sp, color = Color.White)
+                    }
+                }
             }
         }
 
@@ -956,201 +1094,10 @@ fun SettingsScreen(
         )
     }
 
-    // ── YouTube Music Connection Dialogs ─────────────────────────────────────
-    if (showYtCookieDialog) {
-        AlertDialog(
-            onDismissRequest = { showYtCookieDialog = false },
-            title = { Text("Connect YouTube Music (Manual)", color = VinColors.Primary) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "1. Chrome mein music.youtube.com kholo aur login karo\n" +
-                        "2. F12 → Application → Cookies → music.youtube.com\n" +
-                        "3. Saari cookies copy karke neeche paste karo (SAPISID, SID, etc.)",
-                        fontSize = 12.sp,
-                        color = VinColors.Secondary,
-                        lineHeight = 18.sp
-                    )
-                    OutlinedTextField(
-                        value = ytCookieDraft,
-                        onValueChange = { ytCookieDraft = it },
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 160.dp),
-                        placeholder = { Text("SAPISID=...; SID=...") },
-                        maxLines = 6
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    YTMusicSession.setCookie(ctx, ytCookieDraft)
-                    ytCookieConnected = ytCookieDraft.isNotBlank()
-                    RecommendationManager.invalidateCache()
-                    ctx.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE).edit().clear().apply()
-                    showYtCookieDialog = false
-                    android.widget.Toast.makeText(ctx, "Cookie saved. Pull to refresh Home.", android.widget.Toast.LENGTH_LONG).show()
-                }) { Text("Save", color = VinColors.Accent) }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    YTMusicSession.setCookie(ctx, null)
-                    ytCookieDraft = ""
-                    ytCookieConnected = false
-                    RecommendationManager.invalidateCache()
-                    ctx.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE).edit().clear().apply()
-                    showYtCookieDialog = false
-                }) { Text("Clear", color = VinColors.Secondary) }
-            },
-            containerColor = VinColors.Surface
-        )
-    }
-
-    if (showYtLoginOptionsDialog) {
-        AlertDialog(
-            onDismissRequest = { showYtLoginOptionsDialog = false },
-            title = {
-                Text(
-                    text = "Connect YouTube Music",
-                    color = VinColors.Primary,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                ) {
-                    Text(
-                        text = "Sign in to access your custom mixes, liked songs, and personalized homepage recommendations from YouTube Music.",
-                        color = VinColors.Secondary,
-                        fontSize = 13.sp
-                    )
-
-                    // Option 1: Automatic Web Login (Google Sign-In)
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(VinColors.Accent.copy(alpha = 0.15f))
-                            .border(1.dp, VinColors.Accent.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
-                            .clickable {
-                                showYtLoginOptionsDialog = false
-                                showYtWebViewLogin = true
-                            }
-                            .padding(14.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(Color.White),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "G",
-                                    color = Color(0xFF4285F4),
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 18.sp
-                                )
-                            }
-                            Column {
-                                Text(
-                                    "Sign In with Google",
-                                    color = VinColors.Primary,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp
-                                )
-                                Text(
-                                    "Recommended, automatic & secure",
-                                    color = VinColors.Secondary,
-                                    fontSize = 11.sp
-                                )
-                            }
-                        }
-                    }
-
-                    // Option 2: Manual Cookie Paste
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(VinColors.White10)
-                            .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(14.dp))
-                            .clickable {
-                                showYtLoginOptionsDialog = false
-                                showYtCookieDialog = true
-                            }
-                            .padding(14.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(VinColors.White10),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = null,
-                                    tint = VinColors.Secondary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            Column {
-                                Text(
-                                    "Manual Cookie Setup",
-                                    color = VinColors.Primary,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp
-                                )
-                                Text(
-                                    "Paste cookies manually from your browser",
-                                    color = VinColors.Secondary,
-                                    fontSize = 11.sp
-                                )
-                            }
-                        }
-                    }
-
-                    // If connected, show Logout option
-                    if (ytCookieConnected) {
-                        Button(
-                            onClick = {
-                                YTMusicSession.setCookie(ctx, null)
-                                ytCookieDraft = ""
-                                ytCookieConnected = false
-                                RecommendationManager.invalidateCache()
-                                ctx.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE).edit().clear().apply()
-                                showYtLoginOptionsDialog = false
-                                Toast.makeText(ctx, "Disconnected YouTube Music account", Toast.LENGTH_SHORT).show()
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF4D4D).copy(alpha = 0.1f)),
-                            border = BorderStroke(1.dp, Color(0xFFFF4D4D).copy(alpha = 0.4f)),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Disconnect Account", color = Color(0xFFFF4D4D), fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showYtLoginOptionsDialog = false }) {
-                    Text("Cancel", color = VinColors.Secondary)
-                }
-            },
-            containerColor = VinColors.Surface
-        )
-    }
+    // ── YouTube Music WebView Login ─────────────────────────────────────────
+    // (The old showYtCookieDialog + showYtLoginOptionsDialog blocks were removed
+    // — manual cookie paste is now inline in the card's "Advanced" disclosure,
+    // and the two-option picker is replaced by the single Connect card above.)
 
     if (showYtWebViewLogin) {
         androidx.compose.ui.window.Dialog(
@@ -1218,39 +1165,39 @@ fun SettingsScreen(
                                 }
                                 
                                 webViewClient = object : WebViewClient() {
+                                    // Dedupe cookie capture across onPageStarted + onPageFinished
+                                    // for the same navigation. Without this, adding
+                                    // ytConnectionVersion++ to both handlers would
+                                    // fire the email fetch twice per login.
+                                    var captureHandledForUrl: String? = null
+
                                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                                         super.onPageStarted(view, url, favicon)
                                         webViewLoading = true
-                                        if (url != null && url.contains("music.youtube.com")) {
-                                            val cookies = CookieManager.getInstance().getCookie("https://music.youtube.com")
-                                            if (cookies != null && (cookies.contains("SAPISID") || cookies.contains("__Secure-3PAPISID") || cookies.contains("__Secure-1PAPISID"))) {
-                                                YTMusicSession.setCookie(context, cookies)
-                                                CookieManager.getInstance().flush()
-                                                ytCookieDraft = cookies
-                                                ytCookieConnected = true
-                                                RecommendationManager.invalidateCache()
-                                                context.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE).edit().clear().apply()
-                                                showYtWebViewLogin = false
-                                                Toast.makeText(context, "Google YouTube Music Login Successful!", Toast.LENGTH_LONG).show()
-                                            }
-                                        }
+                                        captureConnection(this, url)
                                     }
-                                    
+
                                     override fun onPageFinished(view: WebView?, url: String?) {
                                         super.onPageFinished(view, url)
                                         webViewLoading = false
-                                        if (url != null && url.contains("music.youtube.com")) {
-                                            val cookies = CookieManager.getInstance().getCookie("https://music.youtube.com")
-                                            if (cookies != null && (cookies.contains("SAPISID") || cookies.contains("__Secure-3PAPISID") || cookies.contains("__Secure-1PAPISID"))) {
-                                                YTMusicSession.setCookie(context, cookies)
-                                                CookieManager.getInstance().flush()
-                                                ytCookieDraft = cookies
-                                                ytCookieConnected = true
-                                                RecommendationManager.invalidateCache()
-                                                context.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE).edit().clear().apply()
-                                                showYtWebViewLogin = false
-                                                Toast.makeText(context, "Google YouTube Music Login Successful!", Toast.LENGTH_LONG).show()
-                                            }
+                                        captureConnection(this, url)
+                                    }
+
+                                    fun captureConnection(client: WebViewClient, url: String?) {
+                                        if (url == null || !url.contains("music.youtube.com")) return
+                                        if (url == captureHandledForUrl) return  // dedupe
+                                        val cookies = CookieManager.getInstance().getCookie("https://music.youtube.com")
+                                        if (cookies != null && (cookies.contains("SAPISID") || cookies.contains("__Secure-3PAPISID") || cookies.contains("__Secure-1PAPISID"))) {
+                                            captureHandledForUrl = url   // mark handled for this navigation
+                                            YTMusicSession.setCookie(context, cookies)
+                                            CookieManager.getInstance().flush()
+                                            ytCookieDraft = cookies
+                                            ytCookieConnected = true
+                                            ytConnectionVersion++   // refire email fetch (true→true case), once per nav
+                                            RecommendationManager.invalidateCache()
+                                            context.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE).edit().clear().apply()
+                                            showYtWebViewLogin = false
+                                            Toast.makeText(context, "YouTube Music connected", Toast.LENGTH_LONG).show()
                                         }
                                     }
                                 }

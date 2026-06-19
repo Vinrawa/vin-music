@@ -1,180 +1,194 @@
-# Unified Login — 1 Tap for YouTube Music + Cloud Sync
+# Unified YouTube Music Login — Single Card (no Cloud Sync bridging)
 
 **Date:** 2026-06-19
-**Status:** Design — approved, ready for implementation plan
+**Status:** Design — revised after code review, ready for implementation plan
 **Owner:** Vinrawa
+
+## Revision history
+
+- **v1** proposed one unified "Connect Account" that would also seed Cloud Sync
+  via anonymous Firebase auth, with email scraped from the YTM session.
+- **v2 (this)** drops all Cloud Sync bridging. Two reasons (from code review):
+  1. Anonymous Firebase auth yields a **random per-install UID** with no
+     relationship to the Google account. Reinstall / second device = new UID
+     = orphaned backup. That silently breaks the actual purpose of Cloud Sync
+     (durable cross-device data), while the toast `Connected: <email>
+     (YTM + Cloud Sync)` would actively mislead the user.
+  2. The "real" fix (Firebase Custom Token Auth) is more than a small backend.
+     If the backend trusts a **client-supplied** email to mint a token, that's
+     an **impersonation hole** — emails are guessable, not secrets. The only
+     sound version requires the backend to independently verify the email by
+     presenting the user's YTM **cookie** to Google's `account_menu` endpoint
+     server-side, which means the backend now handles live session cookies
+     (large trust/privacy surface). Not justified for a solo/indie project now.
+
+Cloud Sync stays exactly as-is: its own card, its own durable
+`GoogleAuthProvider` flow, untouched. This feature only consolidates the
+**YouTube Music** login.
 
 ## Problem
 
-The app currently has **two separate Google logins** that both use the same
-Google account but different auth systems, so the user must sign in twice:
+Inside the YTM section of Settings there are two separate entry points doing
+the same job:
 
-1. **Cloud Sync** (`AuthViewModel` + `GoogleSignInClient` + Firebase) — backs up
-   playlists/likes to the app's own backend.
-2. **YouTube Music Connection** (`YTMusicSession` + WebView cookie) — unlocks
-   personalized YTM home, library, liked songs via `SAPISID` cookie.
+1. **"Sign In with Google"** — opens a WebView to `accounts.google.com →
+   music.youtube.com`, captures the `SAPISID`/`__Secure-3PAPISID` cookie via
+   `CookieManager`, stores it in `YTMusicSession`.
+2. **"Manual Cookie Setup"** — paste a cookie string from a desktop browser.
 
-User goal: log in **once** and have both connect automatically. No second login.
-
-## Technical Reality (verified via research)
-
-Google deliberately separates these auth systems:
-
-- `GoogleSignInAccount` (SDK) → returns an **ID token / auth code**. It does
-  NOT yield YouTube Music browser session cookies.
-- YTM web session → lives in browser **cookies** (`SAPISID`,
-  `__Secure-3PAPISID`, `HSID`, `SID`, `APISID`…).
-
-There is **no supported path** to derive YTM cookies from a
-`GoogleSignInAccount`. Industry consensus (InnerTune, RiMusic, Music Assistant,
-multiple StackOverflow threads) confirms this is a dead end:
-[SO 25804725](https://stackoverflow.com/questions/25804725/android-webview-auto-login-to-https-website-by-setting-token-cookie),
-[InnerTune #1810](https://github.com/z-huang/InnerTune/issues/1810),
-[Music Assistant #5101](https://github.com/orgs/music-assistant/discussions/5101).
-
-**Therefore:** the unification must be done the other way — **one WebView
-login yields the YTM cookie AND the user's email**, and that email is used to
-satisfy Cloud Sync's identity. The native `GoogleSignInClient` button becomes
-optional/legacy.
+Both achieve "connect to YouTube Music." Splitting them into two top-level
+options is confusing UX. (This is independent of Cloud Sync, which lives in a
+different card and uses a completely different auth system.)
 
 ## Goal
 
-Replace the two login buttons with a single **"Connect Account"** flow:
+Merge the two YTM entry points into a single **"Connect to YouTube Music"**
+card:
 
-- One WebView login → YTM cookie captured → YTM connected.
-- Email extracted from the YTM session → Firebase bridge → Cloud Sync connected.
-- User sees: `Connected: <email> (YTM + Cloud Sync)`.
+- Primary action: WebView login (the existing `showYtWebViewLogin` flow).
+- Secondary action (under an "Advanced" disclosure): Manual Cookie paste.
+- On success: show the connected account's email as a read-only label
+  (`Connected as <email>`) — **display only**, never used to drive auth.
+- Toast: `"YouTube Music connected"` — deliberately does NOT mention Cloud
+  Sync, so it can never imply something that isn't true.
 
 ## Non-Goals
 
-- **Token/cookie refresh automation.** YTM cookies expire (~1 month). Existing
-  manual re-login behavior stays. Auto-refreshing silently is fragile and
-  out of scope.
-- **Migrating existing Cloud Sync users off Firebase.** Backward compatibility
-  is preserved — the old `GoogleSignInClient` path stays available as a
-  fallback if email extraction fails.
-- **Removing Firebase.** Cloud Sync still uses Firebase under the hood; we just
-  feed it an email (and best-effort a credential) instead of forcing a second
-  interactive Google prompt.
+- **No Cloud Sync changes.** Cloud Sync keeps its own card + its own
+  `GoogleSignInClient`/Firebase flow. Durability of cross-device backup is
+  preserved exactly. The single-tap unification is scoped to YTM only.
+- **No anonymous auth, no email→UID bridging, no custom tokens.** See revision
+  history for the security/durability reasoning.
+- **No cookie refresh automation.** Cookies expire (~1 month); existing manual
+  re-login stays. A "reconnect" hint may be surfaced later if YTM requests
+  start failing, but not in this change.
 
 ## Architecture
 
-### A. Email extraction — new `InnerTube` / `YTMusicApi` method
+### A. UI consolidation — `SettingsScreen.kt`
 
-After cookie capture, fetch the signed-in account's email from YTM's own
-account endpoint (the cookie authorizes it):
+Replace the two current YTM options with one card:
 
-```kotlin
-// In YTMusicApi or InnerTube
-fun getAccountEmail(ctx: Context): String?
 ```
+┌─ Connect to YouTube Music ───────────────┐
+│  [icon]  Connect to YouTube Music         │
+│          Unlock your YTM home, library    │
+│          and liked songs                  │
+│                                           │
+│          (when connected:)                │
+│          Connected as x@gmail.com         │
+│          [Disconnect]   [Switch account]  │
+│                                           │
+│          ▸ Advanced (paste cookie)        │
+└───────────────────────────────────────────┘
+```
+
+- Primary "Connect" button opens the existing `showYtWebViewLogin` dialog
+  (no logic change — same WebView, same cookie capture).
+- "Advanced" disclosure expands to reveal the existing manual-cookie
+  `OutlinedTextField` + Save. Same `YTMusicSession.setCookie` call.
+- Disconnect = existing `YTMusicSession.setCookie(ctx, null)` + clears
+  `ytCookieConnected`.
+
+### B. Display-only email — `YTMusicApi.getAccountEmail(ctx)`
+
+Keep the `getAccountEmail` method, but **display-only**:
 
 - POST to `https://music.youtube.com/youtubei/v1/account/account_menu` using
-  the existing `buildRequest` (which already injects `Cookie` +
+  the existing `buildRequest` (already injects `Cookie` +
   `Authorization: SAPISIDHASH` when a cookie is stored).
-- Parse the JSON response for the primary account's `email` field. Defensive
-  recursive scan: find any node whose key is `"email"` and whose value matches
-  an email regex, take the first match.
-- Return `null` on any failure → triggers the Firebase fallback path.
+- Defensive recursive scan for any node whose key is `"email"` and whose value
+  matches an email regex.
+- **Multiple-account scoping (reviewer point):** if multiple accounts are
+  signed in, the response lists several. Prefer the entry flagged as the
+  active/selected account (look for an `isPrimary`/`selected` flag, or the
+  first under the `activeAccount` / primary section). If no explicit primary
+  marker exists, take the first email match and label it
+  `Connected as <email> (1 of N)` so the user can see ambiguity rather than
+  silently trust a possibly-wrong account.
+- Return `null` on any failure → card shows just `"YouTube Music connected"`
+  with no email. Never blocks the connection.
 
-### B. Firebase bridge — `AuthViewModel`
+This email is used **only** for the `Connected as <email>` label. It is NOT
+passed to Firebase, NOT used to mint any token, NOT written to Cloud Sync.
 
-New method:
+### C. What stays untouched
 
-```kotlin
-fun connectFromYtmEmail(email: String)
-```
-
-- Looks up whether a Firebase user already exists / can be referenced by this
-  email. Because we cannot mint a real Google OAuth credential from just an
-  email, Cloud Sync will use **anonymous Firebase auth** (already supported by
-  Firebase) and tag the resulting user with the YTM email in a local
-  `UserAccount` row (existing table) + a Firebase profile note.
-- This keeps Cloud Sync functional (backups tied to a stable anonymous UID
-  seeded once) without requiring the second interactive Google prompt.
-- If a real `GoogleSignInClient` credential was previously linked, keep using
-  that richer auth — the email path is strictly a fallback/unifier.
-
-**Edge case:** If `getAccountEmail` returns null, surface a non-blocking
-notice ("YTM connected; tap Cloud Sync separately to enable backup") and leave
-the legacy button reachable.
-
-### C. Unified UI — `SettingsScreen.kt`
-
-- Replace the two separate cards ("Cloud Sync → Connect" + the YTM section's
-  "Sign In with Google" + "Manual Cookie Setup") with **one primary card**:
-  `"Connect Your Account"` → opens the existing WebView dialog.
-- Keep "Manual Cookie Setup" as a small secondary option under an "Advanced"
-  disclosure (power users who paste cookies).
-- On successful WebView login, the existing `onPageFinished` cookie-capture
-  block additionally:
-  1. Calls `YTMusicApi.getAccountEmail(ctx)` (IO).
-  2. Calls `authVm.connectFromYtmEmail(email)`.
-  3. Updates both UI states (`ytCookieConnected`, `currentUser`) and shows
-     the unified toast: `"Connected: <email> (YTM + Cloud Sync)"`.
-- The legacy `GoogleSignInClient` "Connect" button under Cloud Sync becomes a
-  hidden/secondary path, visible only if email extraction failed.
-
-### D. Status display
-
-After a successful unified connect:
-- Cloud Sync card reads: `Backup linked to <email> · YTM connected`
-- If YTM cookie present but email extraction failed:
-  `YTM connected · tap to also enable backup` (legacy Google button shown).
+- `AuthViewModel`, `FirebaseSyncManager`, the Cloud Sync card, the
+  `GoogleSignInClient` launcher — all unchanged.
+- `YTMusicSession` cookie storage/`authorizationHeader` — unchanged.
 
 ## Data Flow
 
 ```
-Settings → "Connect Your Account"
+Settings → "Connect to YouTube Music" → Connect
   → WebView: accounts.google.com → music.youtube.com
-  → user logs in ONCE (Google account)
+  → user logs in once (Google account)
   → onPageFinished detects music.youtube.com + SAPISID cookie
-     → YTMusicSession.setCookie(ctx, cookies)            [YTM connected]
-     → YTMusicApi.getAccountEmail(ctx)                   [email]
-        ├─ success → authVm.connectFromYtmEmail(email)    [Cloud Sync connected]
-        │            → toast "Connected: <email> (YTM + Cloud Sync)"
-        └─ fail    → YTM connected only
-                     → show legacy Google button for backup
-                     → toast "YTM connected; enable backup separately"
+     → YTMusicSession.setCookie(ctx, cookies)        [YTM connected]
+     → YTMusicApi.getAccountEmail(ctx)               [display only]
+        ├─ success → label "Connected as <email>"
+        └─ fail    → label "YouTube Music connected"
+     → toast: "YouTube Music connected"
+     (Cloud Sync card: untouched, not mentioned)
+
+Settings → "Connect to YouTube Music" → Advanced → paste cookie → Save
+  → YTMusicSession.setCookie(ctx, pasted)            [YTM connected]
+  → (email fetch best-effort, same as above)
 ```
 
 ## Error Handling
 
-- `getAccountEmail` network failure / parse failure → return null, do NOT
-  break YTM connection (the cookie is still valid and useful on its own).
-- `connectFromYtmEmail` Firebase failure → Cloud Sync stays off, YTM stays on,
-  surface a toast; legacy button remains available.
+- `getAccountEmail` network/parse failure → label degrades to
+  `"YouTube Music connected"` (no email). YTM still fully works.
+- Multiple accounts with no primary marker → label `Connected as <email>
+  (1 of N)`.
 - Cookie missing `SAPISID`/`__Secure-3PAPISID` → existing behavior (won't
-  capture). No change.
-- WebView blocked by Google ("403 Disallowed User Agent") → existing desktop
-  User-Agent override (`SettingsScreen.kt:1217`) already mitigates this.
+  capture), no change.
+- WebView "403 Disallowed User Agent" → existing desktop User-Agent override
+  (`SettingsScreen.kt:1217`) already mitigates.
 
 ## Testing (manual)
 
-1. Fresh install, no login → tap "Connect Your Account" → WebView → Google
-   login once → both YTM and Cloud Sync show connected, email shown.
-2. Existing Cloud Sync user (Firebase already linked) → "Connect Your Account"
-   → YTM connects, Cloud Sync keeps using the richer existing auth, no
-   duplicate account.
-3. `getAccountEmail` forced failure (e.g., airplane mode right after cookie
-   capture) → YTM connects, Cloud Sync shows "enable separately", legacy
-   Google button visible.
-4. Manual Cookie Setup path still works for power users.
+1. Fresh, not connected → "Connect to YouTube Music" → WebView → login once →
+   YTM connected, label shows email, toast says "YouTube Music connected"
+   (no Cloud Sync mention).
+2. **Cloud Sync untouched:** open Cloud Sync card → it still works exactly as
+   before (its own Google button, durable Firebase UID). Reinstall + reconnect
+   → backup recovers (existing behavior, not affected by this change).
+3. Advanced → paste a cookie → YTM connects, email label best-effort.
+4. Multiple Google accounts signed into the WebView → label shows
+   `Connected as <email> (1 of N)` when primary can't be determined.
+5. `getAccountEmail` forced failure → label degrades to
+   `"YouTube Music connected"`, no crash, YTM still works.
+
+## Forward-path note (do NOT build now)
+
+If a true single-login that also drives Cloud Sync is ever wanted, the
+**only** sound design is:
+
+> A dedicated backend that receives the **YTM cookie** (not a client-trusted
+> email), independently calls Google's `account_menu` server-side to verify
+> the email, and only then mints a Firebase custom token tied to that verified
+> email. This makes the backend a handler of live session cookies — a real
+> security/trust surface that needs dedicated review and maintenance.
+
+Parked as "v2, pending dedicated backend + security review." Documented here
+so a future engineer does not re-derive the naive (and vulnerable) "client
+sends email → gets token" design.
 
 ## Risks & Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| Email not present in account_menu response shape varies | Defensive recursive scan for any `"email": "<regex>"` node; null on failure, never blocks YTM. |
-| Anonymous-Firebase-as-Cloud-Sync-seed loses data if user clears app | Document that backup identity is per-install; legacy Google path remains the durable option. |
-| Cookies expire ~monthly | Out of scope (existing manual re-login). Surface a "reconnect" hint if a YTM request starts failing. |
-| Two-step (cookie then email fetch) adds ~1s | Run email fetch on IO after cookie capture, toast fires when ready; UI not blocked. |
-| User expects "real" Google OAuth for Cloud Sync | Cloud Sync still uses Firebase; email-only seed is a fallback, and the legacy button is kept. |
+| Wrong email shown when multiple accounts active | Prefer explicit primary flag; else label `(1 of N)`. Email is display-only, so a wrong label is cosmetic, not a security issue. |
+| User expects single tap to also enable backup | Toast and label deliberately say "YouTube Music connected" only; Cloud Sync remains its own clearly-separate card. |
+| Cookies expire ~monthly | Out of scope (existing manual re-login). |
+| Consolidation breaks existing connected users | No storage format change; `YTMusicSession` cookie persists as before. UI-only restructure. |
 
 ## Files Touched
 
 | File | Change |
 |------|--------|
-| `app/src/main/kotlin/com/vinmusic/innertube/YTMusicApi.kt` (or `InnerTube.kt`) | Add `getAccountEmail(ctx)` — POST to YTM account endpoint with cookie, parse email. |
-| `app/src/main/kotlin/com/vinmusic/player/AuthViewModel.kt` | Add `connectFromYtmEmail(email)` — anonymous Firebase auth tagged with email; keep `signInWithGoogle` as fallback. |
-| `app/src/main/kotlin/com/vinmusic/ui/screens/SettingsScreen.kt` | Unify the two cards into one "Connect Your Account"; chain cookie-capture → email → Cloud Sync; demote legacy Google button to secondary. |
+| `app/src/main/kotlin/com/vinmusic/innertube/YTMusicApi.kt` | Add `getAccountEmail(ctx)` — display-only email fetch with multi-account scoping. |
+| `app/src/main/kotlin/com/vinmusic/ui/screens/SettingsScreen.kt` | Merge the two YTM options into one "Connect to YouTube Music" card; Advanced disclosure for manual cookie; display-only email label. |

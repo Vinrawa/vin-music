@@ -339,14 +339,23 @@ Box(
         } else {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
-                    onClick = {
-                        YTMusicSession.setCookie(ctx, null)
-                        ytCookieConnected = false
-                        RecommendationManager.invalidateCache()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = VinColors.White10),
-                    shape = RoundedCornerShape(10.dp)
-                ) { Text("Disconnect", color = VinColors.Primary) }
+                onClick = {
+                    // CONSCIOUS DECISION: Disconnect only clears the app's
+                    // stored cookie — it does NOT clear WebView-level Google
+                    // cookies. This is intentional and distinct from Switch
+                    // account (which DOES clear them to force the chooser).
+                    // Disconnect = "stop using this session in the app";
+                    // reconnecting afterwards may silently resume the same
+                    // account. If a future change wants Disconnect to also
+                    // force re-auth, add removeAllCookies here — but then
+                    // Switch account becomes redundant, so pick one.
+                    YTMusicSession.setCookie(ctx, null)
+                    ytCookieConnected = false
+                    RecommendationManager.invalidateCache()
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = VinColors.White10),
+                shape = RoundedCornerShape(10.dp)
+            ) { Text("Disconnect", color = VinColors.Primary) }
                 Button(
                     onClick = switchAccount,
                     colors = ButtonDefaults.buttonColors(containerColor = VinColors.White10),
@@ -394,26 +403,49 @@ Box(
 
 Delete the old `if (showYtLoginOptionsDialog) { ... }` block (the two-option picker) and the old `if (showYtCookieDialog) { ... }` block (its field moved inline into the Advanced disclosure above). Keep `showYtWebViewLogin` exactly as-is.
 
-- [ ] **Step 5: Update the toast + version counter on successful WebView login**
+- [ ] **Step 5: Update the toast + version counter on successful WebView login (deduped)**
 
-In the existing cookie-capture block (around line 1234 / 1252 — the `onPageFinished` / `shouldOverrideUrlLoading` handlers that call `YTMusicSession.setCookie`), two changes:
+The existing cookie-capture logic is **duplicated** in `onPageStarted` AND `onPageFinished` (pre-existing resilience — `onPageFinished` sometimes doesn't fire on flaky networks). Naively adding `ytConnectionVersion++` to both would fire the email fetch twice per login. Dedupe with a navigation-scoped guard: a `var captureHandledForUrl` that records the last URL we captured for, so the second handler sees it's already done and skips.
 
-1. The toast currently says `"Google YouTube Music Login Successful!"`. Change it to:
+In the existing `WebViewClient` block (around line 1220), three changes:
 
-```kotlin
-Toast.makeText(context, "YouTube Music connected", Toast.LENGTH_LONG).show()
-```
-
-Deliberately no Cloud Sync mention.
-
-2. Right after the existing `ytCookieConnected = true` line in BOTH capture handlers (`onPageStarted` ~line 1230 and `onPageFinished` ~line 1248), add `ytConnectionVersion++` so the email label refires even when the user was already connected and re-logs-in / switches account via the WebView:
+1. Add a guard var at the top of the `webViewClient = object : WebViewClient() {` block (before `onPageStarted`):
 
 ```kotlin
-ytCookieConnected = true
-ytConnectionVersion++   // refire email fetch (true→true case)
+webViewClient = object : WebViewClient() {
+    // Dedupe cookie capture across onPageStarted + onPageFinished for the
+    // same navigation. Without this, adding version++ to both handlers
+    // would fire the email fetch twice per login (harmless but wasteful).
+    var captureHandledForUrl: String? = null
+
+    override fun onPageStarted(...) { ... }
+    override fun onPageFinished(...) { ... }
+}
 ```
 
-Without this, switch-account-through-WebView leaves the label stale — same bug as the manual-paste path, same fix.
+2. In BOTH capture blocks (`onPageStarted` ~line 1224 and `onPageFinished` ~line 1242), wrap the existing capture in the guard AND add the toast change + version bump. The capture block becomes (same in both handlers):
+
+```kotlin
+if (url != null && url.contains("music.youtube.com") &&
+    url != captureHandledForUrl  // dedupe: skip if already handled this nav
+) {
+    val cookies = CookieManager.getInstance().getCookie("https://music.youtube.com")
+    if (cookies != null && (cookies.contains("SAPISID") || cookies.contains("__Secure-3PAPISID") || cookies.contains("__Secure-1PAPISID"))) {
+        captureHandledForUrl = url   // mark handled for this navigation
+        YTMusicSession.setCookie(context, cookies)
+        CookieManager.getInstance().flush()
+        ytCookieDraft = cookies
+        ytCookieConnected = true
+        ytConnectionVersion++        // refire email fetch (true→true case), once per nav
+        RecommendationManager.invalidateCache()
+        context.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE).edit().clear().apply()
+        showYtWebViewLogin = false
+        Toast.makeText(context, "YouTube Music connected", Toast.LENGTH_LONG).show()
+    }
+}
+```
+
+Deliberately no Cloud Sync mention in the toast. The `captureHandledForUrl` guard is scoped to the WebView instance, resets naturally when the dialog is recreated (new login session), so it never wrongly suppresses a genuinely new login.
 
 - [ ] **Step 6: Verify it compiles**
 

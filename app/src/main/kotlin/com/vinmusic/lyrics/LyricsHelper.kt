@@ -8,7 +8,19 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
 import java.util.concurrent.ConcurrentHashMap
 
-data class LyricsLine(val timeMs: Long, val text: String)
+data class WordTiming(
+    val text: String,
+    val startMs: Long,
+    val endMs: Long = 0L,
+    val hasTrailingSpace: Boolean = true
+)
+
+data class LyricsLine(
+    val timeMs: Long,
+    val text: String,
+    val endTimeMs: Long = 0L,
+    val words: List<WordTiming>? = null
+)
 
 sealed class LyricsResult {
     data class Synced(val lines: List<LyricsLine>, val source: String) : LyricsResult()
@@ -35,8 +47,8 @@ object LyricsHelper {
                 hostnameVerifier { _, _ -> true }
             } catch (e: Exception) {}
         }
-        connectTimeout(4, TimeUnit.SECONDS)
-        readTimeout(4, TimeUnit.SECONDS)
+        connectTimeout(5, TimeUnit.SECONDS)
+        readTimeout(8, TimeUnit.SECONDS)  // raised from 4s — LrcLib server takes ~10s; 4s cut it off every time
     }.build()
 
     // List of common Indian record labels and YouTube distribution channel keywords
@@ -99,12 +111,12 @@ object LyricsHelper {
         if (provider != "Auto") {
             try {
                 when (provider) {
+                    "YouTube Music" -> { tryYouTubeMusic(videoId)?.let { return it } }
+                    "BetterLyrics" -> { tryBetterLyrics(title, artist, durationMs)?.let { return it } }
                     "LrcLib" -> {
                         tryLrcLibGet(t, a, durationMs)?.let { return it }
                         tryLrcLibSearch(t, a, durationMs)?.let { return it }
                     }
-                    "SimpMusic" -> { trySimpMusic(t, a)?.let { return it } }
-                    "Paxsenix" -> { tryPaxsenix(t, a)?.let { return it } }
                     "KuGou" -> { tryKugou(t, a)?.let { return it } }
                     "Genius" -> { tryGenius(t, a)?.let { return it } }
                 }
@@ -115,21 +127,20 @@ object LyricsHelper {
         }
 
         // Auto: sequential provider fallback — try each provider in order and
-        // return the FIRST usable result. This restores the pre-regression
-        // behavior that produced correctly-synced lyrics. The old "parallel
-        // race with longest-synced tie-break" picked shifted/community LRC
-        // variants, causing lyrics to lag in some parts and jump ahead in others.
+        // return the FIRST usable result.
         //
-        // Order: LrcLib → Genius → SimpMusic → KuGou → Paxsenix
+        // Order: YouTube Music → BetterLyrics → LrcLib → KuGou → Genius
+        // YTM is #1 because it returns perfectly-synced lyrics from the SAME
+        // source as the playing song (no drift, official/Musixmatch-backed).
         // Synced results return immediately. A Plain result from an early
         // provider is remembered as a fallback while we keep trying later
         // providers for a Synced version.
         val providers: List<Pair<String, () -> LyricsResult?>> = listOf(
-            "LrcLib"     to { tryLrcLibGet(t, a, durationMs) ?: tryLrcLibSearch(t, a, durationMs) },
-            "Genius"     to { tryGenius(t, a) },
-            "SimpMusic"  to { trySimpMusic(t, a) },
-            "KuGou"      to { tryKugou(t, a) },
-            "Paxsenix"   to { tryPaxsenix(t, a) }
+            "YouTube Music" to { tryYouTubeMusic(videoId) },
+            "BetterLyrics"  to { tryBetterLyrics(title, artist, durationMs) },
+            "LrcLib"        to { tryLrcLibGet(t, a, durationMs) ?: tryLrcLibSearch(t, a, durationMs) },
+            "KuGou"         to { tryKugou(t, a) },
+            "Genius"        to { tryGenius(t, a) }
         )
 
         var fallbackPlain: LyricsResult.Plain? = null
@@ -155,6 +166,17 @@ object LyricsHelper {
             }
         }
         return fallbackPlain ?: LyricsResult.NotFound
+    }
+
+    private fun tryBetterLyrics(title: String, artist: String, durationMs: Long): LyricsResult? {
+        if (title.isBlank() || artist.isBlank()) return null
+        val exactArtist = artist.replace(" - Topic", "", ignoreCase = true).trim()
+        val cleanedArtist = cleanArtist(artist).ifBlank { exactArtist }
+        return BetterLyricsClient.fetch(
+            title = cleanTitle(title).ifBlank { title.trim() },
+            artist = cleanedArtist,
+            durationMs = durationMs
+        )
     }
 
     private fun cleanTitle(title: String): String {
@@ -212,10 +234,19 @@ object LyricsHelper {
                 // Pre-regression behavior: take the FIRST relevant result.
                 // Do NOT rank by duration or by syncedLyrics length — that
                 // picked shifted/community LRC variants and caused drift.
-                for (item in arr) {
-                    val itemMap = item as? Map<*, *> ?: continue
-                    parseLrcLibItem(gson.toJson(itemMap), "LrcLib")?.let { return it }
-                }
+                val best = arr
+                    .mapNotNull { item ->
+                        val itemMap = item as? Map<*, *> ?: return@mapNotNull null
+                        val parsed = parseLrcLibItem(gson.toJson(itemMap), "LrcLib") ?: return@mapNotNull null
+                        val score = scoreLrcLibCandidate(itemMap, title, artist, durationMs)
+                        Triple(score, parsed is LyricsResult.Synced, parsed)
+                    }
+                    .filter { it.first >= 0.38 }
+                    .maxWithOrNull(
+                        compareBy<Triple<Double, Boolean, LyricsResult?>> { it.second }
+                            .thenBy { it.first }
+                    )
+                best?.third?.let { return it }
             } catch (_: Exception) { continue }
         }
         return null
@@ -286,27 +317,24 @@ object LyricsHelper {
         } catch (_: Exception) { null }
     }
 
-    // ── Paxsenix ───────────────────────────────────────────────────────────────
-    private fun tryPaxsenix(title: String, artist: String): LyricsResult? {
-        val queryUrl = if (artist.isNotEmpty()) {
-            "https://paxsenix.skiddle.id/lyrics?title=${enc(title)}&artist=${enc(artist)}"
-        } else {
-            "https://paxsenix.skiddle.id/lyrics?title=${enc(title)}"
-        }
-        val resp = get(queryUrl) ?: return null
+    // ── YouTube Music ──────────────────────────────────────────────────────────
+    // #1 priority: returns perfectly-synced lyrics from the SAME source as the
+    // playing song (Musixmatch-backed, officially licensed). Uses the videoId so
+    // there's no fuzzy title/artist matching and zero drift.
+    private fun tryYouTubeMusic(videoId: String): LyricsResult? {
+        if (videoId.isBlank()) return null
         return try {
-            val json  = gson.fromJson(resp, Map::class.java) ?: return null
-            val lrc   = json["syncedLyrics"] as? String
-            val plain = json["plainLyrics"] as? String
+            val browseId = com.vinmusic.innertube.InnerTube.getLyricsBrowseId(videoId) ?: return null
+            val (synced, plain) = com.vinmusic.innertube.InnerTube.getLyrics(browseId)
             when {
-                !lrc.isNullOrBlank() -> {
-                    val lines = parseLrc(lrc)
-                    if (lines.isNotEmpty()) LyricsResult.Synced(lines, "Paxsenix") else null
+                !synced.isNullOrBlank() -> {
+                    val lines = parseLrc(synced)
+                    if (lines.isNotEmpty()) LyricsResult.Synced(lines, "YouTube Music") else null
                 }
                 !plain.isNullOrBlank() -> sanitizePlainLyrics(plain)
                     .takeIf { it.isNotBlank() }
-                    ?.let { LyricsResult.Plain(it, "Paxsenix") }
-                else                   -> null
+                    ?.let { LyricsResult.Plain(it, "YouTube Music") }
+                else -> null
             }
         } catch (_: Exception) { null }
     }
@@ -314,21 +342,48 @@ object LyricsHelper {
     // ── LRC parser ─────────────────────────────────────────────────────────────
     fun parseLrc(lrc: String): List<LyricsLine> {
         val timestampRegex = Regex("""\[(\d{1,2}):(\d{2})[\.:](\d{1,3})]""")
+        val wordRegex = Regex("""<(\d{1,2}):(\d{2})[\.:](\d{1,3})>([^<]*)""")
         return lrc.lines()
             .flatMap { rawLine ->
                 val line = rawLine.trim()
                 val matches = timestampRegex.findAll(line).toList()
                 if (matches.isEmpty()) return@flatMap emptyList()
+                val wordMatches = wordRegex.findAll(line).toList()
                 val text = line
                     .replace(timestampRegex, "")
-                    .replace(Regex("""<\d{1,2}:\d{2}[\.:]\d{1,3}>"""), "")
+                    .replace(wordRegex) { it.groupValues[4] }
                     .trim()
                 if (text.isEmpty() || isNonLyricLine(text)) return@flatMap emptyList()
                 matches.map { m ->
                     val ms = m.groupValues[1].toLong() * 60_000 +
                             m.groupValues[2].toLong() * 1_000 +
                             m.groupValues[3].padEnd(3, '0').take(3).toLong()
-                    LyricsLine(ms, text)
+                    val words = wordMatches.mapIndexedNotNull { index, wordMatch ->
+                        val rawWord = wordMatch.groupValues[4]
+                        val wordText = rawWord.trim()
+                        if (wordText.isBlank()) return@mapIndexedNotNull null
+                        val startMs = wordMatch.groupValues[1].toLong() * 60_000 +
+                                wordMatch.groupValues[2].toLong() * 1_000 +
+                                wordMatch.groupValues[3].padEnd(3, '0').take(3).toLong()
+                        val next = wordMatches.getOrNull(index + 1)
+                        val endMs = next?.let {
+                            it.groupValues[1].toLong() * 60_000 +
+                                    it.groupValues[2].toLong() * 1_000 +
+                                    it.groupValues[3].padEnd(3, '0').take(3).toLong()
+                        } ?: 0L
+                        WordTiming(
+                            text = wordText,
+                            startMs = startMs,
+                            endMs = endMs,
+                            hasTrailingSpace = rawWord.lastOrNull()?.isWhitespace() ?: true
+                        )
+                    }
+                    LyricsLine(
+                        timeMs = ms,
+                        text = text,
+                        endTimeMs = words.lastOrNull()?.endMs?.takeIf { it > ms } ?: 0L,
+                        words = words.takeIf { it.isNotEmpty() }
+                    )
                 }
             }
             .distinctBy { "${it.timeMs}|${it.text}" }
@@ -345,6 +400,8 @@ object LyricsHelper {
             .replace(Regex("\n{3,}"), "\n\n")
             .trim()
     }
+
+    fun isNonLyricLinePublic(raw: String): Boolean = isNonLyricLine(raw)
 
     private fun isNonLyricLine(raw: String): Boolean {
         val text = raw.trim().trim('[', ']', '(', ')', '{', '}').trim()
@@ -521,37 +578,6 @@ object LyricsHelper {
         return response.use { it.body?.string() }
     }
 
-    // SimpMusic ───────────────────────────────────────────────────────────────
-    private fun trySimpMusic(title: String, artist: String): LyricsResult? {
-        val q = if (artist.isNotEmpty()) "$title $artist".trim() else title
-        val searchUrl = "https://lyrics.simpmusic.org/api/v1/search?q=${enc(q)}"
-        val resp = get(searchUrl) ?: return null
-        try {
-            val list = gson.fromJson(resp, List::class.java) ?: return null
-            if (list.isEmpty()) return null
-            val first = list[0] as? Map<*, *> ?: return null
-            val id = first["id"] as? String ?: return null
-            
-            val lyricsUrl = "https://lyrics.simpmusic.org/api/v1/lyrics/$id"
-            val lyricsResp = get(lyricsUrl) ?: return null
-            val lyricsData = gson.fromJson(lyricsResp, Map::class.java) ?: return null
-            
-            val lrc = lyricsData["synced"] as? String
-            val plain = lyricsData["plain"] as? String
-            
-            when {
-                !lrc.isNullOrBlank() -> {
-                    val lines = parseLrc(lrc)
-                    if (lines.isNotEmpty()) return LyricsResult.Synced(lines, "SimpMusic")
-                }
-                !plain.isNullOrBlank() -> sanitizePlainLyrics(plain)
-                    .takeIf { it.isNotBlank() }
-                    ?.let { return LyricsResult.Plain(it, "SimpMusic") }
-            }
-        } catch (_: Exception) {}
-        return null
-    }
-
     // ── KuGou Music Scraper ────────────────────────────────────────────────────
     private fun tryKugou(title: String, artist: String): LyricsResult? {
         val query = if (artist.isNotEmpty()) "$title $artist".trim() else title
@@ -697,13 +723,14 @@ object LyricsHelper {
                     }
                     
                     val lower = trimmed.lowercase()
-                    val isJunk = lower == "translations" || 
+                    val isJunk = lower.startsWith("translations") || 
                                  langKeywords.any { lower == it || (trimmed.length < 30 && (lower.contains(it) || lower.startsWith(it))) } || 
-                                 trimmed.endsWith(" Lyrics", ignoreCase = true) ||
-                                 (trimmed.contains("Lyrics", ignoreCase = true) && trimmed.length < title.length + 15) ||
-                                 trimmed.contains("Read More", ignoreCase = true) ||
+                                 trimmed.endsWith(" lyrics", ignoreCase = true) ||
+                                 (trimmed.contains("lyrics", ignoreCase = true) && i < 10) ||
+                                 trimmed.contains("read more", ignoreCase = true) ||
                                  trimmed.contains("credits to", ignoreCase = true) ||
-                                 trimmed.contains("Feeding Time of KTT", ignoreCase = true)
+                                 trimmed.contains("feeding time of ktt", ignoreCase = true) ||
+                                 lower.contains("you might also like")
                     
                     if (i < 35 && isJunk) {
                         continue

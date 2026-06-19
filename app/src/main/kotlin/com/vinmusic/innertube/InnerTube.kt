@@ -626,7 +626,12 @@ object InnerTube {
         val title = normalizeArtistText(item.title)
         val author = normalizeArtistText(item.author)
         val artist = normalizeArtistText(artistName)
-        if (artist.isBlank() || title.isBlank() || item.durationText.isBlank()) return false
+        if (artist.isBlank() || title.isBlank()) return false
+        // Note: blank durationText is now ALLOWED — many unofficial/rare uploads
+        // don't expose a duration. They still surface but rank a bit lower
+        // (see artistUploadScore). Only reject if we CAN parse it and it's
+        // outside a sane song range (60s..1500s = 25 min, raised from 900s so
+        // long unreleased tracks and full-album uploads aren't dropped).
 
         val tokens = artist.split(" ")
             .filter { it.length > 1 && it !in setOf("the", "a", "an", "and") }
@@ -637,18 +642,22 @@ object InnerTube {
         if (!hasArtistMatch) return false
 
         val seconds = parseDurationSecs(item.durationText)
-        if (seconds != null && (seconds < 60 || seconds > 900)) return false
+        if (seconds != null && (seconds < 60 || seconds > 1500)) return false
 
         val fullText = "$title $author"
+        // Narrowed junk list: keep genuine spam (reactions, shorts, loops,
+        // gaming, etc.) but REMOVED ambiguous terms that were blocking legit
+        // rare/unofficial uploads — "full album", "greatest hits", "best of",
+        // "compilation", "playlist", "cover", "karaoke", "instrumental",
+        // "behind the scenes", "teaser", "promo", "interview", "podcast",
+        // "documentary", "essay", "breakdown", "explained", "meaning", "analysis".
         val junkTerms = listOf(
-            "reaction", "reacts", "reacting", "review", "breakdown", "explained",
-            "meaning", "analysis", "interview", "podcast", "documentary", "essay",
-            "news", "tutorial", "how to", "behind the scenes", "teaser", "promo",
+            "reaction", "reacts", "reacting", "review",
+            "news", "tutorial", "how to",
             "meme", "parody", "comedy", "prank", "vlog", "gaming", "gameplay",
             "roast", "standup", "unboxing", "shorts", "tiktok", "reels",
-            "compilation", "full album", "greatest hits", "best of", "top 10",
-            "playlist", "1 hour", "1hour", "1 hr", "1hr", "loop", "looped",
-            "mashup", "karaoke", "instrumental", "cover"
+            "1 hour", "1hour", "1 hr", "1hr", "loop", "looped",
+            "mashup"
         )
         return junkTerms.none { fullText.contains(it) }
     }
@@ -665,6 +674,9 @@ object InnerTube {
         if (listOf("audio", "song", "track", "lyrics", "lyric").any { title.contains(it) }) score += 8
         val seconds = parseDurationSecs(item.durationText)
         if (seconds != null && seconds in 120..480) score += 4
+        // Blank-duration items still surface (filter allows them now) but rank
+        // slightly lower so clean official cuts stay on top.
+        if (seconds == null) score -= 5
         return score
     }
 
@@ -767,11 +779,18 @@ object InnerTube {
         val cleanArtist = artistName.trim()
         if (cleanArtist.isBlank()) return emptyList()
 
+        // Mix of broad + targeted queries. The old literal phrases
+        // ("$artist leaked song") matched exact phrases only, so a video titled
+        // "Kendrick Lamar - prayer (unreleased)" never surfaced. These broader
+        // queries let YouTube's own ranking pull relevant uploads regardless of
+        // whether the title contains the word "leaked".
         val queries = listOf(
-            "$cleanArtist unreleased song",
-            "$cleanArtist leaked song",
+            cleanArtist,
+            "$cleanArtist song",
+            "$cleanArtist audio",
+            "$cleanArtist unreleased",
             "$cleanArtist rare track",
-            "$cleanArtist unofficial audio"
+            "$cleanArtist demo"
         )
 
         return queries
@@ -779,6 +798,35 @@ object InnerTube {
             .distinctBy { it.videoId }
             .sortedByDescending { artistUploadScore(cleanArtist, it) }
             .take(40)
+    }
+
+    /**
+     * Returns unofficial/rare/unreleased uploads for an artist — the stuff Top
+     * Songs currently throws away. Keeps only items whose title matches the
+     * rare-terms set (unreleased/leak/leaked/demo/rare/loosie/snippet/cdq) OR
+     * whose author isn't an official music channel (no "topic"/"vevo" and the
+     * artist name isn't in the author). Used by the "More from Artist" section.
+     * Caps at 20.
+     */
+    fun getArtistRareUploads(artistName: String): List<VideoItem> {
+        val cleanArtist = artistName.trim()
+        if (cleanArtist.isBlank()) return emptyList()
+        val artist = normalizeArtistText(cleanArtist)
+
+        val rareTerms = listOf(
+            "unreleased", "leak", "leaked", "demo", "rare", "loosie",
+            "snippet", "cdq", "acapella", "instrumental demo"
+        )
+        return searchYouTubeArtistUploads(cleanArtist)
+            .filter { item ->
+                val title = normalizeArtistText(item.title)
+                val author = normalizeArtistText(item.author)
+                val isRareTitle = rareTerms.any { title.contains(it) }
+                val isOfficialChannel = author.contains("topic") || author.contains("vevo") || author.contains(artist)
+                isRareTitle || !isOfficialChannel
+            }
+            .distinctBy { it.videoId }
+            .take(20)
     }
 
     private fun searchYouTubeVideosForArtist(query: String, artistName: String): List<VideoItem> {
@@ -1047,6 +1095,221 @@ object InnerTube {
             log("getAlbumSongs parse error: ${e.message}")
         }
         return songs.distinctBy { it.videoId }
+    }
+
+    // ── YouTube Music Lyrics ───────────────────────────────────────────────────
+    // #1 lyrics source: perfectly synced (Musixmatch-backed) and official, pulled
+    // from the same backend as the playing song. Two-step flow mirroring
+    // Metrolist/InnerTune/RiMusic: /next -> lyrics browseId -> /browse -> lines.
+
+    /**
+     * Step 1: From a videoId, get the browseId of the song's lyrics tab.
+     * Returns the MPLYT_-prefixed browseId, or null if the song has no lyrics.
+     */
+    fun getLyricsBrowseId(videoId: String): String? {
+        if (videoId.isBlank()) return null
+        ensureVisitorData()
+        val ytMusicBase = "https://music.youtube.com/youtubei/v1"
+        val body = mapOf(
+            "context" to mapOf("client" to mapOf(
+                "clientName" to "WEB_REMIX",
+                "clientVersion" to "1.20231214.00.00",
+                "hl" to "en", "gl" to "IN"
+            )),
+            "enablePersistentPlaylistPanel" to true,
+            "isAudioOnly" to true,
+            "videoId" to videoId
+        )
+        val raw = try {
+            http.newCall(Request.Builder()
+                .url("$ytMusicBase/next?prettyPrint=false")
+                .post(gson.toJson(body).toRequestBody(JSON))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .header("X-YouTube-Client-Name", "67")
+                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("Origin", "https://music.youtube.com")
+                .header("Referer", "https://music.youtube.com/")
+                .build()
+            ).execute().use { it.body?.string() }
+        } catch (e: Exception) { log("getLyricsBrowseId error: ${e.message}"); return null } ?: return null
+
+        // Scan the response for any engagement panel titled "LYRICS" (or its
+        // equivalent) and extract the browseId it navigates to. YTM puts the
+        // lyrics panel under engagementPanels -> {menu, structuredDescription}
+        // or directly as a musicDescriptionShelfRenderer, so we scan loosely.
+        var found: String? = null
+        try {
+            val root = gson.fromJson(raw, Map::class.java)
+            // Marker stack: as we descend, remember if the current subtree is
+            // within a panel/run whose title contains "lyric". A browseId seen
+            // while inside that region is the lyrics browseId.
+            val lyricMarker = ArrayDeque<Boolean>()
+
+            fun scan(node: Any?) {
+                when (node) {
+                    is Map<*, *> -> {
+                        // Title-bearing runs often live next to the browseId;
+                        // remember when we enter a "lyric" labelled region.
+                        val titleText = (node["title"] as? Map<*, *>)?.let { ytText(it) }
+                        val headerText = (node["header"] as? Map<*, *>)?.let { ytText(it) }
+                        val combined = "$titleText $headerText".lowercase()
+                        val enteredLyric = combined.contains("lyric")
+                        if (enteredLyric) lyricMarker.addLast(true)
+
+                        val browseId = ((node["navigationEndpoint"] as? Map<*, *>)
+                            ?.get("browseEndpoint") as? Map<*, *>)?.get("browseId") as? String
+                        if (browseId != null && browseId.startsWith("MPLYT_") &&
+                            (lyricMarker.isNotEmpty() || found == null)
+                        ) {
+                            found = browseId
+                        }
+
+                        node.values.forEach { scan(it) }
+
+                        if (enteredLyric) lyricMarker.removeLast()
+                    }
+                    is List<*> -> node.forEach { scan(it) }
+                }
+            }
+            scan(root)
+        } catch (e: Exception) {
+            log("getLyricsBrowseId parse error: ${e.message}")
+        }
+        return found
+    }
+
+    /**
+     * Step 2: Fetch the synced (LRC-style timed) and/or plain lyrics for a browseId.
+     * Returns (syncedLrc, plainText). Either or both may be null/blank.
+     */
+    fun getLyrics(browseId: String): Pair<String?, String?> {
+        if (browseId.isBlank()) return null to null
+        ensureVisitorData()
+        val ytMusicBase = "https://music.youtube.com/youtubei/v1"
+        val body = mapOf(
+            "browseId" to browseId,
+            "context" to mapOf("client" to mapOf(
+                "clientName" to "WEB_REMIX",
+                "clientVersion" to "1.20231214.00.00",
+                "hl" to "en", "gl" to "IN"
+            ))
+        )
+        val raw = try {
+            http.newCall(Request.Builder()
+                .url("$ytMusicBase/browse?prettyPrint=false")
+                .post(gson.toJson(body).toRequestBody(JSON))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .header("X-YouTube-Client-Name", "67")
+                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("Origin", "https://music.youtube.com")
+                .header("Referer", "https://music.youtube.com/")
+                .build()
+            ).execute().use { it.body?.string() }
+        } catch (e: Exception) { log("getLyrics error: ${e.message}"); return null to null } ?: return null to null
+
+        var synced: String? = null
+        var plain: String? = null
+        try {
+            val root = gson.fromJson(raw, Map::class.java)
+            // YTM lyrics live in a musicDescriptionShelfRenderer whose "runs"
+            // carry either timed words (when synced) or plain text lines. Synced
+            // runs embed inline <mm:ss.xx> timestamps; plain runs do not.
+            val sbSynced = StringBuilder()
+            val sbPlain = StringBuilder()
+
+            fun scan(node: Any?) {
+                when (node) {
+                    is Map<*, *> -> {
+                        val desc = node["musicDescriptionShelfRenderer"] as? Map<*, *>
+                        if (desc != null) {
+                            val runs = (desc["runs"] as? List<*>) ?: emptyList<Any>()
+                            // Each "run" is a line. A run's text may begin with an
+                            // inline timestamp like "<mm:ss.xx>" for synced lyrics.
+                            runs.forEach { runNode ->
+                                val run = runNode as? Map<*, *> ?: return@forEach
+                                val text = run["text"]?.toString() ?: ""
+                                if (text.isBlank()) return@forEach
+                                // Detect inline timestamps → synced.
+                                if (Regex("""<\d{1,2}:\d{2}[.:]\d{1,3}>""").containsMatchIn(text)) {
+                                    // YTM uses "<mm:ss.xx>word..." inline LRC syntax.
+                                    sbSynced.append("[").append(text.trim()).append("]\n")
+                                } else {
+                                    // Plain line.
+                                    sbPlain.append(text.trim()).append("\n")
+                                }
+                            }
+                        }
+                        node.values.forEach { scan(it) }
+                    }
+                    is List<*> -> node.forEach { scan(it) }
+                }
+            }
+            scan(root)
+            // If we collected synced runs, build a proper LRC string. YTM's inline
+            // format is "<mm:ss.xx>word" repeated within a run; convert each run to
+            // a standard "[mm:ss.xx] line" LRC entry.
+            if (sbSynced.isNotEmpty()) {
+                synced = ytmInlineToLrc(sbSynced.toString())
+            }
+            if (sbPlain.isNotEmpty()) {
+                plain = sbPlain.toString().trim()
+            }
+            // Fallback: if no synced but runs had plain text and the line count is
+            // reasonable, treat plain as the only output.
+            if (synced.isNullOrBlank() && plain.isNullOrBlank()) {
+                // Some responses put all text in runs without timestamps under a
+                // different renderer name; do a final loose scan for any "runs".
+                val loose = StringBuilder()
+                fun looseScan(node: Any?) {
+                    when (node) {
+                        is Map<*, *> -> {
+                            val runs = node["runs"] as? List<*>
+                            if (runs != null) {
+                                runs.forEach { r ->
+                                    val t = (r as? Map<*, *>)?.get("text")?.toString() ?: ""
+                                    if (t.isNotBlank()) loose.append(t.trim()).append("\n")
+                                }
+                            }
+                            node.values.forEach { looseScan(it) }
+                        }
+                        is List<*> -> node.forEach { looseScan(it) }
+                    }
+                }
+                looseScan(root)
+                plain = loose.toString().trim().takeIf { it.isNotBlank() }
+            }
+        } catch (e: Exception) {
+            log("getLyrics parse error: ${e.message}")
+        }
+        return synced to plain
+    }
+
+    /**
+     * Convert YTM's inline "<mm:ss.xx>word <mm:ss.xx>word" syntax to standard
+     * LRC "[mm:ss.xx] word" lines, grouping all words on a single line into one
+     * LRC entry at that line's first timestamp.
+     */
+    private fun ytmInlineToLrc(raw: String): String {
+        val out = StringBuilder()
+        val tokenRegex = Regex("""<(\d{1,2}):(\d{2})[.:](\d{1,3})>""")
+        // Split into lines first (YTM puts each lyric line as a separate run
+        // already); for each line, take the first timestamp as the LRC time and
+        // strip all inline timestamps for the display text.
+        raw.split("\n").forEach { rawLine ->
+            val matches = tokenRegex.findAll(rawLine).toList()
+            if (matches.isEmpty()) return@forEach
+            val first = matches.first()
+            val min = first.groupValues[1].padStart(2, '0')
+            val sec = first.groupValues[2]
+            val frac = first.groupValues[3].padEnd(3, '0').take(2)
+            val text = rawLine.replace(tokenRegex, "").trim()
+            if (text.isNotEmpty()) {
+                out.append("[$min:$sec.$frac]$text\n")
+            }
+        }
+        return out.toString().trim()
     }
 
     /**

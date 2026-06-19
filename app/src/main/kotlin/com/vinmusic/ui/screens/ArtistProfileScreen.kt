@@ -42,6 +42,7 @@ fun ArtistProfileScreen(
     val scope = rememberCoroutineScope()
 
     var topSongs     by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
+    var rareSongs    by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var albums       by remember { mutableStateOf<List<AlbumItem>>(emptyList()) }
     var singles      by remember { mutableStateOf<List<AlbumItem>>(emptyList()) }
     var similar      by remember { mutableStateOf<List<ArtistItem>>(emptyList()) }
@@ -50,22 +51,25 @@ fun ArtistProfileScreen(
     var subs         by remember { mutableStateOf(artist.subscriberCount) }
     var bioExpanded  by remember { mutableStateOf(false) }
     var showAllSongs by remember { mutableStateOf(false) }
+    var showAllRare  by remember { mutableStateOf(false) }
 
     var songsLoading   by remember { mutableStateOf(true) }
+    var rareLoading    by remember { mutableStateOf(true) }
     var albumsLoading  by remember { mutableStateOf(true) }
     var singlesLoading by remember { mutableStateOf(true) }
 
     // ── Data fetching ─────────────────────────────────────────────────────────
 
-    // Top songs — official releases only. Leak/unreleased/demo/rare songs are
-    // EXCLUDED from the artist profile; they remain reachable only through an
-    // explicit user search on the Search screen.
+    // Top songs = official releases only. Rare/unreleased/demo/leak tracks go
+    // into the separate "More from Artist" section below Top Songs (previously
+    // they were dropped entirely and only reachable via explicit search).
     LaunchedEffect(artist.name) {
         songsLoading = true
+        rareLoading = true
         withContext(Dispatchers.IO) {
             try {
                 // Terms that mark a song as unofficial — these are filtered OUT
-                // of the artist profile (but kept available via explicit search).
+                // of Top Songs and routed into "More from Artist" instead.
                 val leakTerms = listOf(
                     "unreleased", "leak", "leaked", "demo", "rare", "loosie",
                     "snippet", "teaser", "preview", "unofficial", "vibe", "cdq leak"
@@ -88,18 +92,38 @@ fun ArtistProfileScreen(
                     if (listOf("audio", "song", "track", "lyrics", "lyric").any { title.contains(it) }) rank += 8
                     return rank
                 }
-                // Official-only: drop leaks, dedupe, rank, and cap at 50.
-                val officialSongs = (q1 + q2)
-                    .filterNot { isLeak(it) }
+                // Split the YTM search hits: official -> Top Songs, leaked ->
+                // "More from Artist". Then enrich the rare bucket with a broader
+                // YouTube uploads scan (covers unofficial uploads not indexed on
+                // YTM, e.g. Kendrick "prayer", J Cole "4 Your Eyez" leaks).
+                val (officialSongs, leakedFromYtm) = (q1 + q2)
                     .distinctBy { it.videoId }
+                    .partition { !isLeak(it) }
+
+                val officialRanked = officialSongs
                     .sortedByDescending { score(it) }
                     .take(50)
+
+                val rareFromUploads = runCatching { InnerTube.getArtistRareUploads(artist.name) }
+                    .getOrDefault(emptyList())
+
+                val rareBucket = (leakedFromYtm + rareFromUploads)
+                    .distinctBy { it.videoId }
+                    .filter { rareItem -> officialRanked.none { it.videoId == rareItem.videoId } }
+                    .sortedByDescending { score(it) }
+                    .take(20)
+
                 withContext(Dispatchers.Main) {
-                    topSongs = officialSongs
+                    topSongs = officialRanked
                     songsLoading = false
+                    rareSongs = rareBucket
+                    rareLoading = false
                 }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { songsLoading = false }
+                withContext(Dispatchers.Main) {
+                    songsLoading = false
+                    rareLoading = false
+                }
             }
         }
     }
@@ -533,6 +557,45 @@ fun ArtistProfileScreen(
                     song = song,
                     isPlaying = vm.currentSong?.videoId == song.videoId
                 ) { onSongClick(song, topSongs) }
+            }
+        }
+
+        // ── More from Artist (rare / unreleased / unofficial) ────────────────
+        // Surfaces leaked/unreleased/demo uploads (Kendrick "prayer", J Cole
+        // "4 Your Eyez"-style unofficial uploads) that Top Songs filters out.
+        // Only renders when we actually found some, so artists with no rare
+        // uploads look identical to before.
+        if (!rareLoading && rareSongs.isNotEmpty()) {
+            item {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 28.dp, bottom = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("More from Artist", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                        Text(
+                            "${rareSongs.size} rare & unreleased",
+                            fontSize = 12.sp, color = Color.White.copy(0.4f), fontWeight = FontWeight.Medium
+                        )
+                    }
+                    if (rareSongs.size > 5) {
+                        TextButton(onClick = { showAllRare = !showAllRare }) {
+                            Text(
+                                if (showAllRare) "Show less" else "See all",
+                                color = VinColors.AccentLight, fontSize = 13.sp
+                            )
+                        }
+                    }
+                }
+            }
+            val shownRare = if (showAllRare) rareSongs else rareSongs.take(5)
+            itemsIndexed(shownRare, key = { index, s -> "rare_${s.videoId}_$index" }) { i, song ->
+                ArtSongRow(
+                    index = i + 1,
+                    song = song,
+                    isPlaying = vm.currentSong?.videoId == song.videoId
+                ) { onSongClick(song, rareSongs) }
             }
         }
 

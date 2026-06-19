@@ -89,6 +89,15 @@ Replace the two current YTM options with one card:
   `OutlinedTextField` + Save. Same `YTMusicSession.setCookie` call.
 - Disconnect = existing `YTMusicSession.setCookie(ctx, null)` + clears
   `ytCookieConnected`.
+- **"Switch account" behavior (explicit):** before relaunching the WebView,
+  clear Google-domain cookies via `CookieManager` so the user is NOT silently
+  re-logged-in with the cached account. Concretely: call
+  `CookieManager.getInstance().removeAllCookies(null)` (or scope to
+  `accounts.google.com` / `.google.com` if a targeted clear proves
+  sufficient), then `CookieManager.getInstance().flush()`, then open the
+  WebView. This forces the Google account chooser to appear. Without this
+  step the button is effectively a no-op (verified: no Google-cookie
+  clearing exists in the current WebView code path).
 
 ### B. Display-only email — `YTMusicApi.getAccountEmail(ctx)`
 
@@ -106,6 +115,13 @@ Keep the `getAccountEmail` method, but **display-only**:
   marker exists, take the first email match and label it
   `Connected as <email> (1 of N)` so the user can see ambiguity rather than
   silently trust a possibly-wrong account.
+- **Pre-implementation verification (required first step):** the primary-account
+  marker field names (`isPrimary`/`selected`/`activeAccount`) are GUESSES for
+  this reverse-engineered endpoint — they are NOT confirmed. The very first
+  implementation step is to capture a real `account_menu` response (with a
+  valid cookie) and confirm which key actually carries the primary flag. The
+  parsing/scoping code is then written against the real shape. This doesn't
+  block the design — it just sequences the work: capture → confirm keys → code.
 - Return `null` on any failure → card shows just `"YouTube Music connected"`
   with no email. Never blocks the connection.
 
@@ -161,6 +177,10 @@ Settings → "Connect to YouTube Music" → Advanced → paste cookie → Save
    `Connected as <email> (1 of N)` when primary can't be determined.
 5. `getAccountEmail` forced failure → label degrades to
    `"YouTube Music connected"`, no crash, YTM still works.
+6. **Switch account:** connected user taps "Switch account" → Google cookies
+   cleared → WebView reopens with the **account chooser visible** (not silent
+   re-login). Selecting a different account updates the label to the new
+   email.
 
 ## Forward-path note (do NOT build now)
 

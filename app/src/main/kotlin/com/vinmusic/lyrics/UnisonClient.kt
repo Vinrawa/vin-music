@@ -40,18 +40,35 @@ object UnisonClient {
      * Returns null if the API is disabled or returns no usable lyrics.
      */
     fun fetch(videoId: String, title: String, artist: String, durationMs: Long = 0L): LyricsResult? {
-        if (!isAvailable()) return null
+        if (!isAvailable()) {
+            android.util.Log.w("UnisonClient", "Skipped — self-disabled until ${android.text.format.DateFormat.format("HH:mm:ss", java.util.Date(disabledUntilMs))}")
+            return null
+        }
 
         // Strategy A: Direct lookup by videoId
         if (videoId.isNotBlank()) {
+            android.util.Log.d("UnisonClient", "Direct lookup: v=$videoId")
             val direct = fetchByVideoId(videoId)
-            if (direct != null) return direct
+            if (direct != null) {
+                val src = when (direct) { is LyricsResult.Synced -> direct.source; is LyricsResult.Plain -> direct.source; else -> "?" }
+                android.util.Log.d("UnisonClient", "Direct lookup succeeded: $src")
+                return direct
+            }
+            android.util.Log.d("UnisonClient", "Direct lookup returned null, falling back to search")
         }
 
         // Strategy B: Search by title + artist
         if (title.isNotBlank()) {
             val query = if (artist.isNotBlank()) "$title $artist" else title
-            return fetchBySearch(query)
+            android.util.Log.d("UnisonClient", "Search: q=$query")
+            val result = fetchBySearch(query, title, durationMs)
+            if (result != null) {
+                val src = when (result) { is LyricsResult.Synced -> result.source; is LyricsResult.Plain -> result.source; else -> "?" }
+                android.util.Log.d("UnisonClient", "Search succeeded: $src")
+                return result
+            }
+            android.util.Log.d("UnisonClient", "Search returned null")
+            return null
         }
 
         return null
@@ -73,7 +90,16 @@ object UnisonClient {
 
     // ── Strategy B: Search ────────────────────────────────────────────────────
 
-    private fun fetchBySearch(query: String): LyricsResult? {
+    /**
+     * Search returns metadata only (videoId, format, syncType) — NOT the lyrics
+     * text itself. So this is a two-step fetch:
+     *   1. GET /lyrics/search?q=... → pick best result by quality + match
+     *   2. GET /lyrics?v={picked videoId} → get the actual lyrics content
+     *
+     * We pass the original title and durationMs so pickBestVideoId can reject
+     * garbage matches (wrong song, wrong duration).
+     */
+    private fun fetchBySearch(query: String, originalTitle: String, durationMs: Long): LyricsResult? {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
         val url = HttpUrl.Builder()
             .scheme("https")
@@ -83,7 +109,77 @@ object UnisonClient {
             .build()
 
         val body = executeRequest(url) ?: return null
-        return parseUnisonResponse(body)
+        val videoId = pickBestVideoId(body, originalTitle, durationMs) ?: return null
+        android.util.Log.d("UnisonClient", "Search picked videoId=$videoId, fetching lyrics...")
+        return fetchByVideoId(videoId)
+    }
+
+    /**
+     * Parse search response and return the best videoId.
+     *
+     * Filtering rules — a search result must pass ALL of:
+     *   - matchScore >= 0.70 (API's own confidence score)
+     *   - duration within 30% of the requested duration (if known)
+     *
+     * Among passing results, prefer: richsync > linesync > plain.
+     * Returns null if nothing passes the quality gate.
+     */
+    private fun pickBestVideoId(searchBody: String, originalTitle: String, durationMs: Long): String? {
+        val json = gson.fromJson(searchBody, JsonObject::class.java) ?: return null
+        if (json.get("success")?.asBoolean != true) return null
+        val data = json.get("data") ?: return null
+        if (!data.isJsonArray) return null
+        val arr = data.asJsonArray
+        if (arr.size() == 0) return null
+
+        val items = arr.mapNotNull { it.asJsonObject }
+        android.util.Log.d("UnisonClient", "Search: ${arr.size()} results")
+
+        // Filter by matchScore (API's own relevance metric)
+        val minScore = 0.70
+        val scored = items.filter { item ->
+            val score = item.get("matchScore")?.asDouble ?: 0.0
+            if (score < minScore) {
+                val song = item.get("song")?.asString ?: "?"
+                android.util.Log.d("UnisonClient", "  Rejected '$song' — matchScore=$score < $minScore")
+                false
+            } else true
+        }
+
+        // Filter by duration (within 30% of expected)
+        val durationFiltered = if (durationMs > 0) {
+            scored.filter { item ->
+                val apiDurationMs = (item.get("duration")?.asLong ?: 0L) * 1000L
+                if (apiDurationMs <= 0) return@filter true  // no duration info → don't reject
+                val diff = kotlin.math.abs(apiDurationMs - durationMs).toDouble()
+                val ratio = diff / durationMs
+                if (ratio > 0.30) {
+                    val song = item.get("song")?.asString ?: "?"
+                    android.util.Log.d("UnisonClient", "  Rejected '$song' — duration ${apiDurationMs/1000}s vs ${durationMs/1000}s (off by ${(ratio*100).toInt()}%)")
+                    false
+                } else true
+            }
+        } else scored
+
+        if (durationFiltered.isEmpty()) {
+            android.util.Log.d("UnisonClient", "No results passed quality gate")
+            return null
+        }
+
+        // Prefer richsync, then linesync, then anything
+        val rich = durationFiltered.filter { it.get("syncType")?.asString == "richsync" }
+        val synced = durationFiltered.filter {
+            val st = it.get("syncType")?.asString ?: ""
+            st == "richsync" || st == "linesync"
+        }
+        val pick = rich.firstOrNull() ?: synced.firstOrNull() ?: durationFiltered.first()
+        val videoId = pick.get("videoId")?.asString
+        val song = pick.get("song")?.asString ?: "?"
+        val format = pick.get("format")?.asString ?: "?"
+        val syncType = pick.get("syncType")?.asString ?: "?"
+        val score = pick.get("matchScore")?.asDouble ?: 0.0
+        android.util.Log.d("UnisonClient", "Picked: '$song' videoId=$videoId score=$score format=$format syncType=$syncType")
+        return videoId
     }
 
     // ── HTTP ─────────────────────────────────────────────────────────────────
@@ -97,33 +193,61 @@ object UnisonClient {
 
         return http.newCall(request).execute().use { response ->
             if (response.code == 401 || response.code == 403) {
+                android.util.Log.w("UnisonClient", "Auth error ${response.code} — self-disabling for 12h")
                 disabledUntilMs = System.currentTimeMillis() + TimeUnit.HOURS.toMillis(12)
                 return@use null
             }
-            if (!response.isSuccessful) return@use null
-            response.body?.string()
+            if (!response.isSuccessful) {
+                android.util.Log.d("UnisonClient", "HTTP ${response.code} from ${url.encodedPath}")
+                return@use null
+            }
+            val body = response.body?.string()
+            if (body.isNullOrBlank()) {
+                android.util.Log.d("UnisonClient", "Empty response body from ${url.encodedPath}")
+                return@use null
+            }
+            body
         }
     }
 
     // ── Response parsing ─────────────────────────────────────────────────────
 
     private fun parseUnisonResponse(body: String): LyricsResult? {
-        val json = gson.fromJson(body, JsonObject::class.java) ?: return null
-        val success = json.get("success")?.asBoolean ?: false
-        if (!success) return null
-
-        // "data" can be JsonObject (direct lookup) or JsonArray (search)
-        val dataElement = json.get("data") ?: return null
-        if (dataElement.isJsonArray) {
-            return parseUnisonSearchArray(dataElement.asJsonArray)
+        val json = gson.fromJson(body, JsonObject::class.java)
+        if (json == null) {
+            android.util.Log.e("UnisonClient", "Failed to parse response as JSON")
+            return null
         }
-        val data = dataElement.asJsonObject
-        return parseUnisonItem(data)
+        val success = json.get("success")?.asBoolean ?: false
+        if (!success) {
+            val err = json.get("error")?.asString ?: "unknown"
+            android.util.Log.d("UnisonClient", "API returned success=false: $err")
+            return null
+        }
+
+        // Direct lookup response: { success, data: { lyrics, format, ... } }
+        val dataElement = json.get("data")
+        if (dataElement == null) {
+            android.util.Log.d("UnisonClient", "Response has no 'data' field")
+            return null
+        }
+        if (dataElement.isJsonArray) {
+            // Defensive: search arrays should never reach here (handled by
+            // pickBestVideoId → fetchByVideoId). If one does, log and bail.
+            android.util.Log.w("UnisonClient", "Unexpected JsonArray in parseUnisonResponse")
+            return null
+        }
+        android.util.Log.d("UnisonClient", "Parsing single item")
+        return parseUnisonItem(dataElement.asJsonObject)
     }
 
     /** Parse a single Unison result object into LyricsResult */
     private fun parseUnisonItem(data: JsonObject): LyricsResult? {
-        val lyrics = data.get("lyrics")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val lyrics = data.get("lyrics")?.asString?.trim()?.takeIf { it.isNotEmpty() }
+        if (lyrics == null) {
+            android.util.Log.d("UnisonClient", "Item has no lyrics text")
+            return null
+        }
         val format = data.get("format")?.asString ?: "plain"
         val syncType = data.get("syncType")?.asString ?: ""
         val source = "Unison"
@@ -142,20 +266,6 @@ object UnisonClient {
                 LyricsResult.Plain(lyrics, source)
             }
         }
-    }
-
-    /** Parse search results array — return the best match (highest score, synced preferred) */
-    private fun parseUnisonSearchArray(arr: com.google.gson.JsonArray): LyricsResult? {
-        val items = arr.mapNotNull { it.asJsonObject }.filter {
-            it.get("lyrics")?.asString?.isNotBlank() == true
-        }
-
-        // Prefer synced (ttml/lrc) over plain
-        val synced = items.filter { (it.get("format")?.asString ?: "plain") != "plain" }
-        val pick = if (synced.isNotEmpty()) synced else items
-        val best = pick.firstOrNull() ?: return null
-
-        return parseUnisonItem(best)
     }
 }
 

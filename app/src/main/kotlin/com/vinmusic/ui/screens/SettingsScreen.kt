@@ -97,6 +97,30 @@ fun SettingsScreen(
     var showYtLoginOptionsDialog by remember { mutableStateOf(false) }
     var showYtWebViewLogin by remember { mutableStateOf(false) }
 
+    // YTM login flow has two modes:
+    //   LANDING  — native Google account picker card (no password yet)
+    //   WEBVIEW  — the cookie-capturing WebView, with optional email pre-fill
+    // After picking a Google account via the system AccountManager picker,
+    // we open the WebView with &Email={account} pre-filled so the user only
+    // enters a password. See docs/superpowers/specs/2026-06-20-native-google-account-picker-design.md
+    var ytLoginMode by remember { mutableStateOf(YtLoginMode.LANDING) }
+    var ytPrefilledEmail by remember { mutableStateOf<String?>(null) }
+
+    val googleAccountPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val accountName = result.data
+                ?.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME)
+                ?.trim()
+            if (!accountName.isNullOrBlank()) {
+                ytPrefilledEmail = accountName
+                ytLoginMode = YtLoginMode.WEBVIEW
+            }
+        }
+        // Cancelled picker: stay on LANDING, no state change.
+    }
+
     // Display-only account email + count, refreshed via ytConnectionVersion.
     // Keying the LaunchedEffect on the integer version (not the boolean) is
     // deliberate: switch-account and manual-paste both re-set the cookie while
@@ -129,8 +153,12 @@ fun SettingsScreen(
         val cm = CookieManager.getInstance()
         ytCookieConnected = false
         ytAccountEmail = null
+        // Start at the account picker on every new login attempt, so
+        // switching accounts doesn't silently resume the cached one.
+        ytLoginMode = YtLoginMode.LANDING
+        ytPrefilledEmail = null
         // Safety timeout: if removeAllCookies callback never fires (known
-        // WebView bug on some OEMs), open the WebView anyway after 500ms.
+        // WebView bug on some OEMs), open the login dialog anyway after 500ms.
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             if (!showYtWebViewLogin) showYtWebViewLogin = true
         }, 500)
@@ -440,7 +468,11 @@ fun SettingsScreen(
 
                 if (!ytCookieConnected) {
                     Button(
-                        onClick = { showYtWebViewLogin = true },
+                        onClick = {
+                            ytLoginMode = YtLoginMode.LANDING
+                            ytPrefilledEmail = null
+                            showYtWebViewLogin = true
+                        },
                         colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent),
                         shape = RoundedCornerShape(10.dp),
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
@@ -1111,8 +1143,6 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxSize(),
                 color = VinColors.BgColor
             ) {
-                var webViewLoading by remember { mutableStateOf(true) }
-                
                 Column(modifier = Modifier.fillMaxSize()) {
                     // Header Bar
                     Row(
@@ -1123,94 +1153,71 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        IconButton(onClick = { showYtWebViewLogin = false }) {
+                        IconButton(onClick = {
+                            // Back from WebView returns to the picker; close only from LANDING.
+                            if (ytLoginMode == YtLoginMode.WEBVIEW) {
+                                ytLoginMode = YtLoginMode.LANDING
+                                ytPrefilledEmail = null
+                            } else {
+                                showYtWebViewLogin = false
+                            }
+                        }) {
                             Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
                         }
-                        
+
                         Text(
-                            text = "Sign In with Google",
+                            text = "Connect YouTube Music",
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
                             color = VinColors.Primary
                         )
-                        
-                        IconButton(onClick = { /* Reload handled by recreation or can be added */ }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = VinColors.Secondary)
-                        }
+
+                        Spacer(Modifier.width(48.dp))
                     }
-                    
-                    // Loading Progress Indicator
-                    if (webViewLoading) {
-                        LinearProgressIndicator(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = VinColors.AccentLight,
-                            trackColor = VinColors.Surface
-                        )
-                    } else {
-                        HorizontalDivider(color = VinColors.GlassBorder, thickness = 1.dp)
-                    }
-                    
-                    // WebView Component
-                    AndroidView(
-                        factory = { context ->
-                            WebView(context).apply {
-                                layoutParams = android.view.ViewGroup.LayoutParams(
-                                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                                    android.view.ViewGroup.LayoutParams.MATCH_PARENT
+
+                    HorizontalDivider(color = VinColors.GlassBorder, thickness = 1.dp)
+
+                    when (ytLoginMode) {
+                        YtLoginMode.LANDING -> YtLoginLanding(
+                            onPickAccount = {
+                                // System-mediated picker — no GET_ACCOUNTS permission needed.
+                                // The OS returns only the account the user explicitly selects.
+                                // Note: the (Account, List<Account>, String[], boolean, String, String, String[], Bundle)
+                                // overload is the deprecated-but-stable cross-SDK variant; the newer
+                                // one without `alwaysPromptForAccount` is API 23+ only and changes signature.
+                                @Suppress("DEPRECATION")
+                                val intent = android.accounts.AccountManager.newChooseAccountIntent(
+                                    /* selectedAccount       = */ null,
+                                    /* selectableAccounts    = */ null,
+                                    /* allowableAccountTypes = */ null,
+                                    /* alwaysPromptForAccount= */ false,
+                                    /* descriptionOverride   = */ null,
+                                    /* addAccountAuthType    = */ null,
+                                    /* addAccountFeatures    = */ null,
+                                    /* addAccountOptions     = */ null
                                 )
-                                settings.apply {
-                                    javaScriptEnabled = true
-                                    domStorageEnabled = true
-                                    databaseEnabled = true
-                                    javaScriptCanOpenWindowsAutomatically = true
-                                    // Use a clean mobile User-Agent to bypass Google's blocked webview detection
-                                    userAgentString = "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"
-                                }
-                                
-                                webViewClient = object : WebViewClient() {
-                                    // Dedupe cookie capture across onPageStarted + onPageFinished
-                                    // for the same navigation. Without this, adding
-                                    // ytConnectionVersion++ to both handlers would
-                                    // fire the email fetch twice per login.
-                                    var captureHandledForUrl: String? = null
-
-                                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                                        super.onPageStarted(view, url, favicon)
-                                        webViewLoading = true
-                                        captureConnection(this, url)
-                                    }
-
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        super.onPageFinished(view, url)
-                                        webViewLoading = false
-                                        captureConnection(this, url)
-                                    }
-
-                                    fun captureConnection(client: WebViewClient, url: String?) {
-                                        if (url == null || !url.contains("music.youtube.com")) return
-                                        if (url == captureHandledForUrl) return  // dedupe
-                                        val cookies = CookieManager.getInstance().getCookie("https://music.youtube.com")
-                                        if (cookies != null && (cookies.contains("SAPISID") || cookies.contains("__Secure-3PAPISID") || cookies.contains("__Secure-1PAPISID"))) {
-                                            captureHandledForUrl = url   // mark handled for this navigation
-                                            YTMusicSession.setCookie(context, cookies)
-                                            CookieManager.getInstance().flush()
-                                            ytCookieDraft = cookies
-                                            ytCookieConnected = true
-                                            ytConnectionVersion++   // refire email fetch (true→true case), once per nav
-                                            RecommendationManager.invalidateCache()
-                                            context.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE).edit().clear().apply()
-                                            showYtWebViewLogin = false
-                                            Toast.makeText(context, "YouTube Music connected", Toast.LENGTH_LONG).show()
-                                        }
-                                    }
-                                }
-                                
-                                // Load YouTube Music login page
-                                loadUrl("https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fmusic.youtube.com%2F")
+                                googleAccountPicker.launch(intent)
+                            },
+                            onManualEmail = {
+                                ytPrefilledEmail = null
+                                ytLoginMode = YtLoginMode.WEBVIEW
                             }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                        )
+                        YtLoginMode.WEBVIEW -> YtLoginWebView(
+                            prefillEmail = ytPrefilledEmail,
+                            onConnected = { cookies, context ->
+                                YTMusicSession.setCookie(context, cookies)
+                                CookieManager.getInstance().flush()
+                                ytCookieDraft = cookies
+                                ytCookieConnected = true
+                                ytConnectionVersion++   // refire email fetch (true→true case)
+                                RecommendationManager.invalidateCache()
+                                context.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE).edit().clear().apply()
+                                showYtWebViewLogin = false
+                                Toast.makeText(context, "YouTube Music connected", Toast.LENGTH_LONG).show()
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1442,23 +1449,184 @@ fun SettingsDropdown(
 
 @Composable
 fun SettingsSliderRow(
-    label: String, 
-    min: Float, 
-    max: Float, 
-    value: Float, 
+    label: String,
+    min: Float,
+    max: Float,
+    value: Float,
     onChange: (Float) -> Unit
 ) {
     Column(modifier = Modifier.padding(vertical = 6.dp)) {
         Text(label, fontSize = 13.sp, color = VinColors.Secondary)
         Slider(
-            value = value, 
-            onValueChange = onChange, 
+            value = value,
+            onValueChange = onChange,
             valueRange = min..max,
             colors = SliderDefaults.colors(
-                thumbColor = VinColors.Accent, 
+                thumbColor = VinColors.Accent,
                 activeTrackColor = VinColors.Accent,
                 inactiveTrackColor = VinColors.White10
             )
         )
+    }
+}
+
+// ── YouTube Music login: native picker + pre-filled WebView ──────────────────
+
+private enum class YtLoginMode { LANDING, WEBVIEW }
+
+/**
+ * Landing card shown when the user first opens the YTM login dialog.
+ *
+ * Offers the native OS account picker (no password, no email typing) as the
+ * primary path, with manual WebView login as a graceful fallback.
+ *
+ * The OS picker is system-mediated — we never touch the account list, so no
+ * GET_ACCOUNTS permission is required (Android 5.0+).
+ */
+@Composable
+private fun YtLoginLanding(
+    onPickAccount: () -> Unit,
+    onManualEmail: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp, vertical = 32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Google "G" mark — simple vector, no asset dependency.
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .clip(CircleShape)
+                .background(Color.White),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("G", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4285F4))
+        }
+
+        Spacer(Modifier.height(20.dp))
+        Text(
+            "Sign in to YouTube Music",
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = VinColors.Primary
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Pick a Google account on your phone to continue. You'll only need to enter your password.",
+            fontSize = 13.sp,
+            color = VinColors.Secondary,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            lineHeight = 18.sp
+        )
+
+        Spacer(Modifier.height(28.dp))
+
+        // Primary: native account picker
+        Button(
+            onClick = onPickAccount,
+            colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+            shape = RoundedCornerShape(12.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Continue with Google", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.Black)
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        // Fallback: skip the picker, type email in the WebView directly
+        TextButton(onClick = onManualEmail) {
+            Text("Enter email manually", fontSize = 13.sp, color = VinColors.Secondary)
+        }
+    }
+}
+
+/**
+ * Cookie-capturing WebView for YTM login. Opens the ServiceLogin page with the
+ * selected Google account's email pre-filled (`&Email=...`) when available, so
+ * the user only needs to enter a password. If Google's login flow ignores the
+ * param (it sometimes does on the newer flow), login still works — the user
+ * just types the email. No worse than the previous behavior.
+ *
+ * `key`ing the AndroidView on [prefillEmail] ensures a fresh WebView is built
+ * (and the correct URL loaded) when switching from manual to a picked account.
+ */
+@Composable
+private fun YtLoginWebView(
+    prefillEmail: String?,
+    onConnected: (cookies: String, context: android.content.Context) -> Unit
+) {
+    var webViewLoading by remember { mutableStateOf(true) }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (webViewLoading) {
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth(),
+                color = VinColors.AccentLight,
+                trackColor = VinColors.Surface
+            )
+        }
+
+        // Re-create the WebView when pre-fill changes so the correct URL loads.
+        key(prefillEmail ?: "manual") {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context ->
+                WebView(context).apply {
+                    layoutParams = android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        databaseEnabled = true
+                        javaScriptCanOpenWindowsAutomatically = true
+                        // Clean mobile User-Agent to bypass Google's blocked-webview detection.
+                        userAgentString = "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"
+                    }
+
+                    webViewClient = object : WebViewClient() {
+                        // Dedupe cookie capture across onPageStarted + onPageFinished
+                        // for the same navigation — otherwise the email fetch fires twice.
+                        var captureHandledForUrl: String? = null
+
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            super.onPageStarted(view, url, favicon)
+                            webViewLoading = true
+                            captureConnection(url)
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            webViewLoading = false
+                            captureConnection(url)
+                        }
+
+                        fun captureConnection(url: String?) {
+                            if (url == null || !url.contains("music.youtube.com")) return
+                            if (url == captureHandledForUrl) return
+                            val cookies = CookieManager.getInstance().getCookie("https://music.youtube.com")
+                            if (cookies != null && (cookies.contains("SAPISID") || cookies.contains("__Secure-3PAPISID") || cookies.contains("__Secure-1PAPISID"))) {
+                                captureHandledForUrl = url
+                                onConnected(cookies, context)
+                            }
+                        }
+                    }
+
+                    val baseUrl = "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fmusic.youtube.com%2F"
+                    val fullUrl = if (!prefillEmail.isNullOrBlank()) {
+                        // Google's login page accepts &Email= for pre-fill. Best-effort:
+                        // ignored on some newer flows, but harmless when it is.
+                        baseUrl + "&Email=" + java.net.URLEncoder.encode(prefillEmail, "UTF-8")
+                    } else baseUrl
+                    loadUrl(fullUrl)
+                }
+            }
+            )
+        }
     }
 }

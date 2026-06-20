@@ -112,7 +112,17 @@ object UnisonClient {
         val success = json.get("success")?.asBoolean ?: false
         if (!success) return null
 
-        val data = json.getAsJsonObject("data") ?: return null
+        // "data" can be JsonObject (direct lookup) or JsonArray (search)
+        val dataElement = json.get("data") ?: return null
+        if (dataElement.isJsonArray) {
+            return parseUnisonSearchArray(dataElement.asJsonArray)
+        }
+        val data = dataElement.asJsonObject
+        return parseUnisonItem(data)
+    }
+
+    /** Parse a single Unison result object into LyricsResult */
+    private fun parseUnisonItem(data: JsonObject): LyricsResult? {
         val lyrics = data.get("lyrics")?.asString?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val format = data.get("format")?.asString ?: "plain"
         val syncType = data.get("syncType")?.asString ?: ""
@@ -132,6 +142,20 @@ object UnisonClient {
                 LyricsResult.Plain(lyrics, source)
             }
         }
+    }
+
+    /** Parse search results array — return the best match (highest score, synced preferred) */
+    private fun parseUnisonSearchArray(arr: com.google.gson.JsonArray): LyricsResult? {
+        val items = arr.mapNotNull { it.asJsonObject }.filter {
+            it.get("lyrics")?.asString?.isNotBlank() == true
+        }
+
+        // Prefer synced (ttml/lrc) over plain
+        val synced = items.filter { (it.get("format")?.asString ?: "plain") != "plain" }
+        val pick = if (synced.isNotEmpty()) synced else items
+        val best = pick.firstOrNull() ?: return null
+
+        return parseUnisonItem(best)
     }
 }
 

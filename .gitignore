@@ -35,13 +35,20 @@ Thumbs.db
 /app/google-services.json
 
 # Signing keys
-*.jks
-*.keystore
+**/*.jks
+**/*.keystore
+
+# Built APKs
+*.apk
 
 # Large local logs / debug artifacts (machine-generated, should not be tracked)
 logcat.txt
 build_log.txt
 mood_hist_clean.txt
+hs_err_pid*.log
+
+# Debug scripts and API captures
+scratch/
 
 # Local working notes / regression snapshots (keep local, don't commit)
 *_OLD.txt

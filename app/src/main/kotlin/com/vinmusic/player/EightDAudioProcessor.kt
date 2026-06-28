@@ -9,6 +9,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 class EightDAudioProcessor : BaseAudioProcessor() {
     var enabled: Boolean = false
@@ -20,7 +21,7 @@ class EightDAudioProcessor : BaseAudioProcessor() {
         }
 
     private var theta = 0.0
-    private val rotationHz = 0.16 // Audible orbit without turning into tremolo.
+    private val rotationHz = 0.28 // Clear left-right orbit without turning into tremolo.
     private var sourceDelay = DoubleArray(1)
     private var lowPassDelay = DoubleArray(1)
     private var writeIndex = 0
@@ -74,15 +75,16 @@ class EightDAudioProcessor : BaseAudioProcessor() {
             while (inputBuffer.position() + 3 < limit) {
                 val leftVal = inputBuffer.getShort().toDouble()
                 val rightVal = inputBuffer.getShort().toDouble()
-                val mid = (leftVal + rightVal) * 0.5
+                val mono = (leftVal + rightVal) * 0.5
+                val side = (leftVal - rightVal) * 0.5
 
-                lowPassState += 0.12 * (mid - lowPassState)
-                sourceDelay[writeIndex] = mid
+                lowPassState += 0.18 * (mono - lowPassState)
+                sourceDelay[writeIndex] = mono
                 lowPassDelay[writeIndex] = lowPassState
 
                 val pan = sin(theta) // -1 = left, +1 = right.
                 val frontBack = cos(theta) // +1 = front, -1 = rear.
-                val maxItdSamples = (sampleRate * 0.00072).coerceAtLeast(1.0)
+                val maxItdSamples = (sampleRate * 0.00115).coerceAtLeast(1.0)
                 val itd = pan * maxItdSamples
                 val leftDelay = if (itd > 0.0) itd else 0.0
                 val rightDelay = if (itd < 0.0) -itd else 0.0
@@ -92,36 +94,46 @@ class EightDAudioProcessor : BaseAudioProcessor() {
                 val leftShadow = readDelay(lowPassDelay, leftDelay)
                 val rightShadow = readDelay(lowPassDelay, rightDelay)
 
-                val panAngle = (pan + 1.0) * PI / 4.0
-                val floor = 0.12
-                val rawLeftGain = floor + (1.0 - floor) * cos(panAngle)
-                val rawRightGain = floor + (1.0 - floor) * sin(panAngle)
-                val energyNorm = 1.0 / kotlin.math.sqrt((rawLeftGain * rawLeftGain + rawRightGain * rawRightGain) * 0.5)
-                val leftGain = rawLeftGain * energyNorm
-                val rightGain = rawRightGain * energyNorm
+                val leftGain = sqrt(((1.0 - pan) * 0.5).coerceIn(0.02, 1.0))
+                val rightGain = sqrt(((1.0 + pan) * 0.5).coerceIn(0.02, 1.0))
+                val leftNearBoost = 1.0 + ((-pan).coerceAtLeast(0.0) * 0.20)
+                val rightNearBoost = 1.0 + (pan.coerceAtLeast(0.0) * 0.20)
 
                 val rightSide = pan.coerceAtLeast(0.0)
                 val leftSide = (-pan).coerceAtLeast(0.0)
                 val rearDistance = ((1.0 - frontBack) * 0.5).coerceIn(0.0, 1.0)
-                val leftShadowMix = (0.50 * rightSide + 0.20 * rearDistance).coerceIn(0.0, 0.82)
-                val rightShadowMix = (0.50 * leftSide + 0.20 * rearDistance).coerceIn(0.0, 0.82)
+                val leftShadowMix = (0.62 * rightSide + 0.22 * rearDistance).coerceIn(0.0, 0.88)
+                val rightShadowMix = (0.62 * leftSide + 0.22 * rearDistance).coerceIn(0.0, 0.88)
                 val leftHeadShadow = leftSource * (1.0 - leftShadowMix) + leftShadow * leftShadowMix
                 val rightHeadShadow = rightSource * (1.0 - rightShadowMix) + rightShadow * rightShadowMix
 
                 val roomDelayA = sampleRate * 0.014
                 val roomDelayB = sampleRate * 0.031
                 val roomDelayC = sampleRate * 0.049
-                val roomA = readDelay(sourceDelay, roomDelayA) * 0.020
-                val roomB = readDelay(sourceDelay, roomDelayB) * 0.014
-                val roomC = readDelay(lowPassDelay, roomDelayC) * 0.008
+                val roomA = readDelay(sourceDelay, roomDelayA) * 0.014
+                val roomB = readDelay(sourceDelay, roomDelayB) * 0.010
+                val roomC = readDelay(lowPassDelay, roomDelayC) * 0.006
                 val roomWidth = 0.5 + 0.42 * frontBack
-                val distanceGain = 1.0 - (0.12 * rearDistance)
+                val distanceGain = 1.0 - (0.16 * rearDistance)
+                val sideBlend = 0.12 * (1.0 - abs(pan) * 0.45)
 
-                val spatialL = (leftHeadShadow * leftGain + roomA * (1.0 - roomWidth) + roomB * roomWidth + roomC * rearDistance) * distanceGain
-                val spatialR = (rightHeadShadow * rightGain + roomA * roomWidth + roomB * (1.0 - roomWidth) + roomC * rearDistance) * distanceGain
+                val spatialL = (
+                    leftHeadShadow * leftGain * leftNearBoost +
+                        side * sideBlend +
+                        roomA * (1.0 - roomWidth) +
+                        roomB * roomWidth +
+                        roomC * rearDistance
+                    ) * distanceGain
+                val spatialR = (
+                    rightHeadShadow * rightGain * rightNearBoost -
+                        side * sideBlend +
+                        roomA * roomWidth +
+                        roomB * (1.0 - roomWidth) +
+                        roomC * rearDistance
+                    ) * distanceGain
 
-                val dryBlend = 0.04
-                val wetBlend = 0.96
+                val dryBlend = 0.015
+                val wetBlend = 0.985
                 val outL = leftVal * dryBlend + spatialL * wetBlend
                 val outR = rightVal * dryBlend + spatialR * wetBlend
 
@@ -153,7 +165,7 @@ class EightDAudioProcessor : BaseAudioProcessor() {
     }
 
     private fun clearState() {
-        theta = 0.0
+        theta = -PI / 2.0
         writeIndex = 0
         lowPassState = 0.0
         sourceDelay.fill(0.0)

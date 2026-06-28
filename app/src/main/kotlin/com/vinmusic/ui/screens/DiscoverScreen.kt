@@ -710,7 +710,7 @@ fun DiscoverScreen(
         }
 
         if (selectedMix != null) {
-            val mix = selectedMix!!
+            val mix = selectedMix ?: return
             val startColor = remember(mix.gradientStartHex) {
                 runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFFC5A880) }
             }

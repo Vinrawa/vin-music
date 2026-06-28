@@ -26,8 +26,8 @@ android {
         applicationId   = "com.vinmusic"
         minSdk          = 26
         targetSdk       = 35
-        versionCode     = 13
-        versionName     = "2.16"
+        versionCode     = 14
+        versionName     = "2.17"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -180,10 +180,14 @@ dependencies {
 
     // Test
     testImplementation(libs.junit)
+    testImplementation(libs.mockito.core)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso)
 
     // Sentry
     implementation(libs.sentry.android)
     implementation(libs.sentry.compose)
+
+    // TarsosDSP
+    implementation(libs.tarsos.core)
 }

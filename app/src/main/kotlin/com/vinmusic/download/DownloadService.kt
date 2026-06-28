@@ -359,15 +359,15 @@ class DownloadService : Service() {
                 }
 
                 val finalCachedBytes = cache.getCachedBytes(videoId, 0, -1)
-                
+
                 // Verify download is actually complete before marking as done
                 if (finalCachedBytes < 100_000L) {
                     Log.e(TAG, "Download verification failed: $videoId only has $finalCachedBytes bytes cached")
                     db.downloadDao().insert(downloadingEntity.copy(status = "failed", progress = 0))
                     return@launch
                 }
-                if (totalLength > 0L && finalCachedBytes < (totalLength * 0.97).toLong()) {
-                    Log.e(TAG, "Download verification failed: $videoId cached $finalCachedBytes of expected $totalLength bytes")
+                if (totalLength > 0L && finalCachedBytes < (totalLength * 0.99).toLong()) {
+                    Log.e(TAG, "Download verification failed: $videoId cached $finalCachedBytes of expected $totalLength bytes (${(finalCachedBytes * 100 / totalLength)}%)")
                     db.downloadDao().insert(downloadingEntity.copy(status = "failed", progress = 0, sizeBytes = finalCachedBytes))
                     return@launch
                 }
@@ -431,6 +431,13 @@ class DownloadService : Service() {
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to cache offline lyrics: ${e.message}")
+                }
+
+                // Cache artist banner for offline artist cards
+                try {
+                    ArtistBannerCache.downloadBannerByName(this@DownloadService, downloadingEntity.author)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to cache artist banner: ${e.message}")
                 }
 
                 Log.d(TAG, "Download finished successfully: $videoId. Total cached bytes stored: $finalCachedBytes. Expected content length: $contentLength")

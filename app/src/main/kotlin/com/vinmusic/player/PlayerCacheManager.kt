@@ -45,6 +45,7 @@ object PlayerCacheManager {
         val dlCacheBytes = dlCache?.getCachedBytes(videoId, 0, -1) ?: 0L
         
         // Healing Mechanism: If DB says downloaded but actual cached bytes are missing, heal DB state!
+        var healed = false
         if (isDownloadCompleted && dlCacheBytes < 100_000L) {
             Log.w(TAG, "Download DB says completed, but cached bytes are missing ($dlCacheBytes). Healing DB.")
             try {
@@ -56,12 +57,13 @@ object PlayerCacheManager {
                         database.interactionSignalDao().insert(sig)
                     }
                 }
+                healed = true
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to heal database for song $videoId: ${e.message}")
             }
         }
 
-        val isDownloadCacheValid = isDownloadCompleted && dlCacheBytes > 100_000L
+        val isDownloadCacheValid = !healed && isDownloadCompleted && dlCacheBytes > 100_000L
         val pCache = PlayerSingleton.getCache(ctx)
         val pCacheBytes = pCache?.getCachedBytes(videoId, 0, -1) ?: 0L
         val isPlayerCached = pCacheBytes > 1_000_000L

@@ -173,7 +173,8 @@ class FirebaseSyncManager @Inject constructor(
                         PlaylistEntity(name = name, createdAt = createdAt)
                     )
                 }
-                
+                val resolvedPlaylistId = playlistId ?: return@forEach
+
                 // Add songs to the playlist
                 val songsToInsert = songs.map { songMap ->
                     val videoId = songMap["videoId"] as? String ?: ""
@@ -181,9 +182,9 @@ class FirebaseSyncManager @Inject constructor(
                     val author = songMap["author"] as? String ?: ""
                     val durationText = songMap["durationText"] as? String ?: ""
                     val position = (songMap["position"] as? Number)?.toInt() ?: 0
-                    
+
                     PlaylistSongEntity(
-                        playlistId = playlistId!!,
+                        playlistId = resolvedPlaylistId,
                         videoId = videoId,
                         title = title,
                         author = author,

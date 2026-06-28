@@ -301,7 +301,7 @@ fun LibraryScreen(
                                 }
                             }
                         }
-                        items(songs) { song ->
+                        items(songs, key = { it.videoId }) { song ->
                             SongListItem(song = song, isPlaying = vm.currentSong?.videoId == song.videoId,
                                 onClick = { onSongClick(song, songs) },
                                 onMore = { onSongMore(song) })
@@ -412,7 +412,7 @@ fun LibraryScreen(
                             EmptyState(Icons.Default.CloudQueue, "No online playlists", "Log in or check your YouTube Music account connection")
                         } else {
                             LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
-                                items(ytPlaylists) { pl ->
+                                items(ytPlaylists, key = { it.playlistId }) { pl ->
                                     YtPlaylistItem(
                                         playlist = pl,
                                         onClick = { selectedYtPlaylist = pl }
@@ -503,7 +503,7 @@ fun LibraryScreen(
                                 }
                             }
                         }
-                        items(songs) { song ->
+                        items(songs, key = { it.videoId }) { song ->
                             SongListItem(song = song, isPlaying = vm.currentSong?.videoId == song.videoId,
                                 onClick = { onSongClick(song, songs) })
                         }

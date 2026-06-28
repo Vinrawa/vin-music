@@ -14,6 +14,7 @@ object RemoteConfigHelper {
     const val KEY_LYRICS_PROVIDER_PRIORITY = "lyrics_provider_priority"
     const val KEY_STREAM_EXTRACT_FALLBACK = "stream_extract_fallback_enabled"
     const val KEY_SMART_AUTOPLAY_DEFAULT = "smart_autoplay_default"
+    const val KEY_LASTFM_API_KEY = "lastfm_api_key"
 
     /**
      * Initialize Remote Config with default values and fetch the latest parameters.
@@ -30,7 +31,7 @@ object RemoteConfigHelper {
 
             // Define default values
             val defaults = mapOf(
-                KEY_MIN_SUPPORTED_VERSION to 6L, // Current version code is 6 (v2.1.4)
+                KEY_MIN_SUPPORTED_VERSION to 6L,
                 KEY_LYRICS_PROVIDER_PRIORITY to "KuGou,NetEase,Jsoup",
                 KEY_STREAM_EXTRACT_FALLBACK to true,
                 KEY_SMART_AUTOPLAY_DEFAULT to true
@@ -48,6 +49,19 @@ object RemoteConfigHelper {
                 }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize Remote Config: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Get Last.fm API Key.
+     * Returns empty string if Remote Config is unavailable — callers must handle gracefully.
+     */
+    fun getLastFmApiKey(): String {
+        return try {
+            Firebase.remoteConfig.getString(KEY_LASTFM_API_KEY)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get Last.fm API key from Remote Config", e)
+            ""
         }
     }
 

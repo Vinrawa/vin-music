@@ -63,7 +63,6 @@ fun FullPlayerScreen(
     val db = com.vinmusic.data.db.VinDatabase.getInstance(ctx)
 
     var activePanel      by remember { mutableStateOf<String?>(null) }
-    var currentModel     by remember(song.videoId) { mutableStateOf<Any>(song.thumbnailHd) }
     val panelScope = rememberCoroutineScope()
     var creditsDescription by remember(song.videoId) { mutableStateOf(vm.currentSongDescription) }
 
@@ -182,9 +181,6 @@ fun FullPlayerScreen(
             }
         }
     }
-    val currentRotation = rotation.value
-    val rotationAngle = currentRotation
-
     var isDownloaded by remember(song.videoId) { mutableStateOf(false) }
     LaunchedEffect(song.videoId) {
         val existing = withContext(Dispatchers.IO) { db.downloadDao().get(song.videoId) }
@@ -217,23 +213,13 @@ fun FullPlayerScreen(
     var dragY by remember { mutableFloatStateOf(0f) }
     var swipeX by remember { mutableFloatStateOf(0f) }
 
-    val targetNeedleAngle = if (vm.isPlaying && !vm.isLoading) -28f else 0f
-    val needleAngle by animateFloatAsState(
-        targetValue = targetNeedleAngle,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessLow
-        ),
-        label = "needleAngle"
-    )
-
     // Pulsating animations only run when music is actually playing (saves CPU when paused/loading)
-    val pulsatingAlpha by animateFloatAsState(
+    val pulsatingAlpha = animateFloatAsState(
         targetValue = if (isActuallyPlaying) 0.45f else 0.25f,
         animationSpec = tween(durationMillis = 2500, easing = FastOutSlowInEasing),
         label = "pulsatingAlpha"
     )
-    val pulsatingScale by animateFloatAsState(
+    val pulsatingScale = animateFloatAsState(
         targetValue = if (isActuallyPlaying) 1.03f else 1.0f,
         animationSpec = tween(durationMillis = 2500, easing = FastOutSlowInEasing),
         label = "pulsatingScale"
@@ -396,9 +382,8 @@ fun FullPlayerScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         if (isEndOfSong) {
-                            val songProgress = 1.0f - vm.progress
                             CircularProgressIndicator(
-                                progress = { songProgress },
+                                progress = { 1.0f - vm.progress },
                                 color = VinColors.Pink,
                                 trackColor = Color.White.copy(alpha = 0.1f),
                                 strokeWidth = 2.dp,
@@ -450,12 +435,12 @@ fun FullPlayerScreen(
                             .fillMaxSize()
                             .graphicsLayer {
                                 if (visualizerStyle == "Halo") {
-                                    rotationZ = currentRotation * 0.5f
+                                    rotationZ = rotation.value * 0.5f
                                 }
-                                scaleX = pulsatingScale
-                                scaleY = pulsatingScale
+                                scaleX = pulsatingScale.value
+                                scaleY = pulsatingScale.value
+                                alpha = pulsatingAlpha.value
                             }
-                            .alpha(pulsatingAlpha)
                     ) {
                         val centerPoint = Offset(size.width / 2, size.height / 2)
                         
@@ -468,7 +453,7 @@ fun FullPlayerScreen(
                                 for (i in 0 until numBars) {
                                     val angle = i * angleStep
                                     val wave = (kotlin.math.sin((i * 3.14f / 4f).toDouble()).toFloat() + 1f) / 2f
-                                    val barLength = 8.dp.toPx() + (12.dp.toPx() * wave) * ((pulsatingScale - 1f) * 16.6f) 
+                                    val barLength = 8.dp.toPx() + (12.dp.toPx() * wave) * ((pulsatingScale.value - 1f) * 16.6f)
                                     
                                     val startX = centerPoint.x + kotlin.math.cos(angle.toDouble()).toFloat() * innerRadius
                                     val startY = centerPoint.y + kotlin.math.sin(angle.toDouble()).toFloat() * innerRadius
@@ -492,8 +477,8 @@ fun FullPlayerScreen(
                                 val startY = size.height * 0.88f
                                 
                                 for (i in 0 until totalBars) {
-                                    val wave = (kotlin.math.sin((i * 0.5f + (rotationAngle / 15f)).toDouble()).toFloat() + 1f) / 2f
-                                    val barHeight = 8.dp.toPx() + (45.dp.toPx() * wave) * (pulsatingScale * 0.9f)
+                                    val wave = (kotlin.math.sin((i * 0.5f + (rotation.value / 15f)).toDouble()).toFloat() + 1f) / 2f
+                                    val barHeight = 8.dp.toPx() + (45.dp.toPx() * wave) * (pulsatingScale.value * 0.9f)
                                     val x = startX + i * (barWidth + barSpacing)
                                     
                                     // Segmented blocks drawing
@@ -519,9 +504,9 @@ fun FullPlayerScreen(
                                 path.moveTo(0f, midY)
                                 for (i in 0..numPoints) {
                                     val x = i * stepX
-                                    val angle1 = (i * 0.18f) + (rotationAngle * 0.12f)
-                                    val angle2 = (i * 0.35f) - (rotationAngle * 0.06f)
-                                    val amp = 6.dp.toPx() + (26.dp.toPx() * (pulsatingScale - 1f) * 12f)
+                                    val angle1 = (i * 0.18f) + (rotation.value * 0.12f)
+                                    val angle2 = (i * 0.35f) - (rotation.value * 0.06f)
+                                    val amp = 6.dp.toPx() + (26.dp.toPx() * (pulsatingScale.value - 1f) * 12f)
                                     
                                     val y = midY + (kotlin.math.sin(angle1.toDouble()).toFloat() * amp * 0.7f) + 
                                             (kotlin.math.cos(angle2.toDouble()).toFloat() * amp * 0.3f)
@@ -539,8 +524,8 @@ fun FullPlayerScreen(
                                 path2.moveTo(0f, midY)
                                 for (i in 0..numPoints) {
                                     val x = i * stepX
-                                    val angle = (i * 0.22f) - (rotationAngle * 0.09f)
-                                    val amp = 4.dp.toPx() + (18.dp.toPx() * (pulsatingScale - 1f) * 9f)
+                                    val angle = (i * 0.22f) - (rotation.value * 0.09f)
+                                    val amp = 4.dp.toPx() + (18.dp.toPx() * (pulsatingScale.value - 1f) * 9f)
                                     val y = midY + (kotlin.math.sin(angle.toDouble()).toFloat() * amp)
                                     path2.lineTo(x, y)
                                 }
@@ -553,13 +538,13 @@ fun FullPlayerScreen(
                             }
                             "Star Dust" -> {
                                 particles.forEach { p ->
-                                    val pX = p["x"]!! * size.width
-                                    val drift = (rotationAngle * p["speed"]!!) % 1f
-                                    val baseRealY = p["y"]!! - drift
+                                    val pX = (p["x"] as? Float ?: 0f) * size.width
+                                    val drift = (rotation.value * (p["speed"] as? Float ?: 0f)) % 1f
+                                    val baseRealY = (p["y"] as? Float ?: 0f) - drift
                                     val realY = (if (baseRealY < 0f) baseRealY + 1f else baseRealY) * size.height
-                                    
-                                    val sizeMultiplier = 1f + (pulsatingScale - 1f) * 8f
-                                    val pSize = p["baseSize"]!! * sizeMultiplier
+
+                                    val sizeMultiplier = 1f + (pulsatingScale.value - 1f) * 8f
+                                    val pSize = (p["baseSize"] as? Float ?: 2f) * sizeMultiplier
                                     
                                     drawCircle(
                                         color = animatedAccent.copy(alpha = 0.8f),
@@ -588,7 +573,7 @@ fun FullPlayerScreen(
                         .clip(CircleShape)
                         .border(1.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
                         .graphicsLayer {
-                            rotationZ = currentRotation + scratchAngleOffset
+                            rotationZ = rotation.value + scratchAngleOffset
                             translationX = swipeX * 0.08f
                         }
                         .pointerInput(Unit) {
@@ -615,8 +600,9 @@ fun FullPlayerScreen(
                             )
                             
                             // On top: load the HD thumbnail with shared element transition and error fallback
+                            var hdModel by remember(song.videoId) { mutableStateOf<Any>(song.thumbnailHd) }
                             AsyncImage(
-                                model = currentModel,
+                                model = hdModel,
                                 contentDescription = null,
                                 modifier = Modifier
                                     .sharedElement(
@@ -627,8 +613,8 @@ fun FullPlayerScreen(
                                     .clip(CircleShape),
                                 contentScale = ContentScale.Crop,
                                 onError = {
-                                    if (currentModel == song.thumbnailHd) {
-                                        currentModel = song.thumbnail
+                                    if (hdModel == song.thumbnailHd) {
+                                        hdModel = song.thumbnail
                                     }
                                 }
                             )
@@ -871,24 +857,7 @@ fun FullPlayerScreen(
 
             Spacer(Modifier.height(16.dp))
 
-            // High fidelity Seek bar
-            Slider(
-                value = vm.progress,
-                onValueChange = { vm.seekTo(it) },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                colors = SliderDefaults.colors(
-                    thumbColor = Color.White,
-                    activeTrackColor = animatedAccent,
-                    inactiveTrackColor = VinColors.White20
-                )
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(formatMs(vm.currentTimeMs), fontSize = 12.sp, color = VinColors.Secondary)
-                Text(formatMs(vm.durationMs),    fontSize = 12.sp, color = VinColors.Secondary)
-            }
+            PlayerSeekBar(vm = vm, animatedAccent = animatedAccent)
 
             Spacer(Modifier.height(16.dp))
 
@@ -1174,6 +1143,76 @@ fun GlassActionButton(
     }
 }
 
+@Composable
+private fun PlayerSeekBar(vm: PlayerViewModel, animatedAccent: Color) {
+    Slider(
+        value = vm.progress,
+        onValueChange = { vm.seekTo(it) },
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        colors = SliderDefaults.colors(
+            thumbColor = Color.White,
+            activeTrackColor = VinColors.Accent,
+            inactiveTrackColor = VinColors.White20
+        )
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(formatMs(vm.currentTimeMs), fontSize = 12.sp, color = VinColors.Secondary)
+        Text(formatMs(vm.durationMs), fontSize = 12.sp, color = VinColors.Secondary)
+    }
+}
+
+// ── Karaoke Line Composable ─────────────────────────────────────────────────
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+fun KaraokeLine(
+    words: List<com.vinmusic.lyrics.WordTiming>,
+    isActive: Boolean,
+    activeWordIndex: Int,
+    fillFraction: Float,
+    modifier: Modifier = Modifier
+) {
+    FlowRow(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        words.forEachIndexed { idx, word ->
+            val isPast = isActive && idx < activeWordIndex
+            val isCurrent = isActive && idx == activeWordIndex
+            val wordAlpha = when {
+                !isActive -> 0.5f
+                isPast -> 1.0f
+                isCurrent -> 0.6f + (fillFraction * 0.4f)
+                else -> 0.35f
+            }
+            val wordColor = when {
+                !isActive -> Color.White.copy(alpha = 0.5f)
+                isPast -> Color.White
+                isCurrent -> Color.White.copy(alpha = wordAlpha)
+                else -> Color.White.copy(alpha = 0.35f)
+            }
+            Text(
+                text = word.text + if (word.hasTrailingSpace) " " else "",
+                fontSize = 18.sp,
+                fontWeight = if (isActive && (isPast || isCurrent)) FontWeight.ExtraBold else FontWeight.SemiBold,
+                color = wordColor,
+                style = androidx.compose.ui.text.TextStyle(
+                    shadow = if (isCurrent) Shadow(
+                        color = Color.White.copy(alpha = 0.4f),
+                        offset = Offset(0f, 0f),
+                        blurRadius = 8.dp.value
+                    ) else null
+                ),
+                lineHeight = 24.sp
+            )
+        }
+    }
+}
+
 // ── Lyrics Panel ──────────────────────────────────────────────────────────────
 
 @OptIn(UnstableApi::class)
@@ -1189,6 +1228,7 @@ fun LyricsPanel(vm: PlayerViewModel) {
     var showEditDialog by remember { mutableStateOf(false) }
     var editText by remember { mutableStateOf("") }
     var editIsSynced by remember { mutableStateOf(false) }
+    var showCandidatePicker by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -1307,6 +1347,26 @@ fun LyricsPanel(vm: PlayerViewModel) {
                         }
                     }
 
+                    // Source Picker Button
+                    IconButton(
+                        onClick = {
+                            vm.fetchLyricsCandidates()
+                            showCandidatePicker = !showCandidatePicker
+                        },
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(if (showCandidatePicker) VinColors.Accent.copy(alpha = 0.3f) else VinColors.White10)
+                            .border(1.dp, VinColors.GlassBorder, CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                            contentDescription = "Lyrics Sources",
+                            tint = VinColors.AccentLight,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
                     // Refetch Button
                     IconButton(
                         onClick = { vm.refetchLyrics() },
@@ -1406,20 +1466,29 @@ fun LyricsPanel(vm: PlayerViewModel) {
                                         .clickable { vm.seekToMs(line.timeMs - vm.lyricOffsetMs) }
                                         .padding(vertical = 4.dp)
                                 ) {
-                                    Text(
-                                        text = line.text,
-                                        fontSize = 18.sp,
-                                        fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
-                                        color = color,
-                                        style = androidx.compose.ui.text.TextStyle(
-                                            shadow = if (isActive) Shadow(
-                                                color = Color.White.copy(alpha = 0.35f),
-                                                offset = Offset(0f, 0f),
-                                                blurRadius = 12.dp.value
-                                            ) else null
-                                        ),
-                                        lineHeight = 24.sp
-                                    )
+                                    if (line.words != null && line.words.isNotEmpty()) {
+                                        KaraokeLine(
+                                            words = line.words,
+                                            isActive = isActive,
+                                            activeWordIndex = if (isActive) vm.currentWordIndex else -1,
+                                            fillFraction = if (isActive) vm.wordFillFraction else 0f
+                                        )
+                                    } else {
+                                        Text(
+                                            text = line.text,
+                                            fontSize = 18.sp,
+                                            fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                            color = color,
+                                            style = androidx.compose.ui.text.TextStyle(
+                                                shadow = if (isActive) Shadow(
+                                                    color = Color.White.copy(alpha = 0.35f),
+                                                    offset = Offset(0f, 0f),
+                                                    blurRadius = 12.dp.value
+                                                ) else null
+                                            ),
+                                            lineHeight = 24.sp
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1442,6 +1511,83 @@ fun LyricsPanel(vm: PlayerViewModel) {
                                 Icon(Icons.Default.Add, null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
                                 Text("Add Lyrics", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Candidate Picker Panel
+            if (showCandidatePicker && vm.lyricsCandidates.isNotEmpty()) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    colors = CardDefaults.cardColors(containerColor = VinColors.Surface),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "Lyrics Sources",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = VinColors.AccentLight,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        vm.lyricsCandidates.forEach { candidate ->
+                            val isSelected = candidate.source == vm.selectedLyricsSource
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isSelected) VinColors.Accent.copy(alpha = 0.2f) else Color.Transparent)
+                                    .clickable {
+                                        vm.selectLyricsCandidate(candidate)
+                                        showCandidatePicker = false
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = candidate.source,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isSelected) VinColors.AccentLight else Color.White
+                                    )
+                                    Text(
+                                        text = "${candidate.lineCount} lines",
+                                        fontSize = 10.sp,
+                                        color = VinColors.Secondary
+                                    )
+                                }
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (candidate.isSynced) {
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = VinColors.Accent.copy(alpha = 0.3f)
+                                        ) {
+                                            Text(
+                                                text = "Synced",
+                                                fontSize = 9.sp,
+                                                color = VinColors.AccentLight,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = "Selected",
+                                            tint = VinColors.AccentLight,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -2044,11 +2190,7 @@ fun AnimatedVisualizer(isPlaying: Boolean) {
 @Composable
 fun LyricsPreviewCard(vm: PlayerViewModel, onExpand: () -> Unit) {
     val song = vm.currentSong ?: return
-    
-    LaunchedEffect(song.videoId) {
-        vm.loadLyrics()
-    }
-    
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -2158,36 +2300,55 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
     
     var isFollowing by remember { mutableStateOf(false) }
     var artistImageUrl by remember { mutableStateOf<String?>(null) }
+    var bannerImageUrl by remember { mutableStateOf<String?>(null) }
     var officialAudience by remember { mutableStateOf("") }
     var isVerifiedArtist by remember { mutableStateOf(false) }
-    
+
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+
     LaunchedEffect(cleanName) {
         artistImageUrl = null
+        bannerImageUrl = null
         officialAudience = ""
         isVerifiedArtist = false
+
+        val localBanner = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.vinmusic.download.ArtistBannerCache.bannerPath(ctx, cleanName)
+        }
+        if (localBanner != null) {
+            bannerImageUrl = localBanner
+        }
+
         val resolved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
                 val res = com.vinmusic.innertube.InnerTube.searchAll(cleanName)
                 val artist = res.artists.maxByOrNull { artistSearchScore(cleanName, it.name, it.subscriberCount) }
-                if (artist == null) {
-                    null
-                } else {
-                    val channelData = if (artist.thumbnail.isBlank() || artist.subscriberCount.isBlank()) {
-                        runCatching { com.vinmusic.innertube.InnerTube.fetchChannelData(artist.channelId) }.getOrNull()
-                    } else {
-                        null
+                if (artist == null) return@withContext null
+                android.util.Log.d("AboutArtistCard", "Found artist: ${artist.name} channelId=${artist.channelId}")
+                val channelData = runCatching { com.vinmusic.innertube.InnerTube.fetchChannelData(artist.channelId) }.getOrNull()
+                android.util.Log.d("AboutArtistCard", "channelData banner='${channelData?.bannerUrl}' avatar='${channelData?.avatarUrl}'")
+
+                if (localBanner == null && channelData?.bannerUrl.isNullOrBlank().not()) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        com.vinmusic.download.ArtistBannerCache.downloadBanner(ctx, cleanName, artist.channelId)
                     }
-                    Triple(
-                        artist.thumbnail.ifBlank { channelData?.avatarUrl.orEmpty() },
-                        formatMonthlyListenersText(artist.subscriberCount.ifBlank { channelData?.subscriberCount.orEmpty() }),
-                        shouldShowVerifiedArtist(cleanName, artist.name, artist.subscriberCount.ifBlank { channelData?.subscriberCount.orEmpty() })
-                    )
                 }
+
+                Triple(
+                    artist.thumbnail.ifBlank { channelData?.avatarUrl.orEmpty() },
+                    channelData?.bannerUrl.orEmpty(),
+                    formatMonthlyListenersText(artist.subscriberCount.ifBlank { channelData?.subscriberCount.orEmpty() })
+                )
             }.getOrNull()
-        } ?: return@LaunchedEffect
-        artistImageUrl = resolved.first.takeIf { it.isNotBlank() }
-        officialAudience = resolved.second
-        isVerifiedArtist = resolved.third
+        }
+        if (resolved != null) {
+            artistImageUrl = resolved.first.takeIf { it.isNotBlank() }
+            if (bannerImageUrl == null) {
+                bannerImageUrl = resolved.second.takeIf { it.isNotBlank() }
+            }
+            officialAudience = resolved.third
+            isVerifiedArtist = shouldShowVerifiedArtist(cleanName, "", "")
+        }
     }
     
     Box(
@@ -2195,147 +2356,140 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
             .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 8.dp)
             .clip(RoundedCornerShape(24.dp))
-            .background(VinColors.Surface2)
             .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(24.dp))
     ) {
-        Column {
+        val bgModel = bannerImageUrl ?: artistImageUrl
+        if (bgModel != null) {
+            AsyncImage(
+                model = bgModel,
+                contentDescription = "Artist Background",
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.matchParentSize()
+            )
+        } else {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(132.dp)
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(
-                                VinColors.Accent,
-                                VinColors.GradMid,
-                                VinColors.GradBottom
-                            )
-                        )
+                    .matchParentSize()
+                    .background(Color.Black.copy(alpha = 0.8f))
+            )
+        }
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color.Black.copy(alpha = 0.3f), Color.Black.copy(alpha = 0.7f))
                     )
+                )
+        )
+        Column(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(Color.Transparent, Color(0x99000000))
-                            )
-                        )
-                )
-                
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 16.dp, vertical = 18.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        .size(90.dp)
+                        .clip(CircleShape)
+                        .border(2.dp, Color.White, CircleShape)
+                        .background(VinColors.White10),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(78.dp)
-                            .clip(CircleShape)
-                            .border(2.dp, Color.White, CircleShape)
-                            .background(VinColors.White10),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (artistImageUrl != null) {
-                            AsyncImage(
-                                model = artistImageUrl,
-                                contentDescription = "Artist Image",
-                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            Text(
-                                text = cleanName.take(1).uppercase(),
-                                fontSize = 34.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color.White
-                            )
-                        }
+                    if (artistImageUrl != null) {
+                        AsyncImage(
+                            model = artistImageUrl,
+                            contentDescription = "Artist Image",
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Text(
+                            text = cleanName.take(1).uppercase(),
+                            fontSize = 38.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White
+                        )
                     }
-                    
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(7.dp)
-                        ) {
-                            Text(
-                                text = cleanName,
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                            if (isVerifiedArtist) {
-                                VerifiedArtistBadge()
-                            }
-                        }
-                        if (officialAudience.isNotBlank()) {
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = officialAudience,
-                                fontSize = 12.sp,
-                                color = Color.White.copy(alpha = 0.72f),
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(22.dp))
-                            .background(if (isFollowing) Color.White.copy(alpha = 0.2f) else Color.White)
-                            .border(1.dp, if (isFollowing) Color.White else Color.Transparent, RoundedCornerShape(22.dp))
-                            .clickable { isFollowing = !isFollowing }
-                            .padding(horizontal = 18.dp, vertical = 9.dp)
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp)
                     ) {
                         Text(
-                            text = if (isFollowing) "Following" else "Follow",
-                            fontSize = 12.sp,
+                            text = cleanName,
+                            fontSize = 22.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = if (isFollowing) Color.White else Color.Black
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (isVerifiedArtist) {
+                            VerifiedArtistBadge()
+                        }
+                    }
+                    if (officialAudience.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = officialAudience,
+                            fontSize = 13.sp,
+                            color = Color.White.copy(alpha = 0.72f),
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
-            }
-            
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onArtistNameClick(cleanName) }
-                        .padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(if (isFollowing) Color.White.copy(alpha = 0.2f) else Color.White)
+                        .border(1.dp, if (isFollowing) Color.White else Color.Transparent, RoundedCornerShape(22.dp))
+                        .clickable { isFollowing = !isFollowing }
+                        .padding(horizontal = 22.dp, vertical = 11.dp)
                 ) {
                     Text(
-                        text = "View Artist Profile",
+                        text = if (isFollowing) "Following" else "Follow",
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = VinColors.AccentLight
-                    )
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
-                        contentDescription = null,
-                        tint = VinColors.AccentLight,
-                        modifier = Modifier.size(12.dp)
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (isFollowing) Color.White else Color.Black
                     )
                 }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onArtistNameClick(cleanName) }
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "View Artist Profile",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = VinColors.AccentLight
+                )
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForwardIos,
+                    contentDescription = null,
+                    tint = VinColors.AccentLight,
+                    modifier = Modifier.size(12.dp)
+                )
             }
         }
     }
 }
+
 
 // ── Explore Similar Tracks Card ────────────────────────────────────────────────
 @Composable
@@ -2409,7 +2563,8 @@ fun ExploreTrackItem(song: VideoItem, onClick: () -> Unit) {
             contentDescription = null,
             modifier = Modifier
                 .size(110.dp)
-                .clip(RoundedCornerShape(14.dp)),
+                .clip(RoundedCornerShape(14.dp))
+                .scale(1.3f),
             contentScale = ContentScale.Crop
         )
         Text(
@@ -2440,6 +2595,25 @@ fun CreditsCard(
 ) {
     val contributors = remember(author) { parseContributors(author) }
     val allCredits = remember(author, description) { buildFullSongCredits(author, description) }
+
+    var artistImages by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+
+    LaunchedEffect(contributors) {
+        if (contributors.isEmpty()) return@LaunchedEffect
+        val images = mutableMapOf<String, String>()
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            for (name in contributors) {
+                try {
+                    val res = com.vinmusic.innertube.InnerTube.searchAll(name)
+                    val artist = res.artists.maxByOrNull { it.subscriberCount.toLongOrNull() ?: 0L }
+                    if (artist != null && artist.thumbnail.isNotBlank()) {
+                        images[name] = artist.thumbnail
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+        artistImages = images
+    }
 
     if (contributors.isEmpty() && allCredits.isEmpty()) return
 
@@ -2522,12 +2696,12 @@ fun CreditsCard(
                         modifier = Modifier.padding(horizontal = 8.dp)
                     )
 
-                    CreditRowItem(name = contributors[0], role = "Main Artist") {
+                    CreditRowItem(name = contributors[0], role = "Main Artist", imageUrl = artistImages[contributors[0]]) {
                         onArtistClick(contributors[0])
                     }
 
                     contributors.drop(1).forEach { name ->
-                        CreditRowItem(name = name, role = "Featured Artist") {
+                        CreditRowItem(name = name, role = "Featured Artist", imageUrl = artistImages[name]) {
                             onArtistClick(name)
                         }
                     }
@@ -2647,7 +2821,7 @@ fun FullCreditsPanel(author: String, description: String?) {
 }
 
 @Composable
-fun CreditRowItem(name: String, role: String, onClick: () -> Unit) {
+fun CreditRowItem(name: String, role: String, imageUrl: String? = null, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2677,14 +2851,23 @@ fun CreditRowItem(name: String, role: String, onClick: () -> Unit) {
                     .border(1.dp, VinColors.AccentLight.copy(alpha = 0.2f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = name.take(1).uppercase(),
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = VinColors.AccentLight
-                )
+                if (imageUrl != null) {
+                    AsyncImage(
+                        model = imageUrl,
+                        contentDescription = name,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(
+                        text = name.take(1).uppercase(),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = VinColors.AccentLight
+                    )
+                }
             }
-            
+
             Column {
                 Text(
                     text = name,
@@ -2702,7 +2885,7 @@ fun CreditRowItem(name: String, role: String, onClick: () -> Unit) {
                 )
             }
         }
-        
+
         Icon(
             imageVector = Icons.Default.ChevronRight,
             contentDescription = null,

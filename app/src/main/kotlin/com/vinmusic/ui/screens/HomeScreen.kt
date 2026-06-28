@@ -141,7 +141,8 @@ fun HomeScreen(
     onSettingsClick: () -> Unit,
     onSongMore: (VideoItem) -> Unit,
     onAlbumClick: (AlbumItem) -> Unit,
-    onDiscoverClick: () -> Unit
+    onDiscoverClick: () -> Unit,
+    isPlayerOpen: Boolean = false
 ) {
     val ctx   = LocalContext.current
     val db    = com.vinmusic.data.db.VinDatabase.getInstance(ctx)
@@ -589,7 +590,7 @@ fun HomeScreen(
                     }
                     val radDeferred = async {
                         if (seed != null) {
-                            try { vm.recommendationRepository.getSongRadio(seed.videoId) } catch (_: Exception) { emptyList() }
+                            try { vm.recommendationRepository.getSongRadio(seed.videoId, seed.title, seed.author) } catch (_: Exception) { emptyList() }
                         } else emptyList()
                     }
                     val albumsDeferred = async {
@@ -765,7 +766,7 @@ fun HomeScreen(
             scope.launch(Dispatchers.IO) {
                 try {
                     isLoadingRecommendedRadio = true
-                    val rad = vm.recommendationRepository.getSongRadio(seed.videoId)
+                    val rad = vm.recommendationRepository.getSongRadio(seed.videoId, seed.title, seed.author)
                     withContext(Dispatchers.Main) {
                         recommendedRadio = rad
                         isLoadingRecommendedRadio = false
@@ -791,7 +792,7 @@ fun HomeScreen(
             // Load "Similar To" songs for current song
             scope.launch(Dispatchers.IO) {
                 try {
-                    val similar = vm.recommendationRepository.getSongRadio(currentSeedId)
+                    val similar = vm.recommendationRepository.getSongRadio(currentSeedId, vm.currentSong?.title ?: "", vm.currentSong?.author ?: "")
                     withContext(Dispatchers.Main) {
                         similarToSongs = similar.take(12)
                     }
@@ -856,8 +857,9 @@ fun HomeScreen(
     }
 
     if (selectedArtist != null) {
+        val artist = selectedArtist ?: return
         ArtistProfileScreen(
-            artist      = selectedArtist!!,
+            artist      = artist,
             vm          = vm,
             onBack      = { selectedArtist = null },
             onSongClick = onSongClick,
@@ -1509,55 +1511,61 @@ fun HomeScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize().background(VinColors.BgColor)) {
-        // ✨ 1. Dynamic Animated Lava Lamp Fluid Background ✨
-        val infiniteTransition = rememberInfiniteTransition(label = "home_bg_anims")
-        val blob1X by infiniteTransition.animateFloat(
-            initialValue = -100f, targetValue = 400f,
-            animationSpec = infiniteRepeatable(tween(35000, easing = LinearEasing), RepeatMode.Reverse),
-            label = "blob1X"
-        )
-        val blob2Y by infiniteTransition.animateFloat(
-            initialValue = 800f, targetValue = -150f,
-            animationSpec = infiniteRepeatable(tween(42000, easing = LinearEasing), RepeatMode.Reverse),
-            label = "blob2Y"
-        )
-        val blob3X by infiniteTransition.animateFloat(
-            initialValue = 500f, targetValue = -200f,
-            animationSpec = infiniteRepeatable(tween(48000, easing = LinearEasing), RepeatMode.Reverse),
-            label = "blob3X"
-        )
+        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+        val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsState()
+        val isScreenActive = lifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED) && !isPlayerOpen
 
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            // Blob 1: Dynamic Light Brown aura
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(Color(0xFFC5A880).copy(alpha = 0.15f), Color.Transparent),
-                    center = Offset(blob1X.dp.toPx(), 220.dp.toPx()),
-                    radius = size.width * 0.75f
-                ),
-                radius = size.width * 0.75f,
-                center = Offset(blob1X.dp.toPx(), 220.dp.toPx())
+        if (isScreenActive) {
+            // ✨ 1. Dynamic Animated Lava Lamp Fluid Background ✨
+            val infiniteTransition = rememberInfiniteTransition(label = "home_bg_anims")
+            val blob1X by infiniteTransition.animateFloat(
+                initialValue = -100f, targetValue = 400f,
+                animationSpec = infiniteRepeatable(tween(35000, easing = LinearEasing), RepeatMode.Reverse),
+                label = "blob1X"
             )
-            // Blob 2: Warm Glowing Gold aura
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(Color(0xFFB39873).copy(alpha = 0.10f), Color.Transparent),
-                    center = Offset(100.dp.toPx(), blob2Y.dp.toPx()),
-                    radius = size.width * 0.65f
-                ),
-                radius = size.width * 0.65f,
-                center = Offset(100.dp.toPx(), blob2Y.dp.toPx())
+            val blob2Y by infiniteTransition.animateFloat(
+                initialValue = 800f, targetValue = -150f,
+                animationSpec = infiniteRepeatable(tween(42000, easing = LinearEasing), RepeatMode.Reverse),
+                label = "blob2Y"
             )
-            // Blob 3: Warm Charcoal aura
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(Color(0xFF2C251C).copy(alpha = 0.12f), Color.Transparent),
-                    center = Offset(blob3X.dp.toPx(), 620.dp.toPx()),
-                    radius = size.width * 0.70f
-                ),
-                radius = size.width * 0.70f,
-                center = Offset(blob3X.dp.toPx(), 620.dp.toPx())
+            val blob3X by infiniteTransition.animateFloat(
+                initialValue = 500f, targetValue = -200f,
+                animationSpec = infiniteRepeatable(tween(48000, easing = LinearEasing), RepeatMode.Reverse),
+                label = "blob3X"
             )
+
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                // Blob 1: Dynamic Light Brown aura
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(Color(0xFFC5A880).copy(alpha = 0.15f), Color.Transparent),
+                        center = Offset(blob1X.dp.toPx(), 220.dp.toPx()),
+                        radius = size.width * 0.75f
+                    ),
+                    radius = size.width * 0.75f,
+                    center = Offset(blob1X.dp.toPx(), 220.dp.toPx())
+                )
+                // Blob 2: Warm Glowing Gold aura
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(Color(0xFFB39873).copy(alpha = 0.10f), Color.Transparent),
+                        center = Offset(100.dp.toPx(), blob2Y.dp.toPx()),
+                        radius = size.width * 0.65f
+                    ),
+                    radius = size.width * 0.65f,
+                    center = Offset(100.dp.toPx(), blob2Y.dp.toPx())
+                )
+                // Blob 3: Warm Charcoal aura
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(Color(0xFF2C251C).copy(alpha = 0.12f), Color.Transparent),
+                        center = Offset(blob3X.dp.toPx(), 620.dp.toPx()),
+                        radius = size.width * 0.70f
+                    ),
+                    radius = size.width * 0.70f,
+                    center = Offset(blob3X.dp.toPx(), 620.dp.toPx())
+                )
+            }
         }
         PullToRefreshBox(
             isRefreshing = isRefreshing,
@@ -1918,7 +1926,7 @@ fun HomeScreen(
                             modifier = Modifier.padding(bottom = 24.dp)
                         ) {
                             val historySongs = recentlyPlayed.map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
-                            items(historySongs.take(8)) { song ->
+                            items(historySongs.take(8), key = { it.videoId }) { song ->
                                 SmallRecentlyPlayedCard(song = song) {
                                     onSongClick(song, historySongs)
                                 }
@@ -1939,7 +1947,7 @@ fun HomeScreen(
                                 .fillMaxWidth()
                                 .padding(bottom = 24.dp)
                         ) {
-                            items(ytLibraryPlaylists) { pl ->
+                            items(ytLibraryPlaylists, key = { it.playlistId }) { pl ->
                                 RecommendedPlaylistCard(
                                     playlist = pl,
                                     onClick = { selectedRecommendedPlaylist = pl }
@@ -1973,7 +1981,7 @@ fun HomeScreen(
                                         .fillMaxWidth()
                                         .padding(bottom = 24.dp)
                                 ) {
-                                    items(recommendedPlaylists) { pl ->
+                                    items(recommendedPlaylists, key = { it.playlistId }) { pl ->
                                         RecommendedPlaylistCard(
                                             playlist = pl,
                                             onClick = { selectedRecommendedPlaylist = pl }
@@ -2012,7 +2020,7 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(16.dp),
                             modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
                         ) {
-                            items(onRepeatTracks) { song ->
+                            items(onRepeatTracks, key = { it.videoId }) { song ->
                                 SmallRecentlyPlayedCard(song = song) {
                                     onSongClick(song, onRepeatTracks)
                                 }
@@ -2115,7 +2123,7 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
                         ) {
-                            items(recommendedRadio) { song ->
+                            items(recommendedRadio, key = { it.videoId }) { song ->
                                 RecommendedRadioCard(song = song) {
                                     onSongClick(song, recommendedRadio)
                                 }
@@ -2169,7 +2177,7 @@ fun HomeScreen(
                 // Similar To currently playing song
                 if (vm.currentSong != null && similarToSongs.isNotEmpty()) {
                     item {
-                        val nowPlaying = vm.currentSong!!
+                        val nowPlaying = vm.currentSong ?: return@item
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -2195,7 +2203,7 @@ fun HomeScreen(
                                     color = VinColors.Primary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
-                                )
+                               )
                             }
                         }
                         Spacer(Modifier.height(10.dp))
@@ -2204,7 +2212,7 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
                         ) {
-                            items(similarToSongs) { s ->
+                            items(similarToSongs, key = { it.videoId }) { s ->
                                 RecommendedRadioCard(song = s) { onSongClick(s, similarToSongs) }
                             }
                         }
@@ -2235,7 +2243,7 @@ fun HomeScreen(
                                     modifier = Modifier.padding(bottom = 24.dp)
                                 ) {
                                     val videoItems = recList.map { it.videoItem }
-                                    items(recList) { rec ->
+                                    items(recList, key = { it.videoItem.videoId }) { rec ->
                                         RecommendedTrackCard(song = rec.videoItem, reason = rec.reason) {
                                             onSongClick(rec.videoItem, videoItems)
                                         }
@@ -2260,7 +2268,7 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             val downloadedSongs = downloads.map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
-                            items(downloadedSongs.take(8)) { song ->
+                            items(downloadedSongs.take(8), key = { it.videoId }) { song ->
                                 TrackCard(song = song) {
                                     onSongClick(song, downloadedSongs)
                                 }
@@ -2281,7 +2289,7 @@ fun HomeScreen(
                             modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
                         )
                     }
-                    items(longListens.take(8)) { song ->
+                    items(longListens.take(8), key = { it.videoId }) { song ->
                         SongListItem(
                             song = song,
                             isPlaying = vm.currentSong?.videoId == song.videoId,
@@ -2304,7 +2312,7 @@ fun HomeScreen(
                                 .fillMaxWidth()
                                 .padding(bottom = 24.dp)
                         ) {
-                            items(ytLibraryPlaylists) { pl ->
+                            items(ytLibraryPlaylists, key = { it.playlistId }) { pl ->
                                 RecommendedPlaylistCard(
                                     playlist = pl,
                                     onClick = { selectedRecommendedPlaylist = pl }
@@ -2346,7 +2354,7 @@ fun HomeScreen(
                                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     modifier = Modifier.padding(bottom = 24.dp)
                                 ) {
-                                    items(section.songs) { song ->
+                                    items(section.songs, key = { it.videoId }) { song ->
                                         TrackCard(song = song) {
                                             onSongClick(song, section.songs)
                                         }
@@ -2367,7 +2375,7 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(16.dp),
                             modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
                         ) {
-                            items(onRepeatTracks) { song ->
+                            items(onRepeatTracks, key = { it.videoId }) { song ->
                                 SmallRecentlyPlayedCard(song = song) {
                                     onSongClick(song, onRepeatTracks)
                                 }
@@ -2470,7 +2478,7 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
                         ) {
-                            items(recommendedRadio) { song ->
+                            items(recommendedRadio, key = { it.videoId }) { song ->
                                 RecommendedRadioCard(song = song) {
                                     onSongClick(song, recommendedRadio)
                                 }
@@ -2549,7 +2557,7 @@ fun HomeScreen(
                                     modifier = Modifier.padding(bottom = 24.dp)
                                 ) {
                                     val videoItems = recList.map { it.videoItem }
-                                    items(recList) { rec ->
+                                    items(recList, key = { it.videoItem.videoId }) { rec ->
                                         RecommendedTrackCard(song = rec.videoItem, reason = rec.reason) {
                                             onSongClick(rec.videoItem, videoItems)
                                         }
@@ -2785,7 +2793,7 @@ fun HomeScreen(
     }
 
     if (selectedSpotifyMix != null) {
-        val mix = selectedSpotifyMix!!
+        val mix = selectedSpotifyMix ?: return
         val startColor = runCatching { Color(android.graphics.Color.parseColor(mix.gradientStartHex.replace("0x", "#"))) }.getOrElse { Color(0xFFC5A880) }
         val endColor = runCatching { Color(android.graphics.Color.parseColor(mix.gradientEndHex.replace("0x", "#"))) }.getOrElse { Color(0xFF1E1A14) }
 
@@ -2986,7 +2994,7 @@ fun HomeScreen(
     }
 
     if (selectedRecommendedPlaylist != null) {
-        val recommendedPl = selectedRecommendedPlaylist!!
+        val recommendedPl = selectedRecommendedPlaylist ?: return
         ModalBottomSheet(
             onDismissRequest = { selectedRecommendedPlaylist = null },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -4182,247 +4190,6 @@ fun RecommendedRadioCard(song: VideoItem, onClick: () -> Unit) {
             )
         }
     }
-}
-
-// ── Vibe of the Day Lyrics Capsule ──────────────────────────────────────────────
-
-private val AESTHETIC_LYRICS_QUOTES = listOf<Pair<String, String>>(
-    Pair("Kho gaye hum kahan, rangon ke is jahaan mein...", "Kho Gaye Hum Kahan • Prateek Kuhad"),
-    Pair("Teri baaton mein hai jo nasha, dil mera behak sa gaya...", "Husn • Anuv Jain"),
-    Pair("Tum jo paas ho, toh har lamha haseen sa lagta hai...", "Baarishein • Anuv Jain"),
-    Pair("Kuch toh hai jo hum hai keh nahi paaye, kuch toh hai jo tum ho samajh rahe...", "Tu Jo Mila • Pritam"),
-    Pair("Dil se dil ki baatein, suno na tum humari...", "Kasoor • Prateek Kuhad"),
-    Pair("Kaise mujhe tum mil gayi, kismat pe yaqeen ban gaya...", "Kaise Mujhe • A.R. Rahman"),
-    Pair("Hold on to the memories, they will hold on to you...", "New Year's Day • Taylor Swift"),
-    Pair("Main tenu samjhawan ki, na tere bina lagda jee...", "Samjhawan • Arijit Singh"),
-    Pair("Jeene ke liye socha hi nahi, dard sambhalne honge...", "Tujhse Naraz Nahi Zindagi • Gulzar"),
-    Pair("Main jahaan rahoon, main kahin bhi hoon, teri yaad sath hai...", "Namastey London • Himesh Reshammiya"),
-    Pair("Ek pyaar ka nagma hai, maujon ki rawaani hai...", "Ek Pyaar Ka Nagma • Laxmikant-Pyarelal"),
-    Pair("Aise kyun hai yeh jahaan, hum jo mile hain yahan...", "Aise Kyun • Anurag Saikia")
-)
-
-@Composable
-fun VibeOfTheDayCapsule(context: Context, db: com.vinmusic.data.db.VinDatabase) {
-    var quoteText by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
-    var quoteSource by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
-
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            val cachedLyrics = try { db.cachedLyricsDao().getAll() } catch (_: Exception) { emptyList<com.vinmusic.data.db.CachedLyricsEntity>() }
-                .filter { it.content.isNotBlank() && it.lyricsType != "not_found" }
-            val lyricsById = cachedLyrics.associateBy { it.videoId }
-            val topMeta = try { db.songCacheMetaDao().topPlayed(500) } catch (_: Exception) { emptyList() }
-            val metaById = topMeta.associateBy { it.videoId }
-            val liked = try { db.likedSongDao().getAll() } catch (_: Exception) { emptyList() }
-            val history = try { db.historyDao().getAllHistory() } catch (_: Exception) { emptyList() }
-            val signals = try { db.interactionSignalDao().getAll() } catch (_: Exception) { emptyList() }
-            val priorityIds = (
-                signals.sortedWith(
-                    compareByDescending<com.vinmusic.data.db.InteractionSignal> { it.isLiked }
-                        .thenByDescending { it.repeatCount }
-                        .thenByDescending { it.playCount }
-                        .thenByDescending { it.lastPlayedAt }
-                ).map { it.videoId } +
-                liked.map { it.videoId } +
-                history.map { it.videoId } +
-                topMeta.map { it.videoId }
-            ).distinct()
-            val customQuotes = ArrayList<Pair<String, String>>()
-
-            for (videoId in priorityIds) {
-                val ly = lyricsById[videoId] ?: continue
-                val lines = extractVibeLines(ly)
-                if (lines.isNotEmpty()) {
-                    val trackTitle = metaById[videoId]?.let { "${it.title} â€¢ ${it.author}" }
-                        ?: liked.firstOrNull { it.videoId == videoId }?.let { "${it.title} â€¢ ${it.author}" }
-                        ?: history.firstOrNull { it.videoId == videoId }?.let { "${it.title} â€¢ ${it.author}" }
-                        ?: signals.firstOrNull { it.videoId == videoId }?.let { "${it.title} â€¢ ${it.author}" }
-                        ?: "Your Library"
-                    val cleanTrackTitle = cleanVibeSourcePart(trackTitle).ifBlank { "Your Library" }
-                    lines.shuffled().take(2).forEach { line ->
-                        customQuotes.add(line to cleanTrackTitle)
-                    }
-                }
-            }
-
-            /*
-            for (ly in cachedLyrics) {
-                if (ly.content.isNotEmpty()) {
-                    if (ly.lyricsType == "plain" && ly.content.length > 30) {
-                        val paragraphs = ly.content.split("\n\n", "\n").filter { p -> p.trim().length in 30..80 }
-                        if (paragraphs.isNotEmpty()) {
-                            val songMeta = db.songCacheMetaDao().topPlayed(500).find { meta -> meta.videoId == ly.videoId }
-                            val trackTitle = songMeta?.let { "${it.title} • ${it.author}" } ?: "Your Library"
-                            customQuotes.add(Pair(paragraphs.random().trim(), trackTitle))
-                        }
-                    } else if (ly.lyricsType == "synced") {
-                        try {
-                            val lines = com.google.gson.Gson().fromJson(ly.content, Array<com.vinmusic.lyrics.LyricsLine>::class.java).toList()
-                            val cleanLines = lines.map { line -> line.text.trim() }.filter { text -> text.length in 25..75 }
-                            if (cleanLines.isNotEmpty()) {
-                                val songMeta = db.songCacheMetaDao().topPlayed(500).find { meta -> meta.videoId == ly.videoId }
-                                val trackTitle = songMeta?.let { "${it.title} • ${it.author}" } ?: "Your Library"
-                                customQuotes.add(Pair(cleanLines.random(), trackTitle))
-                            }
-                        } catch (_: Exception) {}
-                    }
-                }
-            }
-
-            */
-
-            val finalPool = if (customQuotes.isNotEmpty()) {
-                customQuotes
-            } else {
-                AESTHETIC_LYRICS_QUOTES
-            }
-
-            val chosen = finalPool.random()
-            withContext(Dispatchers.Main) {
-                quoteText = chosen.first
-                quoteSource = chosen.second
-            }
-        }
-    }
-
-    if (quoteText.isNotEmpty()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 6.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            Color.White.copy(alpha = 0.09f),
-                            Color.White.copy(alpha = 0.02f)
-                        )
-                    )
-                )
-                .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(24.dp))
-                .padding(20.dp)
-        ) {
-            // Suspended translucent quotation icon in backdrop for elite aesthetics
-            Icon(
-                imageVector = Icons.Default.FormatQuote,
-                contentDescription = null,
-                tint = Color.White.copy(alpha = 0.06f),
-                modifier = Modifier
-                    .size(96.dp)
-                    .align(Alignment.BottomEnd)
-                    .offset(x = 10.dp, y = 20.dp)
-            )
-
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clip(CircleShape)
-                            .background(VinColors.Accent.copy(alpha = 0.2f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FormatQuote,
-                            contentDescription = null,
-                            tint = VinColors.Accent,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-                    Text(
-                        text = "YOUR VIBE TODAY",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = VinColors.AccentLight,
-                        letterSpacing = 1.5.sp
-                    )
-                }
-
-                Text(
-                    text = "\"$quoteText\"",
-                    fontSize = 16.sp,
-                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White,
-                    lineHeight = 24.sp
-                )
-
-                Text(
-                    text = quoteSource,
-                    fontSize = 11.sp,
-                    color = VinColors.Secondary,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-    }
-}
-
-private fun extractVibeLines(lyrics: com.vinmusic.data.db.CachedLyricsEntity): List<String> {
-    val rawLines = when (lyrics.lyricsType) {
-        "synced" -> try {
-            com.google.gson.Gson()
-                .fromJson(lyrics.content, Array<com.vinmusic.lyrics.LyricsLine>::class.java)
-                .toList()
-                .map { it.text }
-        } catch (_: Exception) {
-            emptyList()
-        }
-        "plain" -> lyrics.content.split("\n\n", "\n")
-        else -> emptyList()
-    }
-
-    return rawLines
-        .mapNotNull { cleanVibeLine(it) }
-        .distinct()
-        .filter { it.length in 24..92 }
-        .filterNot { it.count { ch -> ch.isLetter() } < 10 }
-        .filter { isHindiEnglishVibeLine(it) }
-        .take(24)
-}
-
-private fun cleanVibeLine(raw: String): String? {
-    val text = raw
-        .replace("\u00A0", " ")
-        .replace(Regex("""[€$£¥₹¢]"""), "")
-        .replace("Ã¢â‚¬Â¢", " ")
-        .replace("â€¢", " ")
-        .replace(Regex("""\s+"""), " ")
-        .trim()
-        .trim('"', '\'', '[', ']', '(', ')')
-        .trim()
-    if (text.isBlank()) return null
-    val lower = text.lowercase()
-    if (Regex("""^\d+\s+contributors?$""", RegexOption.IGNORE_CASE).matches(text)) return null
-    if (Regex("""^(intro|outro|verse|chorus|pre[-\s]?chorus|post[-\s]?chorus|bridge|hook|refrain|interlude|instrumental|drop|break|spoken|sample|skit)(\s+\d+|\s+[ivx]+)?(\s*[:.-].*)?$""", RegexOption.IGNORE_CASE).matches(text)) return null
-    val junk = listOf("you might also like", "embed", "read more", "translations", "lyrics", "track info", "produced by", "written by", "release date")
-    if (junk.any { lower == it || (text.length < 42 && lower.startsWith(it)) }) return null
-    return text
-}
-
-private fun isHindiEnglishVibeLine(text: String): Boolean {
-    if (Regex("""[€$£¥₹¢]""").containsMatchIn(text)) return false
-    val unsupported = text.any { ch ->
-        !(ch.isLetterOrDigit() ||
-            ch.isWhitespace() ||
-            ch in setOf('\'', '"', ',', '.', '?', '!', '-', ':', ';') ||
-            ch in '\u0900'..'\u097F')
-    }
-    if (unsupported) return false
-    return text.any { it in 'a'..'z' || it in 'A'..'Z' || it in '\u0900'..'\u097F' }
-}
-
-private fun cleanVibeSourcePart(raw: String): String {
-    return raw
-        .replace(Regex("""[€$£¥₹¢]"""), "")
-        .replace("Ã¢â‚¬Â¢", " ")
-        .replace("â€¢", " ")
-        .replace(Regex("""[^\p{L}\p{N}\s.'\-]"""), " ")
-        .replace(Regex("""\s+"""), " ")
-        .trim()
 }
 
 @Composable

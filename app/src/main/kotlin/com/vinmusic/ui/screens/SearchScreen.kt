@@ -204,8 +204,9 @@ fun SearchScreen(
 
     // Navigate to artist profile
     if (selectedArtist != null) {
+        val artist = selectedArtist ?: return
         ArtistProfileScreen(
-            artist      = selectedArtist!!,
+            artist      = artist,
             vm          = vm,
             onBack      = { selectedArtist = null },
             onSongClick = onSongClick,
@@ -339,7 +340,7 @@ fun SearchScreen(
                                     fontSize = 16.sp, fontWeight = FontWeight.Bold, color = VinColors.Primary,
                                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                             }
-                            items(searchRecs) { song ->
+                            items(searchRecs, key = { it.videoId }) { song ->
                                 SongListItem(song = song, isPlaying = vm.currentSong?.videoId == song.videoId,
                                     onClick = { onSongClick(song, searchRecs) },
                                     onMore = { onSongMore(song) })
@@ -388,7 +389,7 @@ fun SearchScreen(
                                         SearchSectionHeader("Albums")
                                         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp),
                                             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                            items(displayAlbums.take(10)) { album -> AlbumCard(album) { onAlbumClick(album) } }
+                                            items(displayAlbums.take(10), key = { it.playlistId }) { album -> AlbumCard(album) { onAlbumClick(album) } }
                                         }
                                         Spacer(Modifier.height(16.dp))
                                     }
@@ -396,7 +397,7 @@ fun SearchScreen(
                                 // 3. All songs (no limit)
                                 if (allResults.songs.isNotEmpty()) {
                                     item { SearchSectionHeader("Songs") }
-                                    items(allResults.songs) { song ->
+                                    items(allResults.songs, key = { it.videoId }) { song ->
                                         SongListItem(song = song, isPlaying = vm.currentSong?.videoId == song.videoId,
                                             onClick = { onSongClick(song, allResults.songs) },
                                             onMore = { onSongMore(song) })
@@ -405,7 +406,7 @@ fun SearchScreen(
                                 // 4. Videos (user uploads, unreleased, leaked content)
                                 if (allResults.videos.isNotEmpty()) {
                                     item { SearchSectionHeader("Videos") }
-                                    items(allResults.videos.take(5)) { video ->
+                                    items(allResults.videos.take(5), key = { it.videoId }) { video ->
                                         SongListItem(song = video, isPlaying = vm.currentSong?.videoId == video.videoId,
                                             onClick = { onSongClick(video, allResults.videos) },
                                             onMore = { onSongMore(video) })
@@ -428,7 +429,7 @@ fun SearchScreen(
                                 if (allSongs.isEmpty()) {
                                     item { SearchEmptyState("No songs found") }
                                 } else {
-                                    items(allSongs) { song ->
+                                    items(allSongs, key = { it.videoId }) { song ->
                                         SongListItem(song = song, isPlaying = vm.currentSong?.videoId == song.videoId,
                                             onClick = { onSongClick(song, allSongs) },
                                             onMore = { onSongMore(song) })
@@ -460,7 +461,7 @@ fun SearchScreen(
                                 if (allResults.artists.isEmpty()) {
                                     item { SearchEmptyState("No artists found") }
                                 } else {
-                                    items(allResults.artists) { artist ->
+                                    items(allResults.artists, key = { it.channelId }) { artist ->
                                         ArtistListItem(artist) { selectedArtist = artist }
                                     }
                                 }
@@ -476,7 +477,7 @@ fun SearchScreen(
                                             fontSize = 13.sp, color = VinColors.Secondary,
                                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                                     }
-                                    items(allResults.videos) { video ->
+                                    items(allResults.videos, key = { it.videoId }) { video ->
                                         SongListItem(song = video, isPlaying = vm.currentSong?.videoId == video.videoId,
                                             onClick = { onSongClick(video, allResults.videos) },
                                             onMore = { onSongMore(video) })
@@ -495,7 +496,7 @@ fun SearchScreen(
                                             fontSize = 13.sp, color = VinColors.Secondary,
                                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                                     }
-                                    items(albums) { album -> AlbumListItem(album) { onAlbumClick(album) } }
+                                    items(albums, key = { it.playlistId }) { album -> AlbumListItem(album) { onAlbumClick(album) } }
                                 }
                             }
                         }

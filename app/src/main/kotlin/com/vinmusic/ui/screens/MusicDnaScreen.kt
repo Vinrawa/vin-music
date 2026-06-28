@@ -26,7 +26,7 @@ import androidx.compose.ui.unit.sp
 import com.vinmusic.data.db.HistoryEntry
 import com.vinmusic.data.db.VinDatabase
 import com.vinmusic.player.PlayerViewModel
-import com.vinmusic.recommendation.TasteProfile
+import com.vinmusic.recommendation.AudioFeatureProfile
 import com.vinmusic.ui.theme.VinColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -45,7 +45,7 @@ fun MusicDnaScreen(
     var isLoading by remember { mutableStateOf(true) }
     
     // TasteDNA profile state
-    var profile by remember { mutableStateOf<TasteProfile?>(null) }
+    var profile by remember { mutableStateOf<AudioFeatureProfile?>(null) }
     
     // Additional metrics
     var totalPlays by remember { mutableIntStateOf(0) }
@@ -126,7 +126,7 @@ fun MusicDnaScreen(
                 Text("Not enough listening data yet.\nKeep discovering music!", color = VinColors.Secondary, textAlign = TextAlign.Center)
             }
         } else {
-            val dna = profile!!
+            val dna = profile ?: return@Scaffold Unit
             // Infinite gradient mesh background
             val infiniteTransition = rememberInfiniteTransition(label = "dna_bg")
             val blob1X by infiniteTransition.animateFloat(

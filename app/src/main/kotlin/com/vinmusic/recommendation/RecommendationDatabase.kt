@@ -9,7 +9,16 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Entity(tableName = "tracks")
+import androidx.room.Index
+
+@Entity(
+    tableName = "tracks",
+    indices = [
+        Index(value = ["cluster_id"]),
+        Index(value = ["genre"]),
+        Index(value = ["artist"])
+    ]
+)
 data class SpotifyTrack(
     @PrimaryKey(autoGenerate = true)
     val id: Int = 0,
@@ -20,7 +29,8 @@ data class SpotifyTrack(
     val valence: Int,
     val tempo: Int,
     val acoustic: Int,
-    val cluster_id: Int
+    val cluster_id: Int,
+    val genre: String = ""
 )
 
 @Dao
@@ -30,6 +40,9 @@ interface SpotifyTrackDao {
 
     @Query("SELECT * FROM tracks WHERE title = :title LIMIT 1")
     suspend fun findTrackExact(title: String): SpotifyTrack?
+    
+    @Query("SELECT * FROM tracks WHERE title LIKE :prefixQuery || '%' OR :prefixQuery LIKE title || '%' LIMIT 50")
+    suspend fun findTracksByTitlePrefix(prefixQuery: String): List<SpotifyTrack>
     
     // Fast cluster-based nearest neighbor search
     @Query("""
@@ -46,6 +59,36 @@ interface SpotifyTrackDao {
     """)
     suspend fun getSimilarTracksInCluster(targetCluster: Int, targetEnergy: Int, targetValence: Int, targetDance: Int, targetAcoustic: Int, targetTempo: Int, limit: Int = 20): List<SpotifyTrack>
     
+    // Cluster NN with extra cushion for post-filtering excluded artists
+    @Query("""
+        SELECT * FROM tracks 
+        WHERE cluster_id = :targetCluster
+        ORDER BY (
+            (energy - :targetEnergy) * (energy - :targetEnergy) + 
+            (valence - :targetValence) * (valence - :targetValence) +
+            (dance - :targetDance) * (dance - :targetDance) +
+            (acoustic - :targetAcoustic) * (acoustic - :targetAcoustic) +
+            ((tempo - :targetTempo) * (tempo - :targetTempo) / 4)
+        ) ASC 
+        LIMIT :limit
+    """)
+    suspend fun getClusterNeighborsCushioned(targetCluster: Int, targetEnergy: Int, targetValence: Int, targetDance: Int, targetAcoustic: Int, targetTempo: Int, limit: Int = 40): List<SpotifyTrack>
+
+    // Cluster NN with genre filter — only returns tracks in the same genre family
+    @Query("""
+        SELECT * FROM tracks 
+        WHERE cluster_id = :targetCluster AND genre = :genre
+        ORDER BY (
+            (energy - :targetEnergy) * (energy - :targetEnergy) + 
+            (valence - :targetValence) * (valence - :targetValence) +
+            (dance - :targetDance) * (dance - :targetDance) +
+            (acoustic - :targetAcoustic) * (acoustic - :targetAcoustic) +
+            ((tempo - :targetTempo) * (tempo - :targetTempo) / 4)
+        ) ASC 
+        LIMIT :limit
+    """)
+    suspend fun getClusterNeighborsByGenre(targetCluster: Int, genre: String, targetEnergy: Int, targetValence: Int, targetDance: Int, targetAcoustic: Int, targetTempo: Int, limit: Int = 40): List<SpotifyTrack>
+
     // Legacy search for fallback
     @Query("""
         SELECT * FROM tracks 
@@ -59,9 +102,21 @@ interface SpotifyTrackDao {
         LIMIT :limit
     """)
     suspend fun getSimilarTracks(targetEnergy: Int, targetValence: Int, targetDance: Int, targetAcoustic: Int, targetTempo: Int, limit: Int = 20): List<SpotifyTrack>
+
+    // Find all tracks by an artist (for feature estimation)
+    @Query("SELECT * FROM tracks WHERE artist LIKE '%' || :artist || '%' LIMIT 50")
+    suspend fun findTracksByArtist(artist: String): List<SpotifyTrack>
+
+    // Find tracks by genre (for feature estimation)
+    @Query("SELECT * FROM tracks WHERE genre LIKE '%' || :genre || '%' LIMIT 50")
+    suspend fun findTracksByGenre(genre: String): List<SpotifyTrack>
 }
 
-@Database(entities = [SpotifyTrack::class], version = 3, exportSchema = false)
+// This is a READ-ONLY reference dataset (Spotify audio features + clusters + genres).
+// User data (history, likes, skips, playlists) lives in VinDatabase — NOT here.
+// fallbackToDestructiveMigration() is safe: it only replaces the bundled track catalog
+// when the version changes. No user data is lost.
+@Database(entities = [SpotifyTrack::class], version = 6, exportSchema = false)
 abstract class RecommendationDatabase : RoomDatabase() {
     abstract fun trackDao(): SpotifyTrackDao
 

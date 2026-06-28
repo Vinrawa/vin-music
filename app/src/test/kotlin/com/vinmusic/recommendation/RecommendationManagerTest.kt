@@ -220,4 +220,128 @@ class RecommendationManagerTest {
         val meta = RecommendationManager.inferMetadata(item)
         assertEquals(1998, meta.year)
     }
+
+    // --- generateSongKey ---
+
+    @Test
+    fun `generateSongKey returns consistent SHA-256 hex string`() {
+        val key1 = RecommendationManager.generateSongKey("Arijit Singh - Topic", "Tum Hi Ho (Official Video) [HD]")
+        val key2 = RecommendationManager.generateSongKey("arijit singh", "tum hi ho")
+        assertEquals(key1, key2)
+        // Check if it is a valid hex SHA-256 (64 hex characters)
+        assertTrue(key1.matches(Regex("^[a-f0-9]{64}$")))
+    }
+
+    // --- buildQueriesForSeed ---
+
+    @Test
+    fun `buildQueriesForSeed produces distinct personalized queries for different seeds`() {
+        val seed1 = SongMetadata(
+            title = "Autobots",
+            artist = "Lupe Fiasco",
+            genre = "Rap/Hip-Hop",
+            mood = "Energetic",
+            language = "English",
+            energy = 0.8,
+            tempo = 135,
+            year = 2024,
+            isOfficial = true,
+            sourceQuality = "High"
+        )
+        
+        val seed2 = SongMetadata(
+            title = "Kesariya",
+            artist = "Arijit Singh",
+            genre = "Bollywood",
+            mood = "Romantic",
+            language = "Hindi",
+            energy = 0.5,
+            tempo = 90,
+            year = 2022,
+            isOfficial = true,
+            sourceQuality = "High"
+        )
+        
+        val seed3 = SongMetadata(
+            title = "Lofi Chill Sleep",
+            artist = "Sleepy Head",
+            genre = "Lofi",
+            mood = "Chill/Relaxed",
+            language = "English",
+            energy = 0.2,
+            tempo = 70,
+            year = 2025,
+            isOfficial = false,
+            sourceQuality = "Medium"
+        )
+        
+        val seed4 = SongMetadata(
+            title = "Jatt Da Muqabala",
+            artist = "Sidhu Moose Wala",
+            genre = "Punjabi Folk",
+            mood = "Energetic",
+            language = "Punjabi",
+            energy = 0.85,
+            tempo = 140,
+            year = 2018,
+            isOfficial = true,
+            sourceQuality = "High"
+        )
+        
+        val queries1 = RecommendationManager.buildQueriesForSeed(seed1, listOf("Kendrick Lamar"))
+        val queries2 = RecommendationManager.buildQueriesForSeed(seed2, listOf("Atif Aslam"))
+        val queries3 = RecommendationManager.buildQueriesForSeed(seed3, emptyList())
+        val queries4 = RecommendationManager.buildQueriesForSeed(seed4, emptyList())
+        
+        // Assertions for seed1
+        assertTrue(queries1.any { it.contains("Rap Hip Hop") && it.contains("workout energetic") })
+        assertTrue(queries1.any { it.contains("artists like Kendrick Lamar") })
+        assertTrue(queries1.any { it.contains("similar to Lupe Fiasco") })
+        
+        // Assertions for seed2
+        assertTrue(queries2.any { it.contains("Bollywood") && it.contains("romantic love") && it.contains("hindi") })
+        assertTrue(queries2.any { it.contains("artists like Atif Aslam") })
+        assertTrue(queries2.any { it.contains("similar to Arijit Singh") })
+        
+        // Assertions for seed3
+        assertTrue(queries3.any { it.contains("Lofi") && it.contains("chill") })
+        assertTrue(queries3.any { it.contains("Sleepy Head similar music") })
+        
+        // Assertions for seed4 (Punjabi Folk normalized to Punjabi)
+        assertTrue(queries4.any { it.contains("Punjabi") && !it.contains("Punjabi Folk") && it.contains("workout energetic") && it.contains("punjabi") })
+        assertTrue(queries4.any { it.contains("Sidhu Moose Wala similar music") })
+        
+        // Assert distinctness
+        assertFalse(queries1 == queries2)
+        assertFalse(queries1 == queries3)
+        assertFalse(queries2 == queries3)
+        assertFalse(queries1 == queries4)
+        assertFalse(queries2 == queries4)
+        assertFalse(queries3 == queries4)
+    }
+
+    @Test
+    fun `isUnofficialContent flags lofi and type beats`() {
+        assertTrue(RecommendationManager.isUnofficialContent("lofi sleep beats", "Someone"))
+        assertTrue(RecommendationManager.isUnofficialContent("drake type beat energetic", "Producer X"))
+        assertTrue(RecommendationManager.isUnofficialContent("hindi lofi mix 2026", "Aesthetic Beats"))
+    }
+
+    @Test
+    fun `isOfficialArtistChannel rejects uploader channels`() {
+        assertFalse(RecommendationManager.isOfficialArtistChannel("Song", "chill nation"))
+        assertFalse(RecommendationManager.isOfficialArtistChannel("Song", "lofi girl"))
+        assertFalse(RecommendationManager.isOfficialArtistChannel("Song", "bollywood edits"))
+    }
+
+    @Test
+    fun `inferMetadata recognizes expanded vocabulary for Hindi and Punjabi`() {
+        val itemHindi = VideoItem("h1", "Dil De Diya", "Anuv Kuhad", "3:45")
+        val metaHindi = RecommendationManager.inferMetadata(itemHindi)
+        assertEquals("Hindi", metaHindi.language)
+
+        val itemPunjabi = VideoItem("p1", "Jatt Life", "Karan Sandhu", "3:10")
+        val metaPunjabi = RecommendationManager.inferMetadata(itemPunjabi)
+        assertEquals("Punjabi", metaPunjabi.language)
+    }
 }

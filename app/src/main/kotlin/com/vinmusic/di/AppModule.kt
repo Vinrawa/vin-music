@@ -37,6 +37,9 @@ object AppModule {
     fun provideQueueDao(db: VinDatabase) = db.queueDao()
 
     @Provides
+    fun provideSongFeatureCacheDao(db: VinDatabase) = db.songFeatureCacheDao()
+
+    @Provides
     @Singleton
     fun provideRecommendationDatabase(@ApplicationContext ctx: Context): com.vinmusic.recommendation.RecommendationDatabase =
         com.vinmusic.recommendation.RecommendationDatabase.getInstance(ctx)
@@ -49,9 +52,10 @@ object AppModule {
     fun provideRecommendationRepository(
         @ApplicationContext ctx: Context,
         db: VinDatabase,
-        recDb: com.vinmusic.recommendation.RecommendationDatabase
+        recDb: com.vinmusic.recommendation.RecommendationDatabase,
+        firestoreRecommendationManager: com.vinmusic.recommendation.FirestoreRecommendationManager
     ): com.vinmusic.recommendation.RecommendationRepository {
         com.vinmusic.innertube.YTMusicApi.attachContext(ctx)
-        return com.vinmusic.recommendation.RecommendationRepository(ctx, db, recDb)
+        return com.vinmusic.recommendation.RecommendationRepository(ctx, db, recDb, firestoreRecommendationManager)
     }
 }

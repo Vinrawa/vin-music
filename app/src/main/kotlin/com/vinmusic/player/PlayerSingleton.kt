@@ -69,6 +69,8 @@ object PlayerSingleton {
     var storedPitch by mutableFloatStateOf(1.0f)
 
     val eightDAudioProcessor = EightDAudioProcessor()
+    val audioFeatureProcessor = AudioFeatureProcessor()
+    val firestoreRecommendationManager = com.vinmusic.recommendation.FirestoreRecommendationManager()
     var is8dEnabled by mutableStateOf(false)
         private set
 
@@ -80,7 +82,7 @@ object PlayerSingleton {
     private var db: VinDatabase? = null
     private var recommendationRepository: RecommendationRepository? = null
     private var prefs: android.content.SharedPreferences? = null
-    private var context: Context? = null
+    internal var context: Context? = null
 
     private var wakeLock: android.os.PowerManager.WakeLock? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
@@ -115,8 +117,18 @@ object PlayerSingleton {
                         setReferenceCounted(false)
                     }
                 }
+                @Suppress("DEPRECATION")
                 wifiLock?.acquire()
                 Log.d(TAG, "WifiLock acquired")
+                scope.launch(Dispatchers.IO) {
+                    delay(30_000)
+                    try {
+                        if (wifiLock?.isHeld == true) {
+                            wifiLock?.release()
+                            Log.d(TAG, "WifiLock safety timeout released")
+                        }
+                    } catch (_: Exception) {}
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to acquire WifiLock: ${e.message}")
             }
@@ -179,7 +191,7 @@ object PlayerSingleton {
                 val databaseInstance = VinDatabase.getInstance(ctx)
                 db = databaseInstance
                 val recDb = com.vinmusic.recommendation.RecommendationDatabase.getInstance(ctx)
-                recommendationRepository = RecommendationRepository(ctx, databaseInstance, recDb)
+                recommendationRepository = RecommendationRepository(ctx, databaseInstance, recDb, firestoreRecommendationManager)
                 prefs = ctx.getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
                 smartAutoplayEnabled = prefs?.getBoolean("smart_autoplay", true) ?: true
                 _smartShuffle = prefs?.getBoolean("smart_shuffle", false) ?: false
@@ -188,6 +200,7 @@ object PlayerSingleton {
                 buildPlayer(ctx).also { playerInstance ->
                     _player = playerInstance
                     setupPlayerListener(playerInstance)
+                    triggerOfflineSync()
                 }
             }
         }
@@ -235,17 +248,14 @@ object PlayerSingleton {
                 val cause = error.cause?.message ?: "no cause"
                 Log.e(TAG, "PlayerError: $msg | cause: $cause", error)
                 
-                if (errorRetryCount < 2 && currentSong != null) {
+                val song = currentSong
+                if (errorRetryCount < 2 && song != null) {
                     val pos = playerInstance.currentPosition.coerceAtLeast(0)
                     Log.d(TAG, "Retrying playback due to Source error... (retryCount=$errorRetryCount, pos=$pos)")
                     errorRetryCount++
                     scope.launch {
                         nextStreamUrlDeferred = null
-                        // Pass the resume position into playSong so it is applied
-                        // via setMediaSource(..., startPositionMs) AFTER prepare.
-                        // Calling seekTo() here used to race ahead of prepare() and
-                        // was discarded, making the song restart from 0.
-                        playSong(currentSong!!, startPositionMs = pos)
+                        playSong(song, startPositionMs = pos)
                     }
                     return
                 }
@@ -458,7 +468,7 @@ object PlayerSingleton {
                 enableAudioTrackPlaybackParams: Boolean
             ): androidx.media3.exoplayer.audio.AudioSink? {
                 return androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context)
-                    .setAudioProcessors(arrayOf(eightDAudioProcessor))
+                    .setAudioProcessors(arrayOf(eightDAudioProcessor, audioFeatureProcessor))
                     .build()
             }
         }
@@ -595,6 +605,7 @@ object PlayerSingleton {
         previousSongId = song.videoId
         playStartTime = System.currentTimeMillis()
         recordPlay(song)
+        checkAndClaimFeatures(song)
 
         val database = db ?: return
 
@@ -863,8 +874,6 @@ object PlayerSingleton {
                         
                         if (uniqueRecs.isNotEmpty()) {
                             newQueue.addAll(uniqueRecs)
-                        } else {
-                            newQueue.addAll(recommended)
                         }
                         queue = newQueue
                         
@@ -988,7 +997,7 @@ object PlayerSingleton {
 
         val scoredCandidates = candidates.map { idx ->
             val item = queue[idx]
-            val meta = com.vinmusic.recommendation.RecommendationManager.inferMetadata(item)
+            val meta = com.vinmusic.recommendation.RecommendationManager.getCachedOrInferredMetadata(dbObj, item)
             val score = com.vinmusic.recommendation.RecommendationManager.calculateTasteSimilarity(meta, dna)
             idx to score
         }
@@ -1073,6 +1082,30 @@ object PlayerSingleton {
                     )
                 )
             }
+            val songKey = com.vinmusic.recommendation.RecommendationManager.generateSongKey(song.author, song.title)
+            val realCache = database.songFeatureCacheDao().get(songKey)
+            if (realCache != null) {
+                val newLikedCount = (realCache.likedByCount + (if (nextLiked) 1 else -1)).coerceAtLeast(0)
+                val updatedCache = realCache.copy(likedByCount = newLikedCount)
+                database.songFeatureCacheDao().insert(updatedCache)
+                Log.d(TAG, "Updated local SongFeatureCache likedByCount to $newLikedCount for $songKey")
+            }
+            
+            context?.let { ctx ->
+                if (PlayerCacheManager.isOnline(ctx)) {
+                    try {
+                        val docRef = com.google.firebase.firestore.FirebaseFirestore.getInstance().collection("songs").document(songKey)
+                        val incrementVal = if (nextLiked) 1L else -1L
+                        docRef.set(
+                            mapOf("likedByCount" to com.google.firebase.firestore.FieldValue.increment(incrementVal)),
+                            com.google.firebase.firestore.SetOptions.merge()
+                        )
+                        Log.d(TAG, "Incremented Firestore likedByCount by $incrementVal for $songKey")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to update likedByCount in Firestore: ${e.message}")
+                    }
+                }
+            }
 
             withContext(Dispatchers.Main) {
                 if (currentSong?.videoId == song.videoId) {
@@ -1099,6 +1132,7 @@ object PlayerSingleton {
                 signal.repeatCount += 1
             }
             database.interactionSignalDao().insert(signal)
+            com.vinmusic.recommendation.RecommendationManager.invalidateTasteProfile()
 
             // Log song playback event to Firebase Analytics
             context?.let { ctx ->
@@ -1126,6 +1160,232 @@ object PlayerSingleton {
                     signal.skip20sCount += 1
                 }
                 database.interactionSignalDao().insert(signal)
+                com.vinmusic.recommendation.RecommendationManager.invalidateTasteProfile()
+            }
+        }
+    }
+
+    private fun parseDurationText(durationText: String?): Long {
+        if (durationText.isNullOrBlank()) return 0L
+        return try {
+            val parts = durationText.split(":")
+            var seconds = 0L
+            for (part in parts) {
+                seconds = seconds * 60 + part.toLong()
+            }
+            seconds * 1000L
+        } catch (e: Exception) {
+            0L
+        }
+    }
+
+    private suspend fun getLocalFeatures(database: VinDatabase, songKey: String): com.vinmusic.data.db.SongFeatureCache? {
+        return try {
+            database.songFeatureCacheDao().get(songKey)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get local features for $songKey", e)
+            null
+        }
+    }
+
+    fun onAnalysisCompleted(
+        songKey: String,
+        bpm: Float?,
+        energy: Float,
+        genreTags: List<String>,
+        moodTags: List<String>,
+        title: String,
+        artist: String,
+        hasRealTags: Boolean
+    ) {
+        val database = db ?: return
+        val ctx = context ?: return
+        
+        scope.launch(Dispatchers.IO) {
+            try {
+                val gson = com.google.gson.Gson()
+                val genreTagsJson = gson.toJson(genreTags)
+                val moodTagsJson = gson.toJson(moodTags)
+                
+                val cacheEntry = com.vinmusic.data.db.SongFeatureCache(
+                    songKey = songKey,
+                    bpmReal = if (bpm != null && bpm in 40f..250f) bpm else 0f,
+                    energyReal = energy,
+                    genreTags = genreTagsJson,
+                    moodTags = moodTagsJson,
+                    title = title,
+                    artist = artist,
+                    synced = false
+                )
+                database.songFeatureCacheDao().insert(cacheEntry)
+                Log.d(TAG, "Saved features locally to Room for $songKey (hasRealTags=$hasRealTags)")
+                
+                val isAuthenticated = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser != null
+                if (hasRealTags && PlayerCacheManager.isOnline(ctx) && isAuthenticated) {
+                    firestoreRecommendationManager.completeAnalysis(
+                        songKey = songKey,
+                        bpm = bpm,
+                        energy = energy,
+                        genreTags = genreTags,
+                        moodTags = moodTags,
+                        title = title,
+                        artist = artist
+                    )
+                    database.songFeatureCacheDao().markSynced(songKey)
+                    Log.d(TAG, "Synced features to Firestore and marked synced locally for $songKey")
+                } else {
+                    Log.d(TAG, "Local features saved (synced=false) for $songKey. Sync skipped (hasRealTags=$hasRealTags)")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to complete analysis write for $songKey", e)
+            }
+        }
+    }
+
+    fun triggerOfflineSync() {
+        val database = db ?: return
+        val ctx = context ?: return
+        val isAuthenticated = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser != null
+        if (!PlayerCacheManager.isOnline(ctx) || !isAuthenticated) return
+        
+        scope.launch(Dispatchers.IO) {
+            try {
+                val unsynced = database.songFeatureCacheDao().getUnsynced()
+                if (unsynced.isEmpty()) return@launch
+                
+                Log.d(TAG, "Found ${unsynced.size} unsynced audio features. Starting sync...")
+                val gson = com.google.gson.Gson()
+                for (item in unsynced) {
+                    val genreType = object : com.google.gson.reflect.TypeToken<List<String>>() {}.type
+                    var genres: List<String> = gson.fromJson(item.genreTags, genreType) ?: emptyList()
+                    var moods: List<String> = gson.fromJson(item.moodTags, genreType) ?: emptyList()
+                    var hasRealTags = false
+                    
+                    // Re-fetch real tags from Last.fm since we are online now
+                    try {
+                        val realTags = firestoreRecommendationManager.fetchLastFmTags(item.artist, item.title)
+                        if (realTags != null) {
+                            val realGenres = realTags["genres"] ?: emptyList()
+                            val realMoods = realTags["moods"] ?: emptyList()
+                            if (realGenres.isNotEmpty() || realMoods.isNotEmpty()) {
+                                genres = realGenres
+                                moods = realMoods
+                                hasRealTags = true
+                                // Update local Room database with real tags
+                                val updatedItem = item.copy(
+                                    genreTags = gson.toJson(realGenres),
+                                    moodTags = gson.toJson(realMoods)
+                                )
+                                database.songFeatureCacheDao().insert(updatedItem)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to re-fetch Last.fm tags during sync for ${item.songKey}: ${e.message}")
+                    }
+                    
+                    if (hasRealTags) {
+                        firestoreRecommendationManager.completeAnalysis(
+                            songKey = item.songKey,
+                            bpm = if (item.bpmReal in 40f..250f) item.bpmReal else null,
+                            energy = item.energyReal,
+                            genreTags = genres,
+                            moodTags = moods,
+                            title = item.title,
+                            artist = item.artist
+                        )
+                        database.songFeatureCacheDao().markSynced(item.songKey)
+                        Log.d(TAG, "Synced offline feature cache entry for ${item.songKey}")
+                    } else {
+                        Log.d(TAG, "Sync skipped for ${item.songKey} because real tags could not be fetched from Last.fm (remains unsynced)")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Offline sync failed: ${e.message}")
+            }
+        }
+    }
+
+    private fun checkAndClaimFeatures(song: VideoItem) {
+        val database = db ?: return
+        val songKey = com.vinmusic.recommendation.RecommendationManager.generateSongKey(song.author, song.title)
+        val durationMs = parseDurationText(song.durationText)
+        val ctx = context ?: return
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                // 1. Check local cache
+                val local = database.songFeatureCacheDao().get(songKey)
+                if (local != null) {
+                    Log.d(TAG, "Song features found in local Room cache for key: $songKey")
+                    withContext(Dispatchers.Main) {
+                        if (currentSong?.videoId == song.videoId) {
+                            audioFeatureProcessor.resetForSong(songKey, song.title, song.author, durationMs, shouldAnalyze = false)
+                        }
+                    }
+                    triggerOfflineSync()
+                    return@launch
+                }
+
+                // 2. Check remote Firestore
+                val isAuthenticated = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser != null
+                if (PlayerCacheManager.isOnline(ctx) && isAuthenticated) {
+                    val remote = firestoreRecommendationManager.getSongMetadata(songKey)
+                    if (remote != null) {
+                        Log.d(TAG, "Song features found in remote Firestore for key: $songKey")
+                        val bpm = (remote["bpmReal"] as? Number)?.toFloat() ?: 0f
+                        val energy = (remote["energyReal"] as? Number)?.toFloat() ?: 0f
+                        val title = remote["title"] as? String ?: ""
+                        val artist = remote["artist"] as? String ?: ""
+                        val genres = remote["genreTags"] as? List<*> ?: emptyList<Any>()
+                        val moods = remote["moodTags"] as? List<*> ?: emptyList<Any>()
+                        val likedByCount = (remote["likedByCount"] as? Number)?.toInt() ?: 0
+                        
+                        val gson = com.google.gson.Gson()
+                        val genreTagsJson = gson.toJson(genres)
+                        val moodTagsJson = gson.toJson(moods)
+                        
+                        val cacheEntry = com.vinmusic.data.db.SongFeatureCache(
+                            songKey = songKey,
+                            bpmReal = bpm,
+                            energyReal = energy,
+                            genreTags = genreTagsJson,
+                            moodTags = moodTagsJson,
+                            title = title,
+                            artist = artist,
+                            synced = true,
+                            likedByCount = likedByCount
+                        )
+                        database.songFeatureCacheDao().insert(cacheEntry)
+                        
+                        withContext(Dispatchers.Main) {
+                            if (currentSong?.videoId == song.videoId) {
+                                audioFeatureProcessor.resetForSong(songKey, song.title, song.author, durationMs, shouldAnalyze = false)
+                            }
+                        }
+                        return@launch
+                    }
+                }
+
+                // 3. Cache Miss: Try to claim for analysis
+                val shouldAnalyze = if (PlayerCacheManager.isOnline(ctx) && isAuthenticated) {
+                    firestoreRecommendationManager.tryClaimForAnalysis(songKey)
+                } else {
+                    true
+                }
+                
+                Log.d(TAG, "Cache miss for key: $songKey, tryClaimForAnalysis returned: $shouldAnalyze")
+                withContext(Dispatchers.Main) {
+                    if (currentSong?.videoId == song.videoId) {
+                        audioFeatureProcessor.resetForSong(songKey, song.title, song.author, durationMs, shouldAnalyze = shouldAnalyze)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed in checkAndClaimFeatures for $songKey", e)
+                withContext(Dispatchers.Main) {
+                    if (currentSong?.videoId == song.videoId) {
+                        audioFeatureProcessor.resetForSong(songKey, song.title, song.author, durationMs, shouldAnalyze = false)
+                    }
+                }
             }
         }
     }

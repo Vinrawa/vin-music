@@ -28,7 +28,8 @@ import javax.inject.Singleton
 class RecommendationRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val db: VinDatabase,
-    private val recDb: RecommendationDatabase
+    private val recDb: RecommendationDatabase,
+    private val firestoreRecommendationManager: FirestoreRecommendationManager
 ) {
     private val TAG = "VIN_REC_REP"
 
@@ -270,6 +271,10 @@ class RecommendationRepository @Inject constructor(
         if (RecommendationManager.isNonMusicVideo(item.title, item.author)) return
         if (RecommendationManager.isUnofficialContent(item.title, item.author)) return
         if (profile.skippedTracks.contains(item.videoId) || profile.skippedArtists.contains(author)) return
+        val meta = RecommendationManager.inferMetadata(item)
+        if (!meta.isOfficial) return
+        val topLang = profile.topLanguages.firstOrNull()?.first
+        if (topLang != null && meta.language != topLang) return
         out.putIfAbsent(item.videoId, item)
     }
 
@@ -328,12 +333,15 @@ class RecommendationRepository @Inject constructor(
             queries.addAll(uniqueQueries)
         }
         val candidates = fetchCandidatesFromQueries(queries)
+        val topLang = profile.topLanguages.firstOrNull()?.first
         val scored = ArrayList<Pair<VideoItem, Double>>()
         for (item in candidates) {
             if (RecommendationManager.isCompilationTrack(item.title, item.durationText)) continue
             if (RecommendationManager.isNonMusicVideo(item.title, item.author)) continue
             if (RecommendationManager.isUnofficialContent(item.title, item.author)) continue
-            val meta = RecommendationManager.inferMetadata(item)
+            val meta = RecommendationManager.getCachedOrInferredMetadata(db, item)
+            if (!meta.isOfficial) continue
+            if (topLang != null && meta.language != topLang) continue
             val similarity = RecommendationManager.calculateTasteSimilarity(meta, dna)
             val officialBonus = if (meta.isOfficial) 25.0 else 0.0
             scored.add(item to (similarity * 75.0 + officialBonus))
@@ -344,7 +352,7 @@ class RecommendationRepository @Inject constructor(
             if (selected.size >= 12) break
             val author = item.author.lowercase(Locale.ROOT)
             val count = artistCounts[author] ?: 0
-            if (count < 2) {
+            if (count < 3) {
                 selected.add(item)
                 artistCounts[author] = count + 1
             }
@@ -356,12 +364,18 @@ class RecommendationRepository @Inject constructor(
         sections: List<YTMusicHomeSection>,
         profile: RecommendationManager.TasteProfile,
     ): List<YTMusicHomeSection> {
+        val topLang = profile.topLanguages.firstOrNull()?.first
         return sections.mapNotNull { section ->
             val filtered = section.songs.filter { item ->
                 !RecommendationManager.isCompilationTrack(item.title, item.durationText) &&
                     !RecommendationManager.isNonMusicVideo(item.title, item.author) &&
                     !RecommendationManager.isUnofficialContent(item.title, item.author) &&
                     !profile.skippedTracks.contains(item.videoId)
+            }.mapNotNull { item ->
+                val meta = RecommendationManager.inferMetadata(item)
+                if (!meta.isOfficial) return@mapNotNull null
+                if (topLang != null && meta.language != topLang) return@mapNotNull null
+                item
             }.distinctBy { it.videoId }
             if (filtered.size >= 3) section.copy(songs = filtered.take(12)) else null
         }
@@ -372,7 +386,7 @@ class RecommendationRepository @Inject constructor(
      * Returns contextual similar songs for a target track.
      */
     suspend fun getRelatedSongs(videoId: String): List<VideoItem> = withContext(Dispatchers.IO) {
-        val cacheKey = "related_songs_$videoId"
+        val cacheKey = "related_songs_v2_$videoId"
         val cached = loadVideoItems(cacheKey)
         if (cached != null && cached.isNotEmpty()) {
             return@withContext cached
@@ -387,24 +401,39 @@ class RecommendationRepository @Inject constructor(
         if (pool.isEmpty()) pool = InnerTube.getWatchNextRadio(videoId)
 
         // 3. TasteDNA query search fallback
+        val historyEntry = db.historyDao().getAllHistory().firstOrNull { it.videoId == videoId }
+        val likedEntry = db.likedSongDao().getAll().firstOrNull { it.videoId == videoId }
+        val signalEntry = db.interactionSignalDao().get(videoId)
+
+        val seedTitle = historyEntry?.title ?: likedEntry?.title ?: signalEntry?.title ?: ""
+        val seedAuthor = historyEntry?.author ?: likedEntry?.author ?: signalEntry?.author ?: ""
+
+        val seedMeta = if (seedTitle.isNotEmpty()) {
+            val seedItem = VideoItem(videoId, seedTitle, seedAuthor)
+            RecommendationManager.getCachedOrInferredMetadata(db, seedItem)
+        } else null
+
+        var profileCache: RecommendationManager.TasteProfile? = null
+        suspend fun getProfile(): RecommendationManager.TasteProfile {
+            return profileCache ?: RecommendationManager.buildTasteProfile(db).also { profileCache = it }
+        }
+
         if (pool.isEmpty()) {
             Log.d(TAG, "getWatchNextRadio empty for $videoId, using TasteDNA fallback queries...")
-            val historyEntry = db.historyDao().getAllHistory().firstOrNull { it.videoId == videoId }
-            val likedEntry = db.likedSongDao().getAll().firstOrNull { it.videoId == videoId }
-            val signalEntry = db.interactionSignalDao().get(videoId)
-
-            val seedTitle = historyEntry?.title ?: likedEntry?.title ?: signalEntry?.title ?: ""
-            val seedAuthor = historyEntry?.author ?: likedEntry?.author ?: signalEntry?.author ?: ""
-
-            if (seedTitle.isNotEmpty()) {
-                val seedItem = VideoItem(videoId, seedTitle, seedAuthor)
-                val seedMeta = RecommendationManager.inferMetadata(seedItem)
+            if (seedMeta != null && seedTitle.isNotEmpty()) {
+                val profile = getProfile()
+                val knownArtists = profile.topArtists.map { it.first }.toSet() + profile.skippedArtists + seedAuthor
                 val yr = java.time.LocalDate.now().year
-                val queries = listOf(
-                    "$seedAuthor official popular",
-                    "${seedMeta.genre} similar hits $yr",
-                    "$seedTitle similar music"
-                )
+
+                val queries = try {
+                    RecommendationManager.buildAcousticQueriesForSeed(recDb, seedMeta, knownArtists, db)
+                } catch (_: Exception) {
+                    listOf(
+                        "$seedAuthor official popular",
+                        "${seedMeta.genre} similar hits $yr",
+                        "$seedTitle similar music"
+                    )
+                }
                 pool = fetchCandidatesFromQueries(queries)
             } else {
                 Log.w(TAG, "No metadata available for fallback seed videoId '$videoId'. Doing raw search fallback.")
@@ -413,18 +442,8 @@ class RecommendationRepository @Inject constructor(
         }
 
         // Apply scoring and similarity filters
-        val historyEntry = db.historyDao().getAllHistory().firstOrNull { it.videoId == videoId }
-        val likedEntry = db.likedSongDao().getAll().firstOrNull { it.videoId == videoId }
-        val signalEntry = db.interactionSignalDao().get(videoId)
-        val seedTitle = historyEntry?.title ?: likedEntry?.title ?: signalEntry?.title ?: ""
-        val seedAuthor = historyEntry?.author ?: likedEntry?.author ?: signalEntry?.author ?: ""
-
-        val seedMeta = if (seedTitle.isNotEmpty()) {
-            RecommendationManager.inferMetadata(VideoItem(videoId, seedTitle, seedAuthor))
-        } else null
-
         val scored = ArrayList<Pair<VideoItem, Double>>()
-        val profile = RecommendationManager.buildTasteProfile(db)
+        val profile = getProfile()
 
         for (item in pool) {
             if (item.videoId == videoId) continue
@@ -433,11 +452,14 @@ class RecommendationRepository @Inject constructor(
             if (RecommendationManager.isUnofficialContent(item.title, item.author)) continue
             if (profile.skippedTracks.contains(item.videoId) || profile.skippedArtists.contains(item.author.lowercase(Locale.ROOT))) continue
 
-            val meta = RecommendationManager.inferMetadata(item)
-            
+            val meta = RecommendationManager.getCachedOrInferredMetadata(db, item)
+
+            if (!meta.isOfficial) continue
+            if (seedMeta != null && meta.language != seedMeta.language) continue
+
             var totalSimilarity = 0.5
             if (seedMeta != null) {
-                val genreScore = if (meta.genre == seedMeta.genre) 1.0 else 0.1
+                val genreScore = if (meta.genre == seedMeta.genre) 1.0 else 0.0
                 val artistScore = if (meta.artist.lowercase() == seedMeta.artist.lowercase()) {
                     1.0
                 } else if (RecommendationManager.isSimilarArtist(meta.artist, seedMeta.artist)) {
@@ -446,34 +468,42 @@ class RecommendationRepository @Inject constructor(
                     0.0
                 }
                 val moodScore = if (meta.mood == seedMeta.mood) 1.0 else 0.2
-                val langScore = if (meta.language == seedMeta.language) 1.0 else 0.3
-                
+                val langScore = if (meta.language == seedMeta.language) 1.0 else 0.0
+
                 val energyDelta = Math.abs(meta.energy - seedMeta.energy)
                 val energyScore = (1.0 - energyDelta).coerceIn(0.0, 1.0)
-                
-                val tempoDelta = Math.abs(meta.tempo - seedMeta.tempo).toDouble()
-                val tempoScore = Math.cos((tempoDelta / 120.0 * Math.PI).coerceIn(0.0, Math.PI)) / 2.0 + 0.5
+
+                val bpm1 = meta.tempo.toDouble()
+                val bpm2 = seedMeta.tempo.toDouble()
+                val effectiveTempoDelta = minOf(
+                    Math.abs(bpm1 - bpm2),
+                    Math.abs(bpm1 - bpm2 * 2.0),
+                    Math.abs(bpm1 * 2.0 - bpm2),
+                    Math.abs(bpm1 / 2.0 - bpm2),
+                    Math.abs(bpm1 - bpm2 / 2.0)
+                )
+                val tempoScore = Math.cos((effectiveTempoDelta / 60.0 * Math.PI).coerceIn(0.0, Math.PI)) / 2.0 + 0.5
 
                 totalSimilarity = genreScore * 0.25 + artistScore * 0.20 + moodScore * 0.15 + langScore * 0.15 + energyScore * 0.125 + tempoScore * 0.125
             } else {
-                // Similarity against overall TasteDNA profile
                 totalSimilarity = RecommendationManager.calculateTasteSimilarity(meta, profile.tasteDNA)
             }
-            
+
             val officialBonus = if (meta.isOfficial) 0.15 else 0.0
             scored.add(item to (totalSimilarity + officialBonus))
         }
 
         val sorted = scored.sortedByDescending { it.second }.map { it.first }
 
-        // Same-Artist Spam Penalty: Cap at max 2 songs per artist
         val selected = ArrayList<VideoItem>()
         val artistCounts = HashMap<String, Int>()
+        val seedAuthorLower = seedAuthor.lowercase(Locale.ROOT)
         for (item in sorted) {
             if (selected.size >= 12) break
             val author = item.author.lowercase(Locale.ROOT)
             val count = artistCounts[author] ?: 0
-            if (count < 2) {
+            val cap = if (author == seedAuthorLower) 1 else 3
+            if (count < cap) {
                 selected.add(item)
                 artistCounts[author] = count + 1
             }
@@ -486,13 +516,13 @@ class RecommendationRepository @Inject constructor(
     }
 
     suspend fun getSongRadio(videoId: String, fallbackTitle: String = "", fallbackAuthor: String = "", currentQueue: List<VideoItem> = emptyList()): List<VideoItem> = withContext(Dispatchers.IO) {
-        val cacheKey = "song_radio_$videoId"
+        val cacheKey = "song_radio_v2_$videoId"
         val cached = loadVideoItems(cacheKey)
         if (cached != null && cached.isNotEmpty()) {
             return@withContext cached
         }
 
-        Log.d(TAG, "Curating live smart radio for seed track $videoId...")
+        Log.d(TAG, "Generating YTM-first radio for seed track $videoId...")
 
         val pool = mutableListOf<VideoItem>()
         
@@ -503,317 +533,189 @@ class RecommendationRepository @Inject constructor(
         val seedTitle = historyEntry?.title ?: likedEntry?.title ?: signalEntry?.title ?: fallbackTitle
         val seedAuthor = historyEntry?.author ?: likedEntry?.author ?: signalEntry?.author ?: fallbackAuthor
 
+        var seedMeta = if (seedTitle.isNotEmpty()) {
+            RecommendationManager.getCachedOrInferredMetadata(db, VideoItem(videoId, seedTitle, seedAuthor))
+        } else null
+
         val online = isOnline()
 
         if (online) {
-            Log.d(TAG, "Device is ONLINE. Using YouTube Watch Next/Related APIs for radio.")
+            Log.d(TAG, "Device is ONLINE. Using YTM Related → YTM Radio → Search fallback.")
+
+            // 1. PRIMARY: YouTube Music Related (fresh, algorithm-curated)
             val ytRelated = fetchYtRelatedForSeed(videoId).orEmpty()
             if (ytRelated.isNotEmpty()) {
+                Log.d(TAG, "YTM Related returned ${ytRelated.size} tracks")
                 pool.addAll(ytRelated)
-            } else {
-                pool.addAll(InnerTube.getWatchNextRadio(videoId))
             }
 
-            // Blend with Spotify similarity ONLY if YouTube pool is small,
-            // restricting to maximum 3 searches sequentially to prevent rate limits.
-            if (pool.size < 10 && seedTitle.isNotEmpty()) {
-                Log.d(TAG, "YouTube pool small (${pool.size}). Adding up to 3 Spotify-similar tracks.")
-                val cleanTitle = seedTitle.replace("(Official Video)", "", ignoreCase = true)
-                    .replace("(Official Music Video)", "", ignoreCase = true)
-                    .replace("(Lyric Video)", "", ignoreCase = true).trim()
-
-                val spotifyTrack = recDb.trackDao().findTrackExact(cleanTitle)
-                if (spotifyTrack != null) {
-                    val similarTracks = try {
-                        recDb.trackDao().getSimilarTracksInCluster(
-                            spotifyTrack.cluster_id,
-                            spotifyTrack.energy,
-                            spotifyTrack.valence,
-                            spotifyTrack.dance,
-                            spotifyTrack.acoustic,
-                            spotifyTrack.tempo,
-                            limit = 8
-                        )
-                    } catch (e: Exception) {
-                        recDb.trackDao().getSimilarTracks(
-                            spotifyTrack.energy,
-                            spotifyTrack.valence,
-                            spotifyTrack.dance,
-                            spotifyTrack.acoustic,
-                            spotifyTrack.tempo,
-                            limit = 8
-                        )
-                    }
-
-                    var searchesDone = 0
-                    for (track in similarTracks) {
-                        if (searchesDone >= 3) break
-                        try {
-                            val searchResults = InnerTube.search("${track.title} ${track.artist}")
-                            val found = searchResults.firstOrNull { 
-                                !RecommendationManager.isCompilationTrack(it.title, it.durationText) && 
-                                !RecommendationManager.isNonMusicVideo(it.title, it.author) 
-                            }
-                            if (found != null && pool.none { it.videoId == found.videoId }) {
-                                pool.add(found)
-                                searchesDone++
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Spotify conversion search failed for ${track.title}: ${e.message}")
+            // 2. SECONDARY: YouTube Music Radio (RDAMVM radio playlist)
+            if (pool.size < 15) {
+                val radioTracks = InnerTube.getWatchNextRadio(videoId)
+                if (radioTracks.isNotEmpty()) {
+                    Log.d(TAG, "YTM Radio returned ${radioTracks.size} tracks")
+                    for (track in radioTracks) {
+                        if (pool.none { it.videoId == track.videoId }) {
+                            pool.add(track)
                         }
                     }
                 }
             }
 
-            // Fallback to TasteDNA Search queries if still empty
-            if (pool.isEmpty()) {
-                Log.d(TAG, "getWatchNextRadio empty for $videoId, using TasteDNA fallback queries...")
-                if (seedTitle.isNotEmpty()) {
-                    val seedItem = VideoItem(videoId, seedTitle, seedAuthor)
-                    val seedMeta = RecommendationManager.inferMetadata(seedItem)
-                    val yr = java.time.LocalDate.now().year
-                    val queries = listOf(
-                        "$seedAuthor radio hits",
-                        "${seedMeta.genre} hits ${seedMeta.language} $yr",
-                        "$seedTitle similar track"
-                    )
-                    pool.addAll(fetchCandidatesFromQueries(queries))
-                } else {
-                    pool.addAll(InnerTube.search(videoId).take(15))
+            // 3. ALWAYS: Cross-genre search to diversify artist pool
+            val poolArtists = pool.map { it.author.lowercase(Locale.ROOT) }.toSet()
+            if (poolArtists.size < 10 && seedMeta != null) {
+                Log.d(TAG, "Pool has only ${poolArtists.size} unique artists, adding cross-genre search...")
+                val genreLower = seedMeta.genre.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop")
+                val yr = java.time.LocalDate.now().year
+                val crossGenres = listOf("rap hip hop", "pop", "r&b", "latin", "indie", "electronic", "rock", "afrobeats")
+                    .filter { !genreLower.contains(it.take(3)) }
+                    .shuffled().take(3)
+                val searchQueries = mutableListOf(
+                    "$genreLower official hits $yr",
+                    "$seedAuthor similar artists",
+                    "${seedMeta.mood} $genreLower songs"
+                )
+                for (cg in crossGenres) {
+                    searchQueries.add("$cg $genreLower vibe official $yr")
+                }
+                for (query in searchQueries) {
+                    try {
+                        val results = InnerTube.search(query).take(5)
+                        for (item in results) {
+                            if (pool.none { it.videoId == item.videoId } &&
+                                !RecommendationManager.isCompilationTrack(item.title, item.durationText) &&
+                                !RecommendationManager.isNonMusicVideo(item.title, item.author) &&
+                                !RecommendationManager.isUnofficialContent(item.title, item.author)) {
+                                pool.add(item)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Search fallback failed for '$query': ${e.message}")
+                    }
+                    if (pool.size >= 20) break
                 }
             }
         } else {
-            Log.d(TAG, "Device is OFFLINE. Generating offline radio from downloaded songs.")
+            Log.d(TAG, "Device is OFFLINE. Using downloaded songs for radio.")
             val downloads = db.downloadDao().getByStatus("completed")
             val downloadedItems = downloads.map { 
                 VideoItem(it.videoId, it.title, it.author, it.durationText) 
             }
-
-            if (downloadedItems.isNotEmpty()) {
-                // Try Spotify Similarity first (purely in-memory against downloaded items list)
-                var spotifyMatches = emptyList<VideoItem>()
-                if (seedTitle.isNotEmpty()) {
-                    val cleanTitle = seedTitle.replace("(Official Video)", "", ignoreCase = true)
-                        .replace("(Official Music Video)", "", ignoreCase = true)
-                        .replace("(Lyric Video)", "", ignoreCase = true).trim()
-
-                    val spotifyTrack = recDb.trackDao().findTrackExact(cleanTitle)
-                    if (spotifyTrack != null) {
-                        val similarTracks = try {
-                            recDb.trackDao().getSimilarTracksInCluster(
-                                spotifyTrack.cluster_id,
-                                spotifyTrack.energy,
-                                spotifyTrack.valence,
-                                spotifyTrack.dance,
-                                spotifyTrack.acoustic,
-                                spotifyTrack.tempo,
-                                limit = 30
-                            )
-                        } catch (e: Exception) {
-                            recDb.trackDao().getSimilarTracks(
-                                spotifyTrack.energy,
-                                spotifyTrack.valence,
-                                spotifyTrack.dance,
-                                spotifyTrack.acoustic,
-                                spotifyTrack.tempo,
-                                limit = 30
-                            )
-                        }
-
-                        val matchedList = mutableListOf<VideoItem>()
-                        for (similarTrack in similarTracks) {
-                            val downloadMatch = downloadedItems.firstOrNull { dl ->
-                                RecommendationManager.isTooSimilar(dl.title, similarTrack.title) ||
-                                (dl.title.contains(similarTrack.title, ignoreCase = true) && 
-                                 dl.author.contains(similarTrack.artist, ignoreCase = true))
-                            }
-                            if (downloadMatch != null && downloadMatch.videoId != videoId && matchedList.none { it.videoId == downloadMatch.videoId }) {
-                                matchedList.add(downloadMatch)
-                            }
-                        }
-                        spotifyMatches = matchedList
-                        Log.d(TAG, "Matched ${spotifyMatches.size} offline Spotify similarity tracks against local downloads.")
-                    }
-                }
-
-                pool.addAll(spotifyMatches)
-
-                // If pool is small, sort other downloaded items by similarity
-                if (pool.size < 10) {
-                    val profile = RecommendationManager.buildTasteProfile(db)
-                    val seedMeta = if (seedTitle.isNotEmpty()) {
-                        RecommendationManager.inferMetadata(VideoItem(videoId, seedTitle, seedAuthor))
-                    } else null
-
-                    val scoredDownloads = mutableListOf<Pair<VideoItem, Double>>()
-                    for (item in downloadedItems) {
-                        if (item.videoId == videoId) continue
-                        if (pool.any { it.videoId == item.videoId }) continue
-
-                        val meta = RecommendationManager.inferMetadata(item)
-                        var similarity = 0.5
-                        if (seedMeta != null) {
-                            val genreScore = if (meta.genre == seedMeta.genre) 1.0 else 0.1
-                            val artistScore = if (meta.artist.lowercase() == seedMeta.artist.lowercase()) 1.0 else 0.0
-                            val moodScore = if (meta.mood == seedMeta.mood) 1.0 else 0.2
-                            similarity = genreScore * 0.4 + artistScore * 0.3 + moodScore * 0.3
-                        } else {
-                            similarity = RecommendationManager.calculateTasteSimilarity(meta, profile.tasteDNA)
-                        }
-                        scoredDownloads.add(item to similarity)
-                    }
-
-                    val sortedDownloads = scoredDownloads.sortedByDescending { it.second }.map { it.first }
-                    pool.addAll(sortedDownloads)
-                }
-
-                // If pool is still small or empty, add downloaded items shuffled
-                if (pool.size < 5) {
-                    val fallbackDownloads = downloadedItems.filter { it.videoId != videoId }.shuffled()
-                    for (item in fallbackDownloads) {
-                        if (pool.none { it.videoId == item.videoId }) {
-                            pool.add(item)
-                        }
-                    }
-                }
-            } else {
-                Log.w(TAG, "No downloaded tracks found for offline radio.")
-            }
+            val available = downloadedItems.filter { it.videoId != videoId }.shuffled()
+            pool.addAll(available)
         }
 
-        val seedMeta = if (seedTitle.isNotEmpty()) {
-            RecommendationManager.inferMetadata(VideoItem(videoId, seedTitle, seedAuthor))
-        } else null
-
-        val scored = ArrayList<Pair<VideoItem, Double>>()
         val profile = RecommendationManager.buildTasteProfile(db)
-
         val recentlyPlayedTitles = db.historyDao().getAllHistory().take(20).map { it.title }
-        val shouldExcludeCurrentArtist = Math.random() < 0.5 // 50% chance to exclude seed artist for variety
+        val currentQueueArtists = currentQueue.map { it.author.lowercase(Locale.ROOT) }.toSet()
 
-        for (item in pool) {
-            if (item.videoId == videoId) continue
-            if (RecommendationManager.isCompilationTrack(item.title, item.durationText)) continue
-            if (RecommendationManager.isNonMusicVideo(item.title, item.author)) continue
-            if (RecommendationManager.isUnofficialContent(item.title, item.author)) continue
-            if (profile.skippedTracks.contains(item.videoId) || profile.skippedArtists.contains(item.author.lowercase(Locale.ROOT))) continue
-            
-            if (seedTitle.isNotEmpty() && RecommendationManager.isTooSimilar(seedTitle, item.title)) continue
-            
-            if (recentlyPlayedTitles.contains(item.title)) continue
-            if (shouldExcludeCurrentArtist && seedAuthor.isNotEmpty() && item.author.contains(seedAuthor, ignoreCase = true)) continue
+        val filteredPairs = pool.filter { item ->
+            item.videoId != videoId &&
+            !RecommendationManager.isCompilationTrack(item.title, item.durationText) &&
+            !RecommendationManager.isNonMusicVideo(item.title, item.author) &&
+            !RecommendationManager.isUnofficialContent(item.title, item.author) &&
+            !profile.skippedTracks.contains(item.videoId) &&
+            !profile.skippedArtists.contains(item.author.lowercase(Locale.ROOT)) &&
+            !(seedTitle.isNotEmpty() && RecommendationManager.isTooSimilar(seedTitle, item.title)) &&
+            !recentlyPlayedTitles.contains(item.title)
+        }.mapNotNull { item ->
+            val meta = RecommendationManager.getCachedOrInferredMetadata(db, item)
+            if (!meta.isOfficial) return@mapNotNull null
+            if (seedMeta != null && meta.language != seedMeta.language) return@mapNotNull null
+            item to meta
+        }
 
-            val meta = RecommendationManager.inferMetadata(item)
-
-            var totalSimilarity = 0.5
-            if (seedMeta != null) {
-                val genreScore = if (meta.genre == seedMeta.genre) 1.0 else 0.1
-                val artistScore = if (meta.artist.lowercase() == seedMeta.artist.lowercase()) {
-                    1.0
-                } else if (RecommendationManager.isSimilarArtist(meta.artist, seedMeta.artist)) {
-                    0.6
-                } else {
-                    0.0
-                }
+        val scored = filteredPairs.map { (item, meta) ->
+            val tasteScore = if (seedMeta != null) {
+                val genreScore = if (meta.genre == seedMeta.genre) 1.0 else 0.0
                 val moodScore = if (meta.mood == seedMeta.mood) 1.0 else 0.2
-                val langScore = if (meta.language == seedMeta.language) 1.0 else 0.3
-
+                val langScore = if (meta.language == seedMeta.language) 1.0 else 0.0
                 val energyDelta = Math.abs(meta.energy - seedMeta.energy)
                 val energyScore = (1.0 - energyDelta).coerceIn(0.0, 1.0)
-
-                val tempoDelta = Math.abs(meta.tempo - seedMeta.tempo).toDouble()
-                val tempoScore = Math.cos((tempoDelta / 120.0 * Math.PI).coerceIn(0.0, Math.PI)) / 2.0 + 0.5
-
-                totalSimilarity = genreScore * 0.25 + artistScore * 0.20 + moodScore * 0.15 + langScore * 0.15 + energyScore * 0.125 + tempoScore * 0.125
+                val bpm1 = meta.tempo.toDouble()
+                val bpm2 = seedMeta.tempo.toDouble()
+                val effectiveTempoDelta = minOf(
+                    Math.abs(bpm1 - bpm2),
+                    Math.abs(bpm1 - bpm2 * 2.0),
+                    Math.abs(bpm1 * 2.0 - bpm2),
+                    Math.abs(bpm1 / 2.0 - bpm2),
+                    Math.abs(bpm1 - bpm2 / 2.0)
+                )
+                val tempoScore = Math.cos((effectiveTempoDelta / 60.0 * Math.PI).coerceIn(0.0, Math.PI)) / 2.0 + 0.5
+                genreScore * 0.25 + moodScore * 0.20 + langScore * 0.15 + energyScore * 0.20 + tempoScore * 0.20
             } else {
-                totalSimilarity = RecommendationManager.calculateTasteSimilarity(meta, profile.tasteDNA)
+                RecommendationManager.calculateTasteSimilarity(meta, profile.tasteDNA)
             }
-            
-            val officialBonus = if (meta.isOfficial) 0.1 else 0.0
-            
-            // Artist Diversity Bonus
-            val currentQueueArtists = currentQueue.map { it.author.lowercase(Locale.ROOT) }.toSet()
-            val isNewArtistToSession = !currentQueueArtists.contains(item.author.lowercase(Locale.ROOT))
-            val diversityBonus = if (isNewArtistToSession) 0.15 else 0.0
-            
-            scored.add(item to (totalSimilarity + officialBonus + diversityBonus))
-        }
-
-        val sorted = scored.sortedByDescending { it.second }.map { it.first }
+            val officialBonus = if (meta.isOfficial) 0.15 else 0.0
+            val sameArtistPenalty = if (item.author.equals(seedAuthor, ignoreCase = true)) -0.5 else 0.0
+            val alreadyInQueuePenalty = if (currentQueueArtists.contains(item.author.lowercase(Locale.ROOT))) -0.3 else 0.0
+            item to (tasteScore + officialBonus + sameArtistPenalty + alreadyInQueuePenalty)
+        }.sortedByDescending { it.second }.map { it.first }
 
         val sequenced = ArrayList<VideoItem>()
-        val candidatesPool = ArrayList(sorted)
+        val remaining = ArrayList(scored)
+        val artistCount = mutableMapOf<String, Int>()
         var lastArtist = seedAuthor.lowercase(Locale.ROOT)
-        
-        // Track artist occurrences for strict limiting
-        val artistPlayCounts = mutableMapOf<String, Int>()
-        currentQueue.forEach { item ->
-            val author = item.author.lowercase(Locale.ROOT)
-            artistPlayCounts[author] = (artistPlayCounts[author] ?: 0) + 1
+        val seedAuthorLower = seedAuthor.lowercase(Locale.ROOT)
+
+        while (remaining.isNotEmpty() && sequenced.size < 20) {
+            val next = remaining.firstOrNull { candidate ->
+                val artist = candidate.author.lowercase(Locale.ROOT)
+                val count = artistCount[artist] ?: 0
+                val cap = if (artist == seedAuthorLower) 1 else 2
+                val lastIndex = sequenced.indexOfLast { it.author.lowercase(Locale.ROOT) == artist }
+                val gap = if (lastIndex < 0) Int.MAX_VALUE else sequenced.size - lastIndex
+                count < cap &&
+                gap >= 3 &&
+                sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.title) }
+            } ?: remaining.firstOrNull { candidate ->
+                val artist = candidate.author.lowercase(Locale.ROOT)
+                val count = artistCount[artist] ?: 0
+                val cap2 = if (artist == seedAuthorLower) 1 else 2
+                count < cap2 &&
+                artist != lastArtist &&
+                sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.title) }
+            } ?: remaining.firstOrNull { candidate ->
+                val artist = candidate.author.lowercase(Locale.ROOT)
+                val count = artistCount[artist] ?: 0
+                val cap3 = if (artist == seedAuthorLower) 1 else 2
+                count < cap3 &&
+                sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.title) }
+            } ?: remaining.firstOrNull()
+
+            if (next == null) break
+
+            sequenced.add(next)
+            val artist = next.author.lowercase(Locale.ROOT)
+            lastArtist = artist
+            artistCount[artist] = (artistCount[artist] ?: 0) + 1
+            remaining.remove(next)
+            remaining.removeAll { RecommendationManager.isTooSimilar(next.title, it.title) }
         }
-        val sequencePlayCounts = mutableMapOf<String, Int>()
 
-        while (candidatesPool.isNotEmpty() && sequenced.size < 20) {
-            val nextItem = candidatesPool.firstOrNull { candidate ->
-                val candArtist = candidate.author.lowercase(Locale.ROOT)
-                val diffArtist = candArtist != lastArtist
-                val notTooSimilar = sequenced.none { existing -> 
-                    RecommendationManager.isTooSimilar(existing.title, candidate.title)
-                }
-                
-                // Constraints: Max 3 per artist in this sequence of 20, Max 5 in entire queue
-                val sequenceCount = sequencePlayCounts[candArtist] ?: 0
-                val totalCount = (artistPlayCounts[candArtist] ?: 0) + sequenceCount
-                val withinLimits = sequenceCount < 3 && totalCount < 5
-                
-                diffArtist && notTooSimilar && withinLimits
-            } ?: candidatesPool.firstOrNull { candidate ->
-                val candArtist = candidate.author.lowercase(Locale.ROOT)
-                val notTooSimilar = sequenced.none { existing -> 
-                    RecommendationManager.isTooSimilar(existing.title, candidate.title)
-                }
-                
-                val sequenceCount = sequencePlayCounts[candArtist] ?: 0
-                val totalCount = (artistPlayCounts[candArtist] ?: 0) + sequenceCount
-                val withinLimits = sequenceCount < 3 && totalCount < 5
-                
-                notTooSimilar && withinLimits
-            } ?: candidatesPool.firstOrNull { candidate ->
-                val candArtist = candidate.author.lowercase(Locale.ROOT)
-                val sequenceCount = sequencePlayCounts[candArtist] ?: 0
-                val totalCount = (artistPlayCounts[candArtist] ?: 0) + sequenceCount
-                sequenceCount < 3 && totalCount < 5
-            } ?: candidatesPool.first()
-
-            sequenced.add(nextItem)
-            val candArtist = nextItem.author.lowercase(Locale.ROOT)
-            lastArtist = candArtist
-            sequencePlayCounts[candArtist] = (sequencePlayCounts[candArtist] ?: 0) + 1
-            candidatesPool.remove(nextItem)
-            
-            candidatesPool.removeAll { candidate -> 
-                RecommendationManager.isTooSimilar(nextItem.title, candidate.title)
+        val uniqueArtistsInQueue = artistCount.size
+        if (uniqueArtistsInQueue < 5 && remaining.isNotEmpty()) {
+            val seenArtists = artistCount.keys.toMutableSet()
+            val discoveryCandidates = remaining.filter { it.author.lowercase(Locale.ROOT) !in seenArtists }
+            for (item in discoveryCandidates.shuffled().take(5 - uniqueArtistsInQueue)) {
+                if (sequenced.size >= 20) break
+                sequenced.add(item)
+                val a = item.author.lowercase(Locale.ROOT)
+                artistCount[a] = (artistCount[a] ?: 0) + 1
+                seenArtists.add(a)
+                remaining.remove(item)
             }
         }
 
-        // --- RELAXED FALLBACK (Guarantees playback never stops) ---
-        if (sequenced.isEmpty() && pool.isNotEmpty()) {
-            Log.d(TAG, "Sequenced list empty after strict filtering. Using relaxed fallback from pool.")
-            val fallbackPool = pool.filter { it.videoId != videoId && !profile.skippedTracks.contains(it.videoId) }
-            sequenced.addAll(fallbackPool.take(20))
-        }
-
-        // --- ULTIMATE SAFETY FALLBACK ---
+        // Fallback: if pool empty, use history/liked songs
         if (sequenced.isEmpty()) {
-            Log.w(TAG, "Smart Radio pool is empty. Falling back to history/liked songs to keep music playing.")
-            val fallbackSongs = mutableListOf<VideoItem>()
-            val history = db.historyDao().getAllHistory().take(20)
-            fallbackSongs.addAll(history.map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
-            val liked = db.likedSongDao().getAll().take(20)
-            fallbackSongs.addAll(liked.map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
-            
-            val uniqueFallbacks = fallbackSongs.filter { it.videoId != videoId && !profile.skippedTracks.contains(it.videoId) }.distinctBy { it.videoId }.shuffled()
-            sequenced.addAll(uniqueFallbacks.take(10))
+            Log.d(TAG, "Pool empty, falling back to history/liked songs.")
+            val fallback = mutableListOf<VideoItem>()
+            fallback.addAll(db.historyDao().getAllHistory().take(30).map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
+            fallback.addAll(db.likedSongDao().getAll().take(30).map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
+            val filtered = fallback.filter { it.videoId != videoId }.distinctBy { it.videoId }.shuffled()
+            sequenced.addAll(filtered.take(15))
         }
 
         if (sequenced.isNotEmpty()) {

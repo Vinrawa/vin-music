@@ -8,7 +8,15 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.max
 
-data class TasteProfile(
+/**
+ * Spotify-feature-space taste profile (energy/valence/danceability/acousticness/tempo).
+ * Used by MusicDnaScreen to display the user's audio feature preferences.
+ *
+ * NOTE: This is DIFFERENT from RecommendationManager.TasteProfile which contains
+ * topArtists/topGenres/topMoods (the genre/mood/artist preference profile).
+ * This class deals with raw audio features; that one deals with categorical preferences.
+ */
+data class AudioFeatureProfile(
     val energy: Int,
     val valence: Int,
     val danceability: Int,
@@ -19,14 +27,15 @@ data class TasteProfile(
 @Singleton
 class TasteProfileManager @Inject constructor(
     private val signalDao: InteractionSignalDao,
-    private val spotifyDao: SpotifyTrackDao
+    private val spotifyDao: SpotifyTrackDao,
+    private val featureCacheDao: com.vinmusic.data.db.SongFeatureCacheDao
 ) {
 
     /**
      * Calculates the user's overall TasteDNA profile based on their listening history.
      * Weights: Likes (+3), Completions (+1), Skips (-2 if < 20s).
      */
-    suspend fun calculateTasteProfile(): TasteProfile = withContext(Dispatchers.IO) {
+    suspend fun calculateTasteProfile(): AudioFeatureProfile = withContext(Dispatchers.IO) {
         val signals = signalDao.getAll()
         
         var totalWeight = 0.0
@@ -37,12 +46,21 @@ class TasteProfileManager @Inject constructor(
         var wTempo = 0.0
 
         for (sig in signals) {
+            val songKey = RecommendationManager.generateSongKey(sig.author, sig.title)
+            val realCache = try { featureCacheDao.get(songKey) } catch (_: Exception) { null }
+
+            if (realCache != null) {
+                sig.energy = (realCache.energyReal * 100).toInt().coerceIn(0, 100)
+                if (realCache.bpmReal in 40f..250f) {
+                    sig.tempo = realCache.bpmReal.toInt().coerceIn(0, 255)
+                }
+            }
+
             // Fetch audio features from the local Spotify database if missing in InteractionSignal
             var features = sig
             if (sig.energy == -1) {
-                val cleanTitle = sig.title.replace("(Official Video)", "", ignoreCase = true).trim()
-                // Using fast indexed exact DB search
-                val spotifyTrack = try { spotifyDao.findTrackExact(cleanTitle) } catch (_: Exception) { null }
+                // Using fuzzy DB search
+                val spotifyTrack = try { RecommendationManager.findSpotifyTrackFuzzy(spotifyDao, sig.title, sig.author) } catch (_: Exception) { null }
                 if (spotifyTrack != null) {
                     sig.energy = spotifyTrack.energy
                     sig.valence = spotifyTrack.valence
@@ -88,6 +106,17 @@ class TasteProfileManager @Inject constructor(
                     signalDao.insert(sig) // Update DB with inferred features
                     features = sig
                 }
+            } else if (realCache != null) {
+                val originalEnergy = sig.energy
+                val originalTempo = sig.tempo
+                sig.energy = (realCache.energyReal * 100).toInt().coerceIn(0, 100)
+                if (realCache.bpmReal in 40f..250f) {
+                    sig.tempo = realCache.bpmReal.toInt().coerceIn(0, 255)
+                }
+                if (originalEnergy != sig.energy || originalTempo != sig.tempo) {
+                    signalDao.insert(sig)
+                }
+                features = sig
             }
             
             if (features.energy == -1) continue // Skip if we couldn't match the song
@@ -110,10 +139,10 @@ class TasteProfileManager @Inject constructor(
 
         if (totalWeight <= 0) {
             // Fallback default profile if new user
-            return@withContext TasteProfile(60, 50, 60, 20, 120)
+            return@withContext AudioFeatureProfile(60, 50, 60, 20, 120)
         }
 
-        return@withContext TasteProfile(
+        return@withContext AudioFeatureProfile(
             energy = (wEnergy / totalWeight).toInt().coerceIn(0, 100),
             valence = (wValence / totalWeight).toInt().coerceIn(0, 100),
             danceability = (wDance / totalWeight).toInt().coerceIn(0, 100),

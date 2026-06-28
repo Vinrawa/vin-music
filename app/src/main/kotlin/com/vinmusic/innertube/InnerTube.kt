@@ -1888,23 +1888,34 @@ object InnerTube {
         return try {
             val root = gson.fromJson(raw, Map::class.java)
             val hdr  = (root["header"] as? Map<*, *>)?.get("c4TabbedHeaderRenderer") as? Map<*, *>
-            val banner = ((hdr?.get("banner") as? Map<*, *>)?.get("thumbnails") as? List<*>)
-                ?.lastOrNull()?.let { (it as? Map<*, *>)?.get("url") as? String }
-                ?.let {
-                    var url = it
-                    if (url.startsWith("//")) url = "https:$url"
-                    if (url.startsWith("http://")) url = url.replace("http://", "https://")
-                    url
-                } ?: ""
-            val avatarNode = hdr?.get("avatar") as? Map<*, *>
-            val avatar = (avatarNode?.get("thumbnails") as? List<*>)
-                ?.lastOrNull()?.let { (it as? Map<*, *>)?.get("url") as? String }
-                ?.let {
-                    var url = it
-                    if (url.startsWith("//")) url = "https:$url"
-                    if (url.startsWith("http://")) url = url.replace("http://", "https://")
-                    url
-                } ?: ""
+                ?: (root["header"] as? Map<*, *>)?.get("interactiveTabbedHeaderRenderer") as? Map<*, *>
+
+            fun extractUrl(node: Map<*, *>?, key: String): String {
+                val thumbnails = (node?.get(key) as? Map<*, *>)?.get("thumbnails") as? List<*>
+                return thumbnails?.lastOrNull()?.let { (it as? Map<*, *>)?.get("url") as? String }
+                    ?.let {
+                        var url = it
+                        if (url.startsWith("//")) url = "https:$url"
+                        if (url.startsWith("http://")) url = url.replace("http://", "https://")
+                        url
+                    } ?: ""
+            }
+
+            var banner = extractUrl(hdr, "banner")
+            if (banner.isBlank()) {
+                banner = extractUrl(hdr, "cover")
+            }
+            if (banner.isBlank()) {
+                val topLevelHeader = root["header"] as? Map<*, *>
+                banner = extractUrl(topLevelHeader, "banner")
+            }
+            if (banner.isBlank()) {
+                val musicImmersive = (root["header"] as? Map<*, *>)?.get("musicImmersiveHeaderRenderer") as? Map<*, *>
+                banner = extractUrl(musicImmersive, "banner")
+                if (banner.isBlank()) banner = extractUrl(musicImmersive, "background")
+            }
+
+            val avatar = extractUrl(hdr, "avatar")
             val subs = (hdr?.get("subscriberCountText") as? Map<*, *>)?.get("simpleText") as? String ?: ""
             val title = ((root["metadata"] as? Map<*, *>)
                 ?.get("channelMetadataRenderer") as? Map<*, *>)?.get("title") as? String ?: ""

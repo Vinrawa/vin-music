@@ -244,9 +244,9 @@ fun DownloadsScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
 
                         Box(modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp))) {
-                            // Use local thumbnail if available, otherwise fall back to YouTube CDN
-                            val thumbnailModel = if (dl.thumbnailPath != null && File(dl.thumbnailPath!!).exists()) {
-                                File(dl.thumbnailPath!!)
+                            val thumbPath = dl.thumbnailPath
+                            val thumbnailModel = if (thumbPath != null && File(thumbPath).exists()) {
+                                File(thumbPath)
                             } else {
                                 song.thumbnail
                             }

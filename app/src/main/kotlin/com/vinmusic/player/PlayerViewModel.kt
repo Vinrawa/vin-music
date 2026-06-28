@@ -23,6 +23,7 @@ import com.vinmusic.lyrics.LyricsLine
 import com.vinmusic.lyrics.LyricsResult
 import com.vinmusic.lyrics.qualityOf
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.distinctUntilChanged
 import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -88,6 +89,12 @@ class PlayerViewModel @Inject constructor(
     var isTransliterating by mutableStateOf(false)
     var currentLyricIndex by mutableIntStateOf(-1)  // for synced lyrics highlight
     var currentSongDescription by mutableStateOf<String?>(null)
+
+    // ── Rich Lyrics — Word-level karaoke ────────────────────────────────────────
+    var currentWordIndex by mutableIntStateOf(-1)
+    var wordFillFraction by mutableFloatStateOf(0f)
+    var lyricsCandidates by mutableStateOf<List<com.vinmusic.lyrics.LyricsCandidate>>(emptyList())
+    var selectedLyricsSource by mutableStateOf<String?>(null)
 
     fun transliterateLyricsToHinglish() {
         val currentResult = lyricsResult
@@ -209,6 +216,10 @@ class PlayerViewModel @Inject constructor(
         isLyricsLoading = false
         isTransliterating = false
         currentLyricIndex = -1
+        currentWordIndex = -1
+        wordFillFraction = 0f
+        lyricsCandidates = emptyList()
+        selectedLyricsSource = null
         lyricOffsetMs = 0L
         currentSongDescription = null
         previousLyricsVideoId = song?.videoId
@@ -293,8 +304,10 @@ class PlayerViewModel @Inject constructor(
 
         // Monitor song changes to auto-reset and fetch lyrics, palette, and description
         viewModelScope.launch {
-            androidx.compose.runtime.snapshotFlow { currentSong }.collect { song ->
-                resetLyricsState(song)
+            androidx.compose.runtime.snapshotFlow { currentSong }
+                .distinctUntilChanged { old, new -> old?.videoId == new?.videoId }
+                .collect { song ->
+                    resetLyricsState(song)
                 if (song != null) {
                     if (lyricsSuppressedForVideoId == song.videoId) {
                         lyricsSuppressedForVideoId = null
@@ -487,8 +500,12 @@ class PlayerViewModel @Inject constructor(
     private fun startProgressJob() {
         progressJob = viewModelScope.launch {
             while (true) {
+                if (!exoPlayer.isPlaying) {
+                    delay(500)
+                    continue
+                }
                 delay(180)
-                if (exoPlayer.isPlaying && durationMs > 0) {
+                if (durationMs > 0) {
                     val pos = exoPlayer.currentPosition
                     val prog = (pos.toFloat() / durationMs).coerceIn(0f, 1f)
                     
@@ -543,11 +560,25 @@ class PlayerViewModel @Inject constructor(
         val lines = currentLyricsTimeline()
         if (lines.isEmpty()) {
             if (currentLyricIndex != -1) currentLyricIndex = -1
+            currentWordIndex = -1
+            wordFillFraction = 0f
             return
         }
         val adjustedTime = lyricAdjustedTimeMs()
         val idx = lines.indexOfLast { it.timeMs <= adjustedTime }.coerceAtLeast(0)
         if (idx != currentLyricIndex) currentLyricIndex = idx
+
+        // Word-level karaoke progress
+        val activeLine = lines.getOrNull(idx)
+        val words = activeLine?.words
+        if (!words.isNullOrEmpty()) {
+            val (wIdx, fill) = com.vinmusic.lyrics.computeWordProgress(words, adjustedTime)
+            currentWordIndex = wIdx
+            wordFillFraction = fill
+        } else {
+            currentWordIndex = -1
+            wordFillFraction = 0f
+        }
     }
 
     private fun playbackTimelineMs(): Long {
@@ -719,10 +750,16 @@ class PlayerViewModel @Inject constructor(
                 val provider = prefs.getString("lyrics_provider", "Auto") ?: "Auto"
                 val fetched = LyricsHelper.fetch(song.title, song.author, song.videoId, provider, knownSongDurationMs())
                 val res = normalizeLyricsResult(fetched)
+                val source = when (res) {
+                    is LyricsResult.Synced -> res.source
+                    is LyricsResult.Plain -> res.source
+                    else -> ""
+                }
                 withContext(Dispatchers.Main) {
                     // Only write if this song is still playing
                     if (currentSong?.videoId == fetchVideoId) {
                         lyricsResult = res
+                        selectedLyricsSource = source
                         updateSyncedLyricIndex()
                     }
                 }
@@ -738,7 +775,7 @@ class PlayerViewModel @Inject constructor(
                         is LyricsResult.Plain -> res.text
                         else -> ""
                     }
-                    db.cachedLyricsDao().insert(CachedLyricsEntity(song.videoId, type, content))
+                    db.cachedLyricsDao().insert(CachedLyricsEntity(song.videoId, type, content, source))
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -785,13 +822,18 @@ class PlayerViewModel @Inject constructor(
                     is LyricsResult.Plain -> "plain"
                     is LyricsResult.NotFound -> "not_found"
                 }
+                val source = when (res) {
+                    is LyricsResult.Synced -> res.source
+                    is LyricsResult.Plain -> res.source
+                    else -> ""
+                }
                 val content = when (res) {
                     is LyricsResult.Synced -> com.google.gson.Gson().toJson(res.lines)
                     is LyricsResult.Plain -> res.text
                     is LyricsResult.NotFound -> ""
                 }
                 if (content.isNotEmpty()) {
-                    db.cachedLyricsDao().insert(CachedLyricsEntity(song.videoId, type, content))
+                    db.cachedLyricsDao().insert(CachedLyricsEntity(song.videoId, type, content, source))
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -803,6 +845,54 @@ class PlayerViewModel @Inject constructor(
                         isLyricsLoading = false
                     }
                 }
+            }
+        }
+    }
+
+    /** Fetch lyrics candidates from all providers in parallel. */
+    fun fetchLyricsCandidates() {
+        val song = currentSong ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val candidates = LyricsHelper.fetchCandidates(
+                    title = song.title,
+                    artist = song.author,
+                    videoId = song.videoId,
+                    durationMs = knownSongDurationMs()
+                )
+                withContext(Dispatchers.Main) {
+                    lyricsCandidates = candidates
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch lyrics candidates", e)
+            }
+        }
+    }
+
+    /** Select a specific lyrics candidate from the source picker. */
+    fun selectLyricsCandidate(candidate: com.vinmusic.lyrics.LyricsCandidate) {
+        val song = currentSong ?: return
+        val normalized = normalizeLyricsResult(candidate.result)
+        lyricsResult = normalized
+        selectedLyricsSource = candidate.source
+        updateSyncedLyricIndex()
+
+        // Persist selection
+        viewModelScope.launch(Dispatchers.IO) {
+            val type = when (normalized) {
+                is LyricsResult.Synced -> "synced"
+                is LyricsResult.Plain -> "plain"
+                else -> "not_found"
+            }
+            val content = when (normalized) {
+                is LyricsResult.Synced -> com.google.gson.Gson().toJson(normalized.lines)
+                is LyricsResult.Plain -> normalized.text
+                else -> ""
+            }
+            if (content.isNotEmpty()) {
+                db.cachedLyricsDao().insert(CachedLyricsEntity(song.videoId, type, content, candidate.source, pinned = true))
             }
         }
     }
@@ -1183,39 +1273,6 @@ class PlayerViewModel @Inject constructor(
         super.onCleared()
     }
 
-    private fun recordPlay(song: VideoItem) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val signal = db.interactionSignalDao().get(song.videoId) ?: InteractionSignal(
-                videoId = song.videoId,
-                title = song.title,
-                author = song.author,
-                durationText = song.durationText
-            )
-            signal.playCount += 1
-            signal.lastPlayedAt = System.currentTimeMillis()
-            if (previousSongId == song.videoId) {
-                signal.repeatCount += 1
-            }
-            db.interactionSignalDao().insert(signal)
-        }
-    }
-
-    private fun recordEnd() {
-        val prevId = previousSongId ?: return
-        val playDuration = System.currentTimeMillis() - playStartTime
-        viewModelScope.launch(Dispatchers.IO) {
-            val signal = db.interactionSignalDao().get(prevId) ?: return@launch
-            // A skip is defined as playing for less than 30 seconds and not reaching 80% completion
-            if (playDuration < 30_000 && !hasLoggedCompleteForCurrent) {
-                signal.skipCount += 1
-                if (playDuration < 20_000) {
-                    signal.skip20sCount += 1
-                }
-                db.interactionSignalDao().insert(signal)
-            }
-        }
-    }
-
     fun recordSearchClick(song: VideoItem) {
         viewModelScope.launch(Dispatchers.IO) {
             val signal = db.interactionSignalDao().get(song.videoId) ?: InteractionSignal(
@@ -1226,6 +1283,7 @@ class PlayerViewModel @Inject constructor(
             )
             signal.searchClickCount += 1
             db.interactionSignalDao().insert(signal)
+            com.vinmusic.recommendation.RecommendationManager.invalidateTasteProfile()
         }
     }
 }

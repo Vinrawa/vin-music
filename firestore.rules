@@ -1,0 +1,38 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /songs/{songId} {
+      // Authenticated users can read shared song metadata (BPM, energy, genres)
+      allow read: if request.auth != null;
+
+      // Only allow create/update with validated fields
+      allow create, update: if request.auth != null
+        && request.resource.data.keys().hasAll(['videoId', 'title', 'artist', 'status'])
+        && request.resource.data.videoId is string
+        && request.resource.data.title is string && request.resource.data.title.size() < 200
+        && request.resource.data.artist is string && request.resource.data.artist.size() < 100
+        && request.resource.data.status in ['analyzing', 'ready']
+        && (!('bpmReal' in request.resource.data) || (request.resource.data.bpmReal >= 40 && request.resource.data.bpmReal <= 250))
+        && (!('energyReal' in request.resource.data) || (request.resource.data.energyReal >= 0.0 && request.resource.data.energyReal <= 1.0))
+        && (!('genreTags' in request.resource.data) || request.resource.data.genreTags.size() <= 10)
+        && (!('moodTags' in request.resource.data) || request.resource.data.moodTags.size() <= 10)
+        && (!('claimedAt' in request.resource.data) || request.resource.data.claimedAt == request.time);
+
+      // No delete allowed — shared data is append-only
+      allow delete: if false;
+    }
+
+    match /users/{userId}/interactions/{songId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /users/{userId}/profile/{doc} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}

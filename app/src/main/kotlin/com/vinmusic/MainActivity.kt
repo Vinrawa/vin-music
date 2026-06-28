@@ -178,6 +178,12 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
     LaunchedEffect(db) {
         launch(Dispatchers.IO) { db.playlistDao().getAllFlow().collect { playlistsGlobal = it } }
         launch(Dispatchers.IO) { db.downloadDao().getAllFlow().collect { downloadsGlobal = it } }
+        // Pre-load Every Noise genre graph at startup (avoids freeze on first song play)
+        launch(Dispatchers.IO) {
+            try {
+                com.vinmusic.recommendation.RecommendationManager.loadGenreGraph(context)
+            } catch (_: Exception) {}
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -320,7 +326,8 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                             navController.navigate("discover") {
                                 launchSingleTop = true
                             }
-                        }
+                        },
+                        isPlayerOpen = showFullPlayer
                     )
                 }
                 composable("search") {

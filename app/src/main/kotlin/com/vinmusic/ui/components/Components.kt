@@ -207,6 +207,8 @@ fun MiniPlayer(
                     with(sharedTransitionScope) {
                         AsyncImage(
                             model = song.thumbnail, contentDescription = null,
+                            placeholder = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
+                            error = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
                             modifier = Modifier
                                 .sharedElement(
                                     rememberSharedContentState(key = "album_art"),
@@ -406,6 +408,8 @@ fun SongListItem(
             Box(modifier = Modifier.size(60.dp).clip(RoundedCornerShape(10.dp))) {
                 AsyncImage(
                     model = song.thumbnail, contentDescription = null,
+                    placeholder = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
+                    error = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
                     modifier = Modifier.fillMaxSize().scale(1.35f), contentScale = ContentScale.Crop
                 )
                 if (isPlaying) {
@@ -503,6 +507,8 @@ fun TrackCard(song: VideoItem, onClick: () -> Unit) {
         Box(modifier = Modifier.size(140.dp).clip(RoundedCornerShape(14.dp))) {
             AsyncImage(
                 model = song.thumbnail, contentDescription = null,
+                placeholder = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
+                error = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
                 modifier = Modifier.fillMaxSize().scale(1.35f), contentScale = ContentScale.Crop
             )
             Box(modifier = Modifier.fillMaxSize().background(
@@ -557,6 +563,8 @@ fun SongOptionsSheet(
                 AsyncImage(
                     model = song.thumbnail,
                     contentDescription = null,
+                    placeholder = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
+                    error = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
                     modifier = Modifier
                         .size(64.dp)
                         .clip(RoundedCornerShape(12.dp)),

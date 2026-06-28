@@ -98,7 +98,10 @@ data class InteractionSignal(
 data class CachedLyricsEntity(
     @PrimaryKey val videoId: String,
     val lyricsType: String, // "synced", "plain", "not_found"
-    val content: String // JSON for synced, raw text for plain, empty for not_found
+    val content: String, // JSON for synced, raw text for plain, empty for not_found
+    val source: String = "", // which provider supplied this lyrics
+    val fetchedAt: Long = System.currentTimeMillis(),
+    val pinned: Boolean = false
 )
 
 @Entity(tableName = "user_accounts")
@@ -139,6 +142,20 @@ data class FollowedArtist(
     val thumbnail: String,
     val subscriberCount: String = "",
     val followedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "song_feature_cache")
+data class SongFeatureCache(
+    @PrimaryKey val songKey: String,
+    val bpmReal: Float,
+    val energyReal: Float,
+    val genreTags: String, // serialized json list
+    val moodTags: String,  // serialized json list
+    val title: String,
+    val artist: String,
+    val synced: Boolean = false,
+    val likedByCount: Int = 0,
+    val cachedAt: Long = System.currentTimeMillis()
 )
 
 
@@ -278,6 +295,9 @@ interface CachedLyricsDao {
     @Query("SELECT * FROM cached_lyrics WHERE content != '' ORDER BY RANDOM() LIMIT 5")
     suspend fun getRandomLyrics(): List<CachedLyricsEntity>
 
+    @Query("SELECT * FROM cached_lyrics WHERE pinned = 0 AND fetchedAt < :cutoffMs AND lyricsType != 'not_found'")
+    suspend fun getStaleEntries(cutoffMs: Long): List<CachedLyricsEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(lyrics: CachedLyricsEntity)
 
@@ -381,14 +401,36 @@ interface FollowedArtistDao {
     suspend fun isFollowing(channelId: String): Boolean
 }
 
+@Dao
+interface SongFeatureCacheDao {
+    @Query("SELECT * FROM song_feature_cache WHERE songKey = :songKey LIMIT 1")
+    suspend fun get(songKey: String): SongFeatureCache?
+
+    @Query("SELECT * FROM song_feature_cache")
+    suspend fun getAll(): List<SongFeatureCache>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(cache: SongFeatureCache)
+
+    @Query("DELETE FROM song_feature_cache WHERE songKey = :songKey")
+    suspend fun delete(songKey: String)
+
+    @Query("SELECT * FROM song_feature_cache WHERE synced = 0")
+    suspend fun getUnsynced(): List<SongFeatureCache>
+
+    @Query("UPDATE song_feature_cache SET synced = 1 WHERE songKey = :songKey")
+    suspend fun markSynced(songKey: String)
+}
+
 // ── Database ──────────────────────────────────────────────────────────────────
 
 @Database(
     entities  = [LikedSong::class, HistoryEntry::class, DownloadEntity::class,
                  PlaylistEntity::class, PlaylistSongEntity::class, QueueEntity::class,
                  InteractionSignal::class, CachedLyricsEntity::class, UserAccount::class,
-                 RelatedSongMap::class, SongCacheMeta::class, FollowedArtist::class],
-    version   = 13,
+                 RelatedSongMap::class, SongCacheMeta::class, FollowedArtist::class,
+                 SongFeatureCache::class],
+    version   = 15,
     exportSchema = false
 )
 abstract class VinDatabase : RoomDatabase() {
@@ -403,6 +445,7 @@ abstract class VinDatabase : RoomDatabase() {
     abstract fun relatedSongDao(): RelatedSongDao
     abstract fun songCacheMetaDao(): SongCacheMetaDao
     abstract fun followedArtistDao(): FollowedArtistDao
+    abstract fun songFeatureCacheDao(): SongFeatureCacheDao
 
     companion object {
         @Volatile private var INSTANCE: VinDatabase? = null
@@ -505,10 +548,38 @@ abstract class VinDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `song_feature_cache` (
+                        `songKey` TEXT NOT NULL,
+                        `bpmReal` REAL NOT NULL,
+                        `energyReal` REAL NOT NULL,
+                        `genreTags` TEXT NOT NULL,
+                        `moodTags` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `artist` TEXT NOT NULL,
+                        `synced` INTEGER NOT NULL DEFAULT 0,
+                        `likedByCount` INTEGER NOT NULL DEFAULT 0,
+                        `cachedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`songKey`)
+                    )
+                """.trimIndent())
+            }
+        }
+
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE `cached_lyrics` ADD COLUMN `source` TEXT NOT NULL DEFAULT ''")
+                database.execSQL("ALTER TABLE `cached_lyrics` ADD COLUMN `fetchedAt` INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE `cached_lyrics` ADD COLUMN `pinned` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(ctx: Context): VinDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(ctx, VinDatabase::class.java, "vin_music.db")
-                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
+                    .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
                     .build().also { INSTANCE = it }
             }
     }

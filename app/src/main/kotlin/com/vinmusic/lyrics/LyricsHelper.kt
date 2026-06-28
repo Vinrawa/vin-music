@@ -48,27 +48,34 @@ fun qualityOf(result: LyricsResult?): Int = when (result) {
     else -> 0
 }
 
+data class LyricsCandidate(
+    val source: String,
+    val lineCount: Int,
+    val firstLineText: String,
+    val isSynced: Boolean,
+    val result: LyricsResult
+) : java.io.Serializable
+
+/** Compute word-level progress for karaoke highlighting. */
+fun computeWordProgress(
+    words: List<WordTiming>,
+    positionMs: Long
+): Pair<Int, Float> {
+    if (words.isEmpty()) return 0 to 0f
+    val idx = words.indexOfLast { it.startMs <= positionMs }.coerceAtLeast(0)
+    val word = words[idx]
+    val wordDuration = (word.endMs - word.startMs).coerceAtLeast(1)
+    val elapsed = (positionMs - word.startMs).coerceIn(0, wordDuration)
+    val fraction = elapsed.toFloat() / wordDuration
+    return idx to fraction.coerceIn(0f, 1f)
+}
+
 object LyricsHelper {
     private val gson = Gson()
     
     private val http = OkHttpClient.Builder().apply {
-        if (true) { // Bypass SSL for lyrics APIs to support older Android devices with outdated root certs
-            try {
-                val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
-                    object : javax.net.ssl.X509TrustManager {
-                        override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                        override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
-                    }
-                )
-                val sslContext = javax.net.ssl.SSLContext.getInstance("SSL")
-                sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-                sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
-                hostnameVerifier { _, _ -> true }
-            } catch (e: Exception) {}
-        }
         connectTimeout(5, TimeUnit.SECONDS)
-        readTimeout(8, TimeUnit.SECONDS)  // raised from 4s — LrcLib server takes ~10s; 4s cut it off every time
+        readTimeout(8, TimeUnit.SECONDS)
     }.build()
 
     // List of common Indian record labels and YouTube distribution channel keywords
@@ -635,5 +642,55 @@ object LyricsHelper {
         }
         traverse(element)
         return sb.toString().trim()
+    }
+
+    /** Fetch lyrics candidates from all providers in parallel. Returns deduplicated, sorted list. */
+    suspend fun fetchCandidates(
+        title: String,
+        artist: String,
+        videoId: String = "",
+        durationMs: Long = 0L
+    ): List<LyricsCandidate> = withContext(Dispatchers.IO) {
+        val providers = listOf(
+            "Unison" to suspend { tryUnison(videoId, title, artist, durationMs) },
+            "LrcLib" to suspend { tryLrcLibGet(title, artist, durationMs) },
+            "YouTube Music" to suspend { if (videoId.isNotEmpty()) tryYouTubeMusic(videoId) else null },
+            "Genius" to suspend { tryGenius(title, artist) }
+        )
+
+        val results = providers.map { (name, fetcher) ->
+            async {
+                try {
+                    val result = fetcher()
+                    if (result != null && result !is LyricsResult.NotFound) {
+                        val lines = when (result) {
+                            is LyricsResult.Synced -> result.lines.size
+                            is LyricsResult.Plain -> result.text.lines().size
+                            else -> 0
+                        }
+                        val firstLine = when (result) {
+                            is LyricsResult.Synced -> result.lines.firstOrNull()?.text ?: ""
+                            is LyricsResult.Plain -> result.text.lines().firstOrNull() ?: ""
+                            else -> ""
+                        }
+                        LyricsCandidate(
+                            source = name,
+                            lineCount = lines,
+                            firstLineText = firstLine,
+                            isSynced = result is LyricsResult.Synced,
+                            result = result
+                        )
+                    } else null
+                } catch (e: Exception) {
+                    android.util.Log.e("LyricsHelper", "Candidate fetch failed for $name: ${e.message}")
+                    null
+                }
+            }
+        }
+
+        results.awaitAll()
+            .filterNotNull()
+            .distinctBy { it.source }
+            .sortedByDescending { qualityOf(it.result) }
     }
 }

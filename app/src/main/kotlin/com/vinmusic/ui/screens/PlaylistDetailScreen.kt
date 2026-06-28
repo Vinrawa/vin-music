@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -346,18 +347,27 @@ fun PlaylistDetailScreen(
     ) {
         // Blurs of the first song artwork or custom gradient as background
         val coverArtUrl = songs.firstOrNull()?.let { "https://i.ytimg.com/vi/${it.videoId}/hqdefault.jpg" }
-        
-        // Static solid background gradient header area
+
+        if (coverArtUrl != null) {
+            AsyncImage(
+                model = coverArtUrl,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(360.dp)
+                    .blur(28.dp)
+                    .scale(1.12f),
+                contentScale = ContentScale.Crop
+            )
+        }
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(260.dp)
+                .matchParentSize()
                 .background(
                     Brush.verticalGradient(
-                        listOf(
-                            VinColors.Surface2,
-                            VinColors.BgColor
-                        )
+                        listOf(Color.Black.copy(alpha = 0.35f), VinColors.BgColor, VinColors.BgColor),
+                        startY = 0f,
+                        endY = 760f
                     )
                 )
         )
@@ -694,44 +704,66 @@ fun PlaylistDetailScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 24.dp, vertical = 6.dp)
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(if (isPlaying) VinColors.Accent.copy(alpha = 0.12f) else VinColors.White10)
-                                    .border(1.dp, if (isPlaying) VinColors.Accent.copy(alpha = 0.4f) else VinColors.GlassBorder, RoundedCornerShape(16.dp))
+                                    .padding(horizontal = 18.dp, vertical = 5.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(if (isPlaying) VinColors.Accent.copy(alpha = 0.12f) else Color.Transparent)
                                     .clickable {
                                         val videoItems = filteredSongs.map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
                                         vm.setQueue(videoItems, index)
                                     }
-                                    .padding(12.dp),
+                                    .padding(horizontal = 10.dp, vertical = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(10.dp))) {
+                                // Serial Number on the left
+                                Box(
+                                    modifier = Modifier.width(30.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isPlaying) {
+                                        Icon(
+                                            imageVector = Icons.Default.VolumeUp,
+                                            contentDescription = null,
+                                            tint = VinColors.AccentLight,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "${index + 1}",
+                                            color = VinColors.Secondary,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+                                }
+                                
+                                Box(
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(VinColors.White10)
+                                ) {
                                     AsyncImage(
                                         model = "https://i.ytimg.com/vi/${s.videoId}/hqdefault.jpg",
                                         contentDescription = null,
-                                        modifier = Modifier.fillMaxSize(),
+                                        modifier = Modifier.fillMaxSize().scale(1.3f),
                                         contentScale = ContentScale.Crop
                                     )
-                                    if (isPlaying) {
-                                        Box(Modifier.fillMaxSize().background(Color(0x60000000)),
-                                            contentAlignment = Alignment.Center) {
-                                            Icon(Icons.Default.VolumeUp, null,
-                                                tint = VinColors.AccentLight, modifier = Modifier.size(16.dp))
-                                        }
-                                    }
                                 }
+                                
                                 Spacer(Modifier.width(12.dp))
+                                
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        s.title,
+                                        text = s.title,
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (isPlaying) VinColors.AccentLight else VinColors.Primary,
+                                        color = if (isPlaying) VinColors.AccentLight else Color.White,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
-                                        "${s.author} • ${s.durationText}",
+                                        text = listOf(s.author, s.durationText).filter { it.isNotBlank() }.joinToString(" - "),
                                         fontSize = 12.sp,
                                         color = VinColors.Secondary,
                                         maxLines = 1,

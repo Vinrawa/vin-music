@@ -19,6 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.media3.common.util.UnstableApi
@@ -32,6 +33,7 @@ import com.vinmusic.ui.theme.VinColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.ui.viewinterop.AndroidView
@@ -506,6 +508,151 @@ fun LibraryScreen(
                         items(songs, key = { it.videoId }) { song ->
                             SongListItem(song = song, isPlaying = vm.currentSong?.videoId == song.videoId,
                                 onClick = { onSongClick(song, songs) })
+                        }
+                    }
+                }
+            }
+
+            // ── Words (Smart Lyrics Extraction) ──────────────────────────────
+            "Words" -> {
+                var meaningfulLines by remember { mutableStateOf<List<Triple<String, String, String>>>(emptyList()) }
+                var isLoadingWords by remember { mutableStateOf(true) }
+
+                LaunchedEffect(Unit) {
+                    launch(Dispatchers.IO) {
+                        try {
+                            // Get user's liked songs and recent history
+                            val likedSongs = db.likedSongDao().getAll()
+                            val historySongs = db.historyDao().getAllHistory()
+                            val allSongs = (likedSongs.map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
+                                           historySongs.map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
+                                           .distinctBy { it.videoId }
+                                           .shuffled()
+                                           .take(15) // Reduced to avoid timeout
+
+                            val lines = mutableListOf<Triple<String, String, String>>() // line, song title, artist
+
+                            // Keywords that indicate meaningful/poetic lyrics
+                            val meaningfulKeywords = listOf(
+                                "heart", "soul", "dream", "love", "pain", "life", "hope", "fear",
+                                "sky", "moon", "stars", "rain", "fire", "wind", "ocean", "river",
+                                "time", "memory", "shadow", "light", "dark", "silence", "voice",
+                                "journey", "home", "freedom", "broken", "beautiful", "forever",
+                                "destiny", "fate", "courage", "strength", "peace", "storm",
+                                "metaphor", "simile", "like a", "as a", "feel like"
+                            )
+
+                            for (song in allSongs) {
+                                try {
+                                    // Add timeout per song to prevent getting stuck
+                                    val candidates = withTimeoutOrNull(5000L) {
+                                        com.vinmusic.lyrics.LyricsHelper.fetchCandidates(song.title, song.author, song.videoId)
+                                    } ?: continue
+
+                                    val bestCandidate = candidates.firstOrNull() ?: continue
+                                    // Handle BOTH Synced and Plain lyrics results
+                                    val lyrics = when (val res = bestCandidate.result) {
+                                        is com.vinmusic.lyrics.LyricsResult.Plain -> res.text
+                                        is com.vinmusic.lyrics.LyricsResult.Synced -> res.lines.joinToString("\n") { it.text }
+                                        else -> null
+                                    } ?: continue
+
+                                    // Find lines that contain meaningful keywords
+                                    val lyricsLines = lyrics.split("\n")
+                                    for (line in lyricsLines) {
+                                        val lineLower = line.lowercase()
+                                        val hasMeaningfulWord = meaningfulKeywords.any { keyword ->
+                                            lineLower.contains(keyword)
+                                        }
+                                        val isPoetic = line.length in 15..80 &&
+                                                       (lineLower.contains("like a") ||
+                                                        lineLower.contains("as a") ||
+                                                        lineLower.contains("feel like") ||
+                                                        lineLower.contains("in my") ||
+                                                        lineLower.contains("through the") ||
+                                                        lineLower.contains("beneath") ||
+                                                        lineLower.contains("beyond"))
+
+                                        if (hasMeaningfulWord || isPoetic) {
+                                            val cleanLine = line.trim()
+                                            if (cleanLine.isNotEmpty() && cleanLine.length > 10) {
+                                                lines.add(Triple(cleanLine, song.title, song.author))
+                                            }
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
+                            // Shuffle and take unique lines
+                            val uniqueLines = lines.distinctBy { it.first.lowercase() }
+                                .shuffled()
+                                .take(20)
+
+                            withContext(Dispatchers.Main) {
+                                meaningfulLines = uniqueLines
+                                isLoadingWords = false
+                            }
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                isLoadingWords = false
+                            }
+                        }
+                    }
+                }
+
+                if (isLoadingWords) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(300.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(36.dp))
+                            Text("Loading...", color = VinColors.Secondary, fontSize = 13.sp)
+                        }
+                    }
+                } else if (meaningfulLines.isEmpty()) {
+                    EmptyState(Icons.Default.FormatQuote, "No meaningful lines found", "Play some songs with lyrics to see beautiful words here")
+                } else {
+                    LazyColumn(contentPadding = PaddingValues(bottom = 220.dp, top = 8.dp)) {
+                        items(meaningfulLines, key = { "${it.first}_${it.second}" }) { (line, title, artist) ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = VinColors.White10)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp)
+                                ) {
+                                    Text(
+                                        text = "\"$line\"",
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = VinColors.Primary,
+                                        fontStyle = FontStyle.Italic,
+                                        lineHeight = 22.sp
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        text = "— $title",
+                                        fontSize = 12.sp,
+                                        color = VinColors.AccentLight,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = artist,
+                                        fontSize = 11.sp,
+                                        color = VinColors.Secondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                         }
                     }
                 }

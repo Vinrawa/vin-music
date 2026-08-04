@@ -532,6 +532,7 @@ fun SongOptionsSheet(
     isDownloaded: Boolean,
     onLikeToggle: () -> Unit,
     onAddToPlaylist: () -> Unit,
+    onRemoveFromPlaylist: (() -> Unit)? = null,
     onDownloadToggle: () -> Unit,
     onShare: () -> Unit,
     onDismiss: () -> Unit
@@ -615,6 +616,18 @@ fun SongOptionsSheet(
                         onDismiss()
                     }
                 )
+
+                if (onRemoveFromPlaylist != null) {
+                    OptionRow(
+                        icon = Icons.Default.DeleteOutline,
+                        iconTint = VinColors.Pink,
+                        text = "Remove Song",
+                        onClick = {
+                            onRemoveFromPlaylist()
+                            onDismiss()
+                        }
+                    )
+                }
 
                 OptionRow(
                     icon = if (isDownloaded) Icons.Default.Delete else Icons.Default.Download,
@@ -950,6 +963,12 @@ fun UserAvatar(
     name: String = "",
     onClick: (() -> Unit)? = null
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember(context) { context.getSharedPreferences("vin_music_prefs", android.content.Context.MODE_PRIVATE) }
+    val customImagePath = remember(prefs.getString("custom_profile_image_path", null)) {
+        prefs.getString("custom_profile_image_path", null)?.takeIf { java.io.File(it).exists() }
+    }
+
     val gradients = remember {
         listOf(
             listOf(Color(0xFFC5A880), Color(0xFF1E1A14)),
@@ -981,13 +1000,22 @@ fun UserAvatar(
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = letter,
-            fontSize = (size.value * 0.45f).sp,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-            color = Color.White,
-            textAlign = TextAlign.Center
-        )
+        if (customImagePath != null) {
+            AsyncImage(
+                model = java.io.File(customImagePath),
+                contentDescription = "User Avatar",
+                modifier = Modifier.fillMaxSize().clip(CircleShape),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Text(
+                text = letter,
+                fontSize = (size.value * 0.45f).sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                color = Color.White,
+                textAlign = TextAlign.Center
+            )
+        }
     }
 }
 

@@ -4,6 +4,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -11,10 +12,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.media3.common.util.UnstableApi
@@ -44,11 +47,61 @@ fun DownloadsScreen(
     val ctx   = LocalContext.current
     val db    = VinDatabase.getInstance(ctx)
     val scope = rememberCoroutineScope()
-    
+
     var downloads by remember { mutableStateOf<List<DownloadEntity>>(emptyList()) }
+    var cachedSongs by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
+    var isLoadingCached by remember { mutableStateOf(true) }
+    var selectedTab by remember { mutableStateOf("Downloads") }
 
     LaunchedEffect(Unit) {
         db.downloadDao().getAllFlow().collect { downloads = it }
+    }
+
+    // Load cached songs from player cache + interaction signals
+    LaunchedEffect(Unit) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val downloadedIds = downloads.map { it.videoId }.toSet()
+                val cached = mutableListOf<VideoItem>()
+                val seenIds = mutableSetOf<String>()
+
+                // 1. Get songs from player cache (ExoPlayer SimpleCache)
+                val playerCache = com.vinmusic.player.PlayerSingleton.getCache(ctx)
+                if (playerCache != null) {
+                    val cacheKeys = playerCache.keys
+                    val cacheSpanIterator = cacheKeys.iterator()
+                    while (cacheSpanIterator.hasNext()) {
+                        val key = cacheSpanIterator.next()
+                        if (key !in downloadedIds && key !in seenIds) {
+                            // Try to find song info from interaction signals
+                            val signal = db.interactionSignalDao().get(key)
+                            if (signal != null) {
+                                cached.add(VideoItem(signal.videoId, signal.title, signal.author, signal.durationText))
+                                seenIds.add(key)
+                            }
+                        }
+                    }
+                }
+
+                // 2. Get songs from interaction signals (songs that have been played)
+                val signals = db.interactionSignalDao().getAll()
+                for (signal in signals) {
+                    if (signal.videoId !in downloadedIds && signal.videoId !in seenIds) {
+                        cached.add(VideoItem(signal.videoId, signal.title, signal.author, signal.durationText))
+                        seenIds.add(signal.videoId)
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    cachedSongs = cached
+                    isLoadingCached = false
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    isLoadingCached = false
+                }
+            }
+        }
     }
 
     val totalCompletedBytes = remember(downloads) { downloads.filter { it.status == "completed" }.sumOf { it.sizeBytes } }
@@ -70,7 +123,8 @@ fun DownloadsScreen(
             Column {
                 Text("Downloads", fontSize = 26.sp, fontWeight = FontWeight.ExtraBold, color = VinColors.Primary)
                 Text(
-                    "${downloads.size} songs",
+                    if (selectedTab == "Downloads") "${downloads.size} songs"
+                    else "${cachedSongs.size} cached",
                     fontSize = 13.sp,
                     color = VinColors.Secondary
                 )
@@ -85,7 +139,40 @@ fun DownloadsScreen(
 
         Spacer(Modifier.height(4.dp))
 
-        // Offline storage and cleanup panel for Downloads
+        // Tab switcher: Downloads | Cached
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(VinColors.White10)
+                .padding(4.dp)
+        ) {
+            listOf("Downloads", "Cached").forEach { tab ->
+                val isActive = selectedTab == tab
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (isActive) VinColors.Accent else Color.Transparent)
+                        .clickable { selectedTab = tab }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = tab,
+                        color = if (isActive) Color.White else VinColors.Secondary,
+                        fontSize = 13.sp,
+                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(4.dp))
+
+        // Offline storage and cleanup panel for Downloads (only show in Downloads tab)
+        if (selectedTab == "Downloads") {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -106,50 +193,6 @@ fun DownloadsScreen(
                     Text(usedText, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = VinColors.Primary)
                 }
 
-                OutlinedButton(
-                    onClick = {
-                        scope.launch(Dispatchers.IO) {
-                            val failedOrQueued = downloads.filter { it.status == "failed" || it.status == "queued" }
-                            var cleanedCount = 0
-                            val cache = PlayerSingleton.getCache(ctx)
-                            val downloadCache = PlayerSingleton.getDownloadCache(ctx)
-                            failedOrQueued.forEach { dl ->
-                                try {
-                                    val intent = Intent(ctx, DownloadService::class.java).apply {
-                                        action = DownloadService.ACTION_CANCEL
-                                        putExtra(DownloadService.EXTRA_VIDEO_ID, dl.videoId)
-                                    }
-                                    ctx.startService(intent)
-                                    cache?.removeResource(dl.videoId)
-                                    downloadCache?.removeResource(dl.videoId)
-                                    dl.thumbnailPath?.let { path ->
-                                        val file = java.io.File(path)
-                                        if (file.exists()) file.delete()
-                                    }
-                                } catch (_: Exception) {}
-                                db.downloadDao().delete(dl.videoId)
-                                cleanedCount++
-                            }
-
-                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                android.widget.Toast.makeText(
-                                    ctx,
-                                    if (cleanedCount > 0) "Cleaned $cleanedCount failed tasks!" else "Storage is fully optimized!",
-                                    android.widget.Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        }
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = VinColors.AccentLight),
-                    border = BorderStroke(1.dp, VinColors.GlassBorder),
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Icon(Icons.Default.DeleteSweep, null, modifier = Modifier.size(14.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Smart Cleanup", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-                Spacer(Modifier.width(8.dp))
                 OutlinedButton(
                     onClick = {
                         scope.launch(Dispatchers.IO) {
@@ -211,10 +254,11 @@ fun DownloadsScreen(
                 )
             }
         }
+        } // end storage panel
 
         Spacer(Modifier.height(8.dp))
 
-        if (downloads.isEmpty()) {
+        if (selectedTab == "Downloads" && downloads.isEmpty()) {
             Box(Modifier.fillMaxSize(), Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Default.DownloadForOffline, null,
@@ -224,17 +268,18 @@ fun DownloadsScreen(
                     Text("Download songs from the player menu", color = VinColors.Secondary, fontSize = 13.sp)
                 }
             }
-        } else {
+        } else if (selectedTab == "Downloads") {
             LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
-                items(downloads) { dl ->
+                itemsIndexed(downloads, key = { index, dl -> "dl_song_${dl.videoId}_$index" }) { index, dl ->
                     val song = VideoItem(dl.videoId, dl.title, dl.author, dl.durationText)
                     val isCompleted = dl.status == "completed"
                     val isDownloading = dl.status == "downloading"
                     val isQueued = dl.status == "queued"
                     val isFailed = dl.status == "failed"
+                    val isPlaying = vm.currentSong?.videoId == dl.videoId
 
                     Row(modifier = Modifier.fillMaxWidth()
-                        .background(if (vm.currentSong?.videoId == dl.videoId) VinColors.White10 else Color.Transparent)
+                        .background(if (isPlaying) VinColors.White10 else Color.Transparent)
                         .clickable(enabled = isCompleted) {
                             val completedSongs = downloads.filter { it.status == "completed" }.map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
                             onSongClick(song, completedSongs)
@@ -243,7 +288,30 @@ fun DownloadsScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
 
-                        Box(modifier = Modifier.size(52.dp).clip(RoundedCornerShape(8.dp))) {
+                        // Serial Number on the left
+                        Box(
+                            modifier = Modifier.width(30.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isPlaying) {
+                                Icon(
+                                    imageVector = Icons.Default.VolumeUp,
+                                    contentDescription = null,
+                                    tint = VinColors.AccentLight,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            } else {
+                                Text(
+                                    text = "${index + 1}",
+                                    color = VinColors.Secondary,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+
+                        Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))) {
                             val thumbPath = dl.thumbnailPath
                             val thumbnailModel = if (thumbPath != null && File(thumbPath).exists()) {
                                 File(thumbPath)
@@ -251,7 +319,7 @@ fun DownloadsScreen(
                                 song.thumbnail
                             }
                             AsyncImage(model = thumbnailModel, contentDescription = null,
-                                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                modifier = Modifier.fillMaxSize().scale(1.3f), contentScale = ContentScale.Crop)
                             if (isCompleted) {
                                 Box(modifier = Modifier.align(Alignment.BottomEnd).size(18.dp)
                                     .clip(CircleShape).background(VinColors.Success),
@@ -318,6 +386,103 @@ fun DownloadsScreen(
                                 tint = VinColors.Secondary,
                                 modifier = Modifier.size(22.dp)
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cached tab
+        if (selectedTab == "Cached") {
+            if (isLoadingCached) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(200.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(36.dp))
+                        Text("Loading cached songs...", color = VinColors.Secondary, fontSize = 13.sp)
+                    }
+                }
+            } else if (cachedSongs.isEmpty()) {
+                Box(Modifier.fillMaxSize(), Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.Cached, null,
+                            tint = VinColors.White20, modifier = Modifier.size(64.dp))
+                        Spacer(Modifier.height(16.dp))
+                        Text("No cached songs yet", color = VinColors.Secondary, fontSize = 16.sp)
+                        Text("Songs you play will be cached here", color = VinColors.Secondary, fontSize = 13.sp)
+                    }
+                }
+            } else {
+                LazyColumn(contentPadding = PaddingValues(bottom = 220.dp)) {
+                    itemsIndexed(cachedSongs, key = { index, song -> "cached_${song.videoId}_$index" }) { index, song ->
+                        val isPlaying = vm.currentSong?.videoId == song.videoId
+
+                        Row(modifier = Modifier.fillMaxWidth()
+                            .background(if (isPlaying) VinColors.White10 else Color.Transparent)
+                            .clickable { onSongClick(song, cachedSongs) }
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+
+                            // Serial Number
+                            Box(
+                                modifier = Modifier.width(30.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isPlaying) {
+                                    Icon(
+                                        imageVector = Icons.Default.VolumeUp,
+                                        contentDescription = null,
+                                        tint = VinColors.AccentLight,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                } else {
+                                    Text(
+                                        text = "${index + 1}",
+                                        color = VinColors.Secondary,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+
+                            // Thumbnail
+                            Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))) {
+                                AsyncImage(model = song.thumbnail, contentDescription = null,
+                                    modifier = Modifier.fillMaxSize().scale(1.3f), contentScale = ContentScale.Crop)
+                                // Cached indicator
+                                Box(modifier = Modifier.align(Alignment.BottomEnd).size(18.dp)
+                                    .clip(CircleShape).background(VinColors.Accent),
+                                    contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Default.Cached, null, tint = Color.White, modifier = Modifier.size(10.dp))
+                                }
+                            }
+
+                            // Song info
+                            Column(Modifier.weight(1f)) {
+                                Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    fontSize = 14.sp, fontWeight = FontWeight.Medium, color = VinColors.Primary)
+                                Text(song.author, maxLines = 1, fontSize = 12.sp, color = VinColors.Secondary)
+                            }
+
+                            // More options
+                            IconButton(
+                                onClick = { onSongMore(song) },
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "Options",
+                                    tint = VinColors.Secondary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
                         }
                     }
                 }

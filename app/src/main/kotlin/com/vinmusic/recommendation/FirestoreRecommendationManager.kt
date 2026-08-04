@@ -190,6 +190,51 @@ class FirestoreRecommendationManager @Inject constructor() {
         return emptyList()
     }
 
+    /**
+     * Fetches similar tracks from Last.fm for queue recommendations.
+     * Returns list of (artist, title) pairs.
+     */
+    suspend fun fetchSimilarTracks(artist: String, title: String): List<Pair<String, String>> {
+        val apiKey = com.vinmusic.config.RemoteConfigHelper.getLastFmApiKey()
+        if (apiKey.isBlank()) return emptyList()
+        val urlString = "https://ws.audioscrobbler.com/2.0/?method=track.getsimilar" +
+                "&artist=${java.net.URLEncoder.encode(artist, "UTF-8")}" +
+                "&track=${java.net.URLEncoder.encode(title, "UTF-8")}" +
+                "&api_key=$apiKey" +
+                "&format=json"
+
+        try {
+            val url = java.net.URL(urlString)
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+
+            if (connection.responseCode == 200) {
+                val responseText = connection.inputStream.bufferedReader().use { it.readText() }
+                val responseJson = com.google.gson.JsonParser.parseString(responseText).asJsonObject
+                val similartracks = responseJson.getAsJsonObject("similartracks")
+                if (similartracks != null) {
+                    val trackArray = similartracks.getAsJsonArray("track")
+                    if (trackArray != null) {
+                        return trackArray.mapNotNull { track ->
+                            val trackObj = track.asJsonObject
+                            val trackName = trackObj.get("name")?.asString
+                            val artistObj = trackObj.getAsJsonObject("artist")
+                            val artistName = artistObj?.get("name")?.asString
+                            if (trackName != null && artistName != null) {
+                                artistName to trackName
+                            } else null
+                        }.take(20)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to fetch similar tracks from Last.fm: ${e.message}")
+        }
+        return emptyList()
+    }
+
 
     internal fun normalizeTags(rawTags: List<String>): Map<String, List<String>> {
         val genres = mutableSetOf<String>()

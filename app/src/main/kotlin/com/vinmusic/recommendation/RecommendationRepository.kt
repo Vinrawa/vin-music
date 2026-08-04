@@ -542,48 +542,113 @@ class RecommendationRepository @Inject constructor(
         if (online) {
             Log.d(TAG, "Device is ONLINE. Using YTM Related → YTM Radio → Search fallback.")
 
-            // 1. PRIMARY: YouTube Music Related (fresh, algorithm-curated)
+            // 1. PRIMARY: YouTube Music Related (fresh, algorithm-curated) - SAME LANGUAGE ONLY
             val ytRelated = fetchYtRelatedForSeed(videoId).orEmpty()
             if (ytRelated.isNotEmpty()) {
                 Log.d(TAG, "YTM Related returned ${ytRelated.size} tracks")
-                pool.addAll(ytRelated)
+                for (track in ytRelated) {
+                    val trackMeta = RecommendationManager.inferMetadata(track)
+                    // Only add if same language as seed
+                    if (seedMeta == null || trackMeta.language == seedMeta.language) {
+                        pool.add(track)
+                    }
+                }
             }
 
-            // 2. SECONDARY: YouTube Music Radio (RDAMVM radio playlist)
+            // 2. SECONDARY: YouTube Music Radio (RDAMVM radio playlist) - SAME LANGUAGE ONLY
             if (pool.size < 15) {
                 val radioTracks = InnerTube.getWatchNextRadio(videoId)
                 if (radioTracks.isNotEmpty()) {
                     Log.d(TAG, "YTM Radio returned ${radioTracks.size} tracks")
                     for (track in radioTracks) {
                         if (pool.none { it.videoId == track.videoId }) {
-                            pool.add(track)
+                            val trackMeta = RecommendationManager.inferMetadata(track)
+                            // Only add if same language as seed
+                            if (seedMeta == null || trackMeta.language == seedMeta.language) {
+                                pool.add(track)
+                            }
                         }
                     }
                 }
             }
 
-            // 3. ALWAYS: Cross-genre search to diversify artist pool
+            // 2.5 TERTIARY: Last.fm Similar Tracks (genre/mood matched) - SAME LANGUAGE ONLY
+            if (pool.size < 15 && seedAuthor.isNotEmpty() && seedTitle.isNotEmpty()) {
+                try {
+                    val lastFmSimilar = firestoreRecommendationManager.fetchSimilarTracks(seedAuthor, seedTitle)
+                    if (lastFmSimilar.isNotEmpty()) {
+                        Log.d(TAG, "Last.fm Similar returned ${lastFmSimilar.size} tracks")
+                        for ((artist, title) in lastFmSimilar) {
+                            if (pool.none { it.title.lowercase(Locale.ROOT) == title.lowercase(Locale.ROOT) &&
+                                            it.author.lowercase(Locale.ROOT) == artist.lowercase(Locale.ROOT) }) {
+                                // Search YTM for this track to get videoId
+                                try {
+                                    val results = InnerTube.search("$artist $title").take(3)
+                                    val match = results.firstOrNull { result ->
+                                        result.author.lowercase(Locale.ROOT).contains(artist.lowercase(Locale.ROOT)) &&
+                                        result.title.lowercase(Locale.ROOT).contains(title.lowercase(Locale.ROOT).take(8))
+                                    }
+                                    if (match != null) {
+                                        val matchMeta = RecommendationManager.inferMetadata(match)
+                                        if (seedMeta == null || matchMeta.language == seedMeta.language) {
+                                            pool.add(match)
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                            if (pool.size >= 20) break
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Last.fm similar tracks failed: ${e.message}")
+                }
+            }
+
+            // 3. Cross-genre search to diversify artist pool (SAME LANGUAGE ONLY)
             val poolArtists = pool.map { it.author.lowercase(Locale.ROOT) }.toSet()
             if (poolArtists.size < 10 && seedMeta != null) {
                 Log.d(TAG, "Pool has only ${poolArtists.size} unique artists, adding cross-genre search...")
                 val genreLower = seedMeta.genre.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop")
+                val langLower = seedMeta.language.lowercase(Locale.ROOT)
                 val yr = java.time.LocalDate.now().year
-                val crossGenres = listOf("rap hip hop", "pop", "r&b", "latin", "indie", "electronic", "rock", "afrobeats")
+
+                // Only search in the same language as the seed track
+                val langPrefix = when (seedMeta.language) {
+                    "Hindi" -> "hindi"
+                    "Punjabi" -> "punjabi"
+                    "Tamil" -> "tamil"
+                    "Korean" -> "korean"
+                    else -> "" // English - no prefix needed
+                }
+
+                val crossGenres = listOf("rap hip hop", "pop", "r&b", "indie", "electronic", "rock", "lofi")
                     .filter { !genreLower.contains(it.take(3)) }
                     .shuffled().take(3)
-                val searchQueries = mutableListOf(
-                    "$genreLower official hits $yr",
-                    "$seedAuthor similar artists",
-                    "${seedMeta.mood} $genreLower songs"
-                )
+
+                val searchQueries = mutableListOf<String>()
+                // Same language + genre queries
+                if (langPrefix.isNotEmpty()) {
+                    searchQueries.add("$langPrefix $genreLower official hits $yr")
+                    searchQueries.add("$langPrefix ${seedMeta.mood.lowercase()} songs")
+                } else {
+                    searchQueries.add("$genreLower official hits $yr")
+                    searchQueries.add("${seedMeta.mood.lowercase()} $genreLower songs")
+                }
                 for (cg in crossGenres) {
-                    searchQueries.add("$cg $genreLower vibe official $yr")
+                    if (langPrefix.isNotEmpty()) {
+                        searchQueries.add("$langPrefix $cg official $yr")
+                    } else {
+                        searchQueries.add("$cg official $yr")
+                    }
                 }
                 for (query in searchQueries) {
                     try {
                         val results = InnerTube.search(query).take(5)
                         for (item in results) {
+                            val itemMeta = RecommendationManager.inferMetadata(item)
+                            // Only add if same language and not already in pool
                             if (pool.none { it.videoId == item.videoId } &&
+                                itemMeta.language == seedMeta.language &&
                                 !RecommendationManager.isCompilationTrack(item.title, item.durationText) &&
                                 !RecommendationManager.isNonMusicVideo(item.title, item.author) &&
                                 !RecommendationManager.isUnofficialContent(item.title, item.author)) {

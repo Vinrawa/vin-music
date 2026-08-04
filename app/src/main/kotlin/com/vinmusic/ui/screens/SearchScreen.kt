@@ -58,6 +58,21 @@ private fun deleteSearchHistoryItem(context: Context, query: String, onUpdate: (
     onUpdate(currentHistory)
 }
 
+private fun isDirectArtistMatch(query: String, artistName: String): Boolean {
+    val q = query.trim().lowercase()
+    val name = artistName.trim().lowercase()
+        .replace("- topic", "").replace("vevo", "").trim()
+    // Query must be a substantial match to the artist name
+    // e.g. "j cole" matches "J. Cole" but "baby doll" doesn't match "Baby Doll Series"
+    val qWords = q.split(" ").filter { it.length > 1 }
+    val nameWords = name.split(" ").filter { it.length > 1 }
+    // All query words must appear in artist name, or all name words in query
+    val queryMatchesName = qWords.all { qw -> nameWords.any { nw -> nw.startsWith(qw) || qw.startsWith(nw) } }
+    val nameMatchesQuery = nameWords.all { nw -> qWords.any { qw -> qw.startsWith(nw) || nw.startsWith(qw) } }
+    // At least one direction must match AND name shouldn't be much longer than query (prevents "Baby Doll Series" matching "baby doll")
+    return (queryMatchesName || nameMatchesQuery) && nameWords.size <= qWords.size + 1
+}
+
 private enum class SearchTab { ALL, SONGS, VIDEOS, ARTISTS, ALBUMS }
 
 @OptIn(UnstableApi::class)
@@ -66,7 +81,8 @@ fun SearchScreen(
     vm: PlayerViewModel,
     onSongClick: (VideoItem, List<VideoItem>) -> Unit,
     onSongMore: (VideoItem) -> Unit,
-    onAlbumClick: (AlbumItem) -> Unit
+    onAlbumClick: (AlbumItem) -> Unit,
+    isPlayerOpen: Boolean = false
 ) {
     var query          by remember { mutableStateOf("") }
     var activeTab      by remember { mutableStateOf(SearchTab.ALL) }
@@ -145,8 +161,10 @@ fun SearchScreen(
             }.getOrElse {
                 AllSearchResults(songs = fastSongs)
             }
+            val filteredArtists = r.artists.filter { isDirectArtistMatch(q, it.name) }
             val merged = r.copy(
-                songs = (fastSongs + r.songs).distinctBy { it.videoId }
+                songs = (fastSongs + r.songs).distinctBy { it.videoId },
+                artists = filteredArtists
             )
             withContext(Dispatchers.Main) {
                 allResults = merged
@@ -215,7 +233,7 @@ fun SearchScreen(
         return
     }
 
-    if (isFocused) {
+    if (isFocused && !isPlayerOpen) {
         BackHandler {
             focusManager.clearFocus()
         }

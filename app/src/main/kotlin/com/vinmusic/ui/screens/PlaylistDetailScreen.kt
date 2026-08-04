@@ -4,7 +4,9 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -135,7 +137,7 @@ private fun filterRecommendedPlaylistSongs(songs: List<VideoItem>): List<VideoIt
         .distinctBy { it.videoId }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun PlaylistDetailScreen(
     playlistId: Long,
@@ -170,6 +172,10 @@ fun PlaylistDetailScreen(
 
     var showRenameDialog by remember { mutableStateOf(false) }
     var newNameText by remember { mutableStateOf("") }
+
+    // Multi-select state
+    var multiSelectMode by remember { mutableStateOf(false) }
+    val selectedIds = remember { mutableStateListOf<String>() }
 
     LaunchedEffect(playlistId) {
         playlist = withContext(Dispatchers.IO) { db.playlistDao().getPlaylist(playlistId) }
@@ -701,25 +707,60 @@ fun PlaylistDetailScreen(
                         itemsIndexed(filteredSongs, key = { index, s -> "pl_song_${s.videoId}_$index" }) { index, s ->
                             val isPlaying = vm.currentSong?.videoId == s.videoId
                             
+                            val isSelected = s.videoId in selectedIds
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 18.dp, vertical = 5.dp)
                                     .clip(RoundedCornerShape(14.dp))
-                                    .background(if (isPlaying) VinColors.Accent.copy(alpha = 0.12f) else Color.Transparent)
-                                    .clickable {
-                                        val videoItems = filteredSongs.map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
-                                        vm.setQueue(videoItems, index)
-                                    }
+                                    .background(
+                                        when {
+                                            isSelected -> VinColors.Accent.copy(alpha = 0.22f)
+                                            isPlaying -> VinColors.Accent.copy(alpha = 0.12f)
+                                            else -> Color.Transparent
+                                        }
+                                    )
+                                    .combinedClickable(
+                                        onLongClick = {
+                                            if (!multiSelectMode) {
+                                                multiSelectMode = true
+                                                selectedIds.clear()
+                                            }
+                                            if (s.videoId !in selectedIds) selectedIds.add(s.videoId)
+                                        },
+                                        onClick = {
+                                            if (multiSelectMode) {
+                                                if (s.videoId in selectedIds) selectedIds.remove(s.videoId)
+                                                else selectedIds.add(s.videoId)
+                                                if (selectedIds.isEmpty()) multiSelectMode = false
+                                            } else {
+                                                val videoItems = filteredSongs.map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
+                                                vm.setQueue(videoItems, index)
+                                            }
+                                        }
+                                    )
                                     .padding(horizontal = 10.dp, vertical = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // Serial Number on the left
+                                // Serial Number / Selection checkbox on the left
                                 Box(
                                     modifier = Modifier.width(30.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    if (isPlaying) {
+                                    if (multiSelectMode) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(22.dp)
+                                                .clip(CircleShape)
+                                                .border(2.dp, if (isSelected) VinColors.Accent else VinColors.Secondary, CircleShape)
+                                                .background(if (isSelected) VinColors.Accent else Color.Transparent),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (isSelected) {
+                                                Icon(Icons.Default.Check, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                                            }
+                                        }
+                                    } else if (isPlaying) {
                                         Icon(
                                             imageVector = Icons.Default.VolumeUp,
                                             contentDescription = null,
@@ -771,20 +812,45 @@ fun PlaylistDetailScreen(
                                     )
                                 }
 
-                                // Vertical three-dot menu icon
-                                IconButton(
-                                    onClick = {
-                                        val videoItem = VideoItem(s.videoId, s.title, s.author, s.durationText)
-                                        onSongMore(videoItem)
-                                    },
-                                    modifier = Modifier.size(48.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.MoreVert,
-                                        contentDescription = "More Options",
-                                        tint = VinColors.Secondary,
-                                        modifier = Modifier.size(22.dp)
-                                    )
+                                // Vertical three-dot menu icon with dropdown
+                                var showSongMenu by remember { mutableStateOf(false) }
+                                Box {
+                                    IconButton(
+                                        onClick = { showSongMenu = true },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.MoreVert,
+                                            contentDescription = "More Options",
+                                            tint = VinColors.Secondary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    DropdownMenu(
+                                        expanded = showSongMenu,
+                                        onDismissRequest = { showSongMenu = false },
+                                        modifier = Modifier.background(VinColors.Surface2)
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Remove song", color = Color.White) },
+                                            leadingIcon = { Icon(Icons.Default.DeleteOutline, null, tint = VinColors.Pink) },
+                                            onClick = {
+                                                showSongMenu = false
+                                                scope.launch(Dispatchers.IO) {
+                                                    db.playlistDao().removeSong(playlistId, s.videoId)
+                                                }
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("More options", color = Color.White) },
+                                            leadingIcon = { Icon(Icons.Default.MoreVert, null, tint = Color.White) },
+                                            onClick = {
+                                                showSongMenu = false
+                                                val videoItem = VideoItem(s.videoId, s.title, s.author, s.durationText)
+                                                onSongMore(videoItem)
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -849,6 +915,59 @@ fun PlaylistDetailScreen(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Multi-select floating action bar
+        if (multiSelectMode) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 100.dp, start = 16.dp, end = 16.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(VinColors.Surface2.copy(alpha = 0.95f))
+                    .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(16.dp))
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    "${selectedIds.size} selected",
+                    color = VinColors.AccentLight,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Select All
+                    TextButton(onClick = {
+                        selectedIds.clear()
+                        selectedIds.addAll(filteredSongs.map { it.videoId })
+                    }) {
+                        Text("Select All", color = VinColors.Accent, fontSize = 13.sp)
+                    }
+                    // Remove Selected
+                    TextButton(onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            selectedIds.toList().forEach { vid ->
+                                db.playlistDao().removeSong(playlistId, vid)
+                            }
+                            withContext(Dispatchers.Main) {
+                                selectedIds.clear()
+                                multiSelectMode = false
+                            }
+                        }
+                    }) {
+                        Text("Remove", color = VinColors.Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                    // Cancel
+                    TextButton(onClick = {
+                        selectedIds.clear()
+                        multiSelectMode = false
+                    }) {
+                        Text("Cancel", color = VinColors.Secondary, fontSize = 13.sp)
                     }
                 }
             }

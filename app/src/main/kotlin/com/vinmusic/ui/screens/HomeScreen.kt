@@ -37,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.interaction.*
+import android.util.Log
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -46,50 +47,39 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
-private val CATEGORIES = listOf("All", "For You", "Happy", "Sad", "Energize", "Sleep", "Focus", "Workout", "Party", "Bollywood", "Lo-fi", "Rap", "Indie", "K-Pop", "90s Hits")
+private val CATEGORIES = listOf("All", "For You", "Happy", "Sad", "Energize", "Sleep", "Focus", "Workout", "Party", "Bollywood", "Lo-fi", "Rap", "Indie", "K-Pop", "90s Hits", "Long Listens")
 
 data class RapSubCategory(
     val name: String,
-    val icon: String,
     val queries: List<String>  // multiple queries for richer results
 )
 
 private val RAP_SUB_CATEGORIES = listOf(
-    RapSubCategory("All Rap",        "🎤", listOf("best rap songs 2025", "top rap hits")),
-    RapSubCategory("Lyrical",        "📝", listOf("lyrical rap deep bars", "lyrical hip hop conscious rap")),
-    RapSubCategory("Storytelling",   "📖", listOf("storytelling rap songs", "narrative rap best songs")),
-    RapSubCategory("Vibe",           "🌊", listOf("chill vibe rap songs", "vibe rap relaxed flow")),
-    RapSubCategory("Sad",            "😢", listOf("sad rap songs emotional", "sad rap heartbreak")),
-    RapSubCategory("Happy",          "😄", listOf("happy upbeat rap songs", "feel good rap")),
-    RapSubCategory("Aggressive",     "🔥", listOf("aggressive rap hard bars", "aggressive trap rap")),
-    RapSubCategory("Desi Hip-Hop",   "🇮🇳", listOf("desi hip hop indian rap", "indian rap songs 2025")),
-    RapSubCategory("Old School",     "📼", listOf("old school hip hop classic", "90s rap golden era")),
-    RapSubCategory("Trap",           "💣", listOf("trap music best songs", "trap rap hard beats")),
-    RapSubCategory("Drill",          "🔫", listOf("drill rap songs", "uk drill rap")),
-    RapSubCategory("Freestyle",      "⚡", listOf("freestyle rap best", "freestyle rap cypher"))
+    RapSubCategory("All Rap",        listOf("best rap songs 2025", "top rap hits")),
+    RapSubCategory("Lyrical",        listOf("lyrical rap deep bars", "lyrical hip hop conscious rap")),
+    RapSubCategory("Storytelling",   listOf("storytelling rap songs", "narrative rap best songs")),
+    RapSubCategory("Vibe",           listOf("chill vibe rap songs", "vibe rap relaxed flow")),
+    RapSubCategory("Sad",            listOf("sad rap songs emotional", "sad rap heartbreak")),
+    RapSubCategory("Happy",          listOf("happy upbeat rap songs", "feel good rap")),
+    RapSubCategory("Aggressive",     listOf("aggressive rap hard bars", "aggressive trap rap")),
+    RapSubCategory("Desi Hip-Hop",   listOf("desi hip hop indian rap", "indian rap songs 2025")),
+    RapSubCategory("Old School",     listOf("old school hip hop classic", "90s rap golden era")),
+    RapSubCategory("Trap",           listOf("trap music best songs", "trap rap hard beats")),
+    RapSubCategory("Drill",          listOf("drill rap songs", "uk drill rap")),
+    RapSubCategory("Freestyle",      listOf("freestyle rap best", "freestyle rap cypher"))
 )
 
-private val SIMILAR_ARTISTS_MAP = mapOf(
-    "j. cole" to listOf("Kendrick Lamar", "Drake", "JID", "Cordae", "Joey Bada\$\$", "Kanye West"),
-    "j cole" to listOf("Kendrick Lamar", "Drake", "JID", "Cordae", "Joey Bada\$\$", "Kanye West"),
-    "kendrick lamar" to listOf("J. Cole", "Drake", "Travis Scott", "21 Savage", "Baby Keem", "A\$AP Rocky"),
-    "21 savage" to listOf("Metro Boomin", "Future", "Travis Scott", "Drake", "Lil Baby", "Gunna"),
-    "travis scott" to listOf("Metro Boomin", "Don Toliver", "Kid Cudi", "A\$AP Rocky", "Kanye West"),
-    "drake" to listOf("J. Cole", "Kendrick Lamar", "The Weeknd", "Future", "Lil Baby", "Travis Scott"),
-    "arijit singh" to listOf("Atif Aslam", "Jubin Nautiyal", "Shreya Ghoshal", "Pritam", "Darshan Raval"),
-    "sidhu moose wala" to listOf("Karan Aujla", "Diljit Dosanjh", "Shubh", "Prem Dhillon", "Amrit Maan"),
-    "karan aujla" to listOf("Sidhu Moose Wala", "Diljit Dosanjh", "Shubh", "AP Dhillon", "Garry Sandhu"),
-    "diljit dosanjh" to listOf("Karan Aujla", "Sidhu Moose Wala", "AP Dhillon", "Ammy Virk", "Shubh"),
-    "shubh" to listOf("AP Dhillon", "Gurinder Gill", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh"),
-    "prateek kuhad" to listOf("Anuv Jain", "Local Train", "When Chai Met Toast", "Yellow Diary"),
-    "anuv jain" to listOf("Prateek Kuhad", "Aditya Rikhari", "Mitraz", "Local Train", "Osho Jain"),
-    "mitraz" to listOf("Anuv Jain", "Aditya Rikhari", "Darshan Raval", "Zaeden", "Prateek Kuhad"),
-    "the weeknd" to listOf("Post Malone", "Khalid", "Frank Ocean", "SZA", "Brent Faiyaz"),
-    "taylor swift" to listOf("Olivia Rodrigo", "Billie Eilish", "Sabrina Carpenter", "Ed Sheeran"),
-    "eminem" to listOf("Dr. Dre", "50 Cent", "Snoop Dogg", "J. Cole", "Kendrick Lamar"),
-    "badshah" to listOf("Raftaar", "Yo Yo Honey Singh", "King", "MC Stan", "Divine"),
-    "divine" to listOf("Naezy", "Raftaar", "MC Stan", "Seedhe Maut", "Kr\$na"),
-    "kr\$na" to listOf("Raftaar", "Seedhe Maut", "Divine", "Emiway Bantai", "Young Stunners")
+// SIMILAR_ARTISTS_MAP is now fetched dynamically from Last.fm
+// Fallback map used only when Last.fm is unavailable
+private val SIMILAR_ARTISTS_FALLBACK = mapOf(
+    "j. cole" to listOf("Kendrick Lamar", "Drake", "JID", "Cordae"),
+    "kendrick lamar" to listOf("J. Cole", "Drake", "Travis Scott", "21 Savage"),
+    "drake" to listOf("J. Cole", "Kendrick Lamar", "The Weeknd", "Future"),
+    "arijit singh" to listOf("Atif Aslam", "Jubin Nautiyal", "Shreya Ghoshal"),
+    "sidhu moose wala" to listOf("Karan Aujla", "Diljit Dosanjh", "Shubh"),
+    "the weeknd" to listOf("Post Malone", "Khalid", "Frank Ocean", "SZA"),
+    "eminem" to listOf("Dr. Dre", "50 Cent", "Snoop Dogg", "J. Cole"),
+    "badshah" to listOf("Raftaar", "Yo Yo Honey Singh", "King", "MC Stan")
 )
 
 fun normalizeArtistName(name: String): String {
@@ -155,7 +145,16 @@ fun HomeScreen(
             val json = playlistSectionCachePrefs.getString(key, null) ?: return emptyList()
             val type = object : TypeToken<List<PlaylistSectionCache>>() {}.type
             val cached: List<PlaylistSectionCache> = homeGson.fromJson(json, type)
-            cached.map { it.title to it.playlists }.filter { it.second.isNotEmpty() }
+            // Gson can bypass Kotlin constructors via Unsafe, producing null fields on non-null types.
+            // Filter out any corrupt entries to prevent NPE crashes during Compose rendering.
+            cached.mapNotNull { section ->
+                val title = section.title ?: return@mapNotNull null
+                val safePlaylists = section.playlists?.filter { item ->
+                    @Suppress("SENSELESS_COMPARISON")
+                    item != null && item.playlistId != null && item.title != null && item.author != null
+                } ?: return@mapNotNull null
+                if (safePlaylists.isNotEmpty()) title to safePlaylists else null
+            }
         } catch (_: Exception) {
             emptyList()
         }
@@ -359,22 +358,22 @@ fun HomeScreen(
 
                 // Fallbacks pool
                 val defaultFallbackPool = listOf(
-                    "hindi lofi chill playlist",
-                    "punjabi hits playlist",
-                    "viral english songs playlist",
-                    "bollywood romantic hit songs",
-                    "sad hindi lofi playlist",
-                    "gaming synthwave lofi playlist",
-                    "acoustic indie pop english",
-                    "slowed and reverb bollywood",
-                    "workout energetic dance beat",
-                    "classical piano study sleep",
-                    "90s bollywood hits collection",
-                    "urdu aesthetic ghazal acoustic",
-                    "urdu pop rock playlist",
-                    "hype hip hop rap gym",
-                    "soothing acoustic guitar cover",
-                    "viral reels trending songs"
+                    "chill lofi study playlist",
+                    "acoustic indie vibes playlist",
+                    "jazz fusion classics playlist",
+                    "electronic ambient chill playlist",
+                    "r&b soul hits playlist",
+                    "alternative rock modern playlist",
+                    "synthwave retrowave playlist",
+                    "neo soul groove playlist",
+                    "dream pop shoegaze playlist",
+                    "funk disco classics playlist",
+                    "hip hop lyrical playlist",
+                    "trip hop downtempo playlist",
+                    "progressive rock modern playlist",
+                    "bedroom pop indie playlist",
+                    "reggae dancehall vibes playlist",
+                    "classical crossover playlist"
                 )
 
                 // Fill a wider query set so recommendations do not collapse to the same few shelves.
@@ -456,58 +455,6 @@ fun HomeScreen(
             }
         if (repeatPool.isNotEmpty()) {
             sections.add("On Repeat" to repeatPool)
-        }
-
-        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
-        val vibeQuery = if (hour in 17..20) {
-            "sunset vibe energy songs official"
-        } else {
-            "energetic feel good songs official"
-        }
-        val vibeCachePrefs = ctx.getSharedPreferences("home_auto_video_cache", Context.MODE_PRIVATE)
-        val vibeCacheKey = "sunset_energy_videos"
-        val cachedVibeSongs = try {
-            val cachedJson = vibeCachePrefs.getString(vibeCacheKey, null)
-            if (cachedJson.isNullOrBlank()) {
-                emptyList()
-            } else {
-                val type = object : TypeToken<List<VideoItem>>() {}.type
-                homeGson.fromJson<List<VideoItem>>(cachedJson, type).orEmpty()
-            }
-        } catch (_: Exception) {
-            emptyList()
-        }
-        val vibeSourceSongs = cachedVibeSongs.ifEmpty {
-            try {
-                InnerTube.search(vibeQuery)
-                    .filterNot { song ->
-                        com.vinmusic.recommendation.RecommendationManager.isNonMusicVideo(song.title, song.author) ||
-                            com.vinmusic.recommendation.RecommendationManager.isUnofficialContent(song.title, song.author)
-                    }
-                    .distinctBy { it.videoId }
-                    .take(10)
-                    .also { list ->
-                        if (list.isNotEmpty()) {
-                            vibeCachePrefs.edit()
-                                .putString(vibeCacheKey, homeGson.toJson(list))
-                                .putLong("${vibeCacheKey}_time", System.currentTimeMillis())
-                                .apply()
-                        }
-                    }
-            } catch (_: Exception) {
-                emptyList()
-            }
-        }
-        val vibeSongs = vibeSourceSongs.take(10).mapIndexed { index, item ->
-            com.vinmusic.recommendation.RecommendedSong(
-                videoItem = item,
-                score = (90 - index).toDouble(),
-                source = "sunset_energy",
-                reason = "Sunset energy"
-            )
-        }
-        if (vibeSongs.isNotEmpty()) {
-            sections.add("Sunset Vibe & Energy" to vibeSongs)
         }
 
         return sections
@@ -863,7 +810,8 @@ fun HomeScreen(
             vm          = vm,
             onBack      = { selectedArtist = null },
             onSongClick = onSongClick,
-            onAlbumClick = onAlbumClick
+            onAlbumClick = onAlbumClick,
+            onArtistClick = { selectedArtist = it }
         )
         return
     }
@@ -1062,9 +1010,11 @@ fun HomeScreen(
             try {
                 val cachePrefs = ctx.getSharedPreferences("suggested_artists_cache", Context.MODE_PRIVATE)
                 val cachedJson = cachePrefs.getString("artists_json_v3", null)
+                val cacheTime = cachePrefs.getLong("cache_time_v3", 0L)
                 val now = System.currentTimeMillis()
-                
-                if (cachedJson != null) {
+                val cacheExpirationMs = 30 * 60 * 1000L // 30 minutes refresh
+
+                if (cachedJson != null && (now - cacheTime) < cacheExpirationMs) {
                     val type = object : com.google.gson.reflect.TypeToken<List<com.vinmusic.innertube.ArtistItem>>() {}.type
                     val list: List<com.vinmusic.innertube.ArtistItem> = com.google.gson.Gson().fromJson(cachedJson, type)
                     if (list.isNotEmpty()) {
@@ -1082,78 +1032,110 @@ fun HomeScreen(
                 val listenedArtists = (historyList.map { it.author.trim() } + interactionSignals.map { it.author.trim() })
                     .filter { it.isNotBlank() && it.lowercase() != "unknown" && !com.vinmusic.recommendation.RecommendationManager.isCorporateOrDistributorChannel(it) }
                     .distinct()
+                    .shuffled() // Shuffle listened artists so suggestions refresh dynamically
 
                 val cleanListened = listenedArtists.map { normalizeArtistName(it) }.filter { it.isNotEmpty() }.toSet()
                 val artistNames = ArrayList<String>()
+                val firestoreRecManager = com.vinmusic.recommendation.FirestoreRecommendationManager()
 
                 if (cleanListened.size < 5) {
-                    // Cold-start/Variety Phase: Recommend a highly diverse list of fallback premium artists, excluding the ones they've already heard!
-                    val fallbackList = listOf(
-                        "Arijit Singh", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh",
-                        "The Weeknd", "Drake", "Anuv Jain", "Travis Scott",
-                        "Kendrick Lamar", "J. Cole", "Seedhe Maut", "King",
-                        "SZA", "Frank Ocean", "Prateek Kuhad", "AP Dhillon"
-                    )
-                    for (art in fallbackList) {
-                        if (artistNames.size >= 16) break
-                        val normFallback = normalizeArtistName(art)
-                        if (!cleanListened.contains(normFallback)) {
-                            artistNames.add(art)
-                        }
-                    }
-                } else {
-                    // Warm-start Discovery Phase: Suggest SIMILAR artists that they haven't listened to yet!
-                    val topListened = listenedArtists.take(16)
-                    for (artName in topListened) {
-                        val normArt = normalizeArtistName(artName)
-                        var similar: List<String>? = null
-                        for ((key, value) in SIMILAR_ARTISTS_MAP) {
-                            if (normalizeArtistName(key) == normArt) {
-                                similar = value
-                                break
-                            }
-                        }
-                        if (similar != null) {
-                            for (simArt in similar) {
+                    // Cold-start/Variety Phase: Use Last.fm similar artists
+                    for (artName in listenedArtists.take(5)) {
+                        try {
+                            val lastFmSimilar = firestoreRecManager.fetchSimilarArtists(artName)
+                            for (simArt in lastFmSimilar) {
                                 if (artistNames.size >= 16) break
                                 val normSim = normalizeArtistName(simArt)
                                 if (!cleanListened.contains(normSim) && !artistNames.map { normalizeArtistName(it) }.contains(normSim)) {
                                     artistNames.add(simArt)
                                 }
                             }
+                        } catch (_: Exception) {
+                            // Fallback to hardcoded map if Last.fm fails
+                            val normArt = normalizeArtistName(artName)
+                            for ((key, value) in SIMILAR_ARTISTS_FALLBACK) {
+                                if (normalizeArtistName(key) == normArt) {
+                                    for (simArt in value) {
+                                        if (artistNames.size >= 16) break
+                                        val normSim = normalizeArtistName(simArt)
+                                        if (!cleanListened.contains(normSim) && !artistNames.map { normalizeArtistName(it) }.contains(normSim)) {
+                                            artistNames.add(simArt)
+                                        }
+                                    }
+                                    break
+                                }
+                            }
                         }
                     }
-                }
 
-                // Fill remaining spots with premium default artists they haven't listened to
-                val fallbackList = listOf(
-                    "Arijit Singh", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh",
-                    "The Weeknd", "Drake", "Anuv Jain", "Travis Scott",
-                    "Kendrick Lamar", "J. Cole", "Seedhe Maut", "King",
-                    "SZA", "Frank Ocean", "Prateek Kuhad", "AP Dhillon"
-                )
-                for (art in fallbackList) {
-                    if (artistNames.size >= 16) break
-                    val normFallback = normalizeArtistName(art)
-                    if (!cleanListened.contains(normFallback) && !artistNames.map { normalizeArtistName(it) }.contains(normFallback)) {
-                        artistNames.add(art)
+                    // Fill with diverse top quality fallback artists if still need more
+                    val fallbackList = listOf(
+                        "Arijit Singh", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh",
+                        "The Weeknd", "Drake", "Anuv Jain", "Travis Scott",
+                        "Kendrick Lamar", "J. Cole", "Seedhe Maut", "King",
+                        "SZA", "Frank Ocean", "Prateek Kuhad", "AP Dhillon",
+                        "DIVINE", "Talha Anjum", "KR\$NA", "Raftaar"
+                    ).shuffled()
+                    for (art in fallbackList) {
+                        if (artistNames.size >= 16) break
+                        val normFallback = normalizeArtistName(art)
+                        if (!cleanListened.contains(normFallback) && !artistNames.map { normalizeArtistName(it) }.contains(normFallback)) {
+                            artistNames.add(art)
+                        }
+                    }
+                } else {
+                    // Warm-start Discovery Phase: Use Last.fm similar artists
+                    val topListened = listenedArtists.take(16)
+                    for (artName in topListened) {
+                        try {
+                            val lastFmSimilar = firestoreRecManager.fetchSimilarArtists(artName)
+                            for (simArt in lastFmSimilar) {
+                                if (artistNames.size >= 16) break
+                                val normSim = normalizeArtistName(simArt)
+                                if (!cleanListened.contains(normSim) && !artistNames.map { normalizeArtistName(it) }.contains(normSim)) {
+                                    artistNames.add(simArt)
+                                }
+                            }
+                        } catch (_: Exception) {
+                            // Fallback to hardcoded map if Last.fm fails
+                            val normArt = normalizeArtistName(artName)
+                            var similar: List<String>? = null
+                            for ((key, value) in SIMILAR_ARTISTS_FALLBACK) {
+                                if (normalizeArtistName(key) == normArt) {
+                                    similar = value
+                                    break
+                                }
+                            }
+                            if (similar != null) {
+                                for (simArt in similar) {
+                                    if (artistNames.size >= 16) break
+                                    val normSim = normalizeArtistName(simArt)
+                                    if (!cleanListened.contains(normSim) && !artistNames.map { normalizeArtistName(it) }.contains(normSim)) {
+                                        artistNames.add(simArt)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 
                 coroutineScope {
+                    val semaphore = kotlinx.coroutines.sync.Semaphore(4) // Max 4 concurrent requests
                     val deferreds = artistNames.map { name ->
                         async(Dispatchers.IO) {
+                            semaphore.acquire()
                             try {
                                 val searchRes = InnerTube.searchAll(name)
                                 searchRes.artists.firstOrNull { artist ->
                                     artist.name.lowercase().contains(name.lowercase()) || name.lowercase().contains(artist.name.lowercase())
                                 } ?: searchRes.artists.firstOrNull()
-                            } catch (_: Exception) { null }
+                            } catch (_: Exception) { null } finally { semaphore.release() }
                         }
                     }
                     val resolved = deferreds.awaitAll()
                         .filterNotNull()
                         .distinctBy { normalizeArtistName(it.name) }
+                        .shuffled()
                         .take(16)
                     if (resolved.isNotEmpty()) {
                         cachePrefs.edit()
@@ -1232,6 +1214,7 @@ fun HomeScreen(
                         "Focus"    -> "focus deep work concentration lofi"
                         "Workout" -> "workout gym motivation power"
                         "Party"   -> "party dance club hits"
+                        "Long Listens" -> "1 hour nonstop mix playlist"
                         else          -> filter.filter { it.isLetter() || it.isWhitespace() }.trim().lowercase()
                     }
                     val moodLabel = filter.filter { it.isLetter() || it.isWhitespace() }.trim()
@@ -1450,15 +1433,18 @@ fun HomeScreen(
     }
 
     // ── Long Listens (45min+ extended mixes & albums)
-    // ── Long Listens (45min+ extended mixes & albums) with Local Cache ──
+    // ── Long Listens (45min+ extended mixes & albums) with Dynamic Queries ──
     LaunchedEffect(Unit) {
         scope.launch(Dispatchers.IO) {
             try {
                 val cachePrefs = ctx.getSharedPreferences("long_listens_cache", Context.MODE_PRIVATE)
                 val cachedJson = cachePrefs.getString("songs_json", null)
+                val cacheTime = cachePrefs.getLong("cache_time", 0L)
                 val now = System.currentTimeMillis()
-                
-                if (cachedJson != null) {
+                val cacheExpirationMs = 6 * 60 * 60 * 1000L // 6 hours
+
+                // Use cache only if fresh
+                if (cachedJson != null && (now - cacheTime) < cacheExpirationMs) {
                     val type = object : com.google.gson.reflect.TypeToken<List<VideoItem>>() {}.type
                     val list: List<VideoItem> = com.google.gson.Gson().fromJson(cachedJson, type)
                     if (list.isNotEmpty()) {
@@ -1469,16 +1455,34 @@ fun HomeScreen(
                         return@launch
                     }
                 }
-                
+
                 isLoadingLongListens = true
+
+                // Build dynamic queries based on user's top genres
+                val signals = try { db.interactionSignalDao().getAll() } catch (_: Exception) { emptyList() }
+                val topGenres = signals.map { it.author.trim() }
+                    .groupBy { it }
+                    .entries.sortedByDescending { it.value.size }
+                    .take(3)
+                    .map { it.key }
+
                 val results = mutableListOf<VideoItem>()
-                val longQueries = listOf(
-                    "1 hour hindi songs nonstop mix",
-                    "2 hour bollywood hits playlist",
+                val longQueries = mutableListOf<String>()
+
+                // Add queries based on user's top artists/genres
+                for (artist in topGenres.take(2)) {
+                    longQueries.add("$artist extended mix long")
+                    longQueries.add("$artist nonstop mix 1 hour")
+                }
+
+                // Add genre-based queries
+                val genreQueries = listOf(
                     "long lofi beats study 3 hours",
-                    "90 minutes workout music mix"
+                    "extended mix nonstop hits 2025",
+                    "1 hour music mix playlist"
                 )
-                
+                longQueries.addAll(genreQueries.shuffled().take(2))
+
                 coroutineScope {
                     val deferreds = longQueries.map { q ->
                         async(Dispatchers.IO) {
@@ -1841,12 +1845,6 @@ fun HomeScreen(
                         }
                     }
                 }
-            }
-
-            // ── "Vibe of the Day" Lyrics Capsule ──
-            item {
-                VibeOfTheDayCapsule(ctx, db)
-                Spacer(Modifier.height(14.dp))
             }
 
             // ── Premium Capsule Filter Chips ───────────────────────────────────────
@@ -2276,28 +2274,6 @@ fun HomeScreen(
                         }
                     }
                 }
-
-                // 5. Long Listens (Extended mixes & albums 45min+)
-                if (longListens.isNotEmpty()) {
-                    item {
-                        SectionTitle("Long Listens")
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "Extended mixes & albums over 45 minutes",
-                            fontSize = 12.sp,
-                            color = VinColors.Secondary,
-                            modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
-                        )
-                    }
-                    items(longListens.take(8), key = { it.videoId }) { song ->
-                        SongListItem(
-                            song = song,
-                            isPlaying = vm.currentSong?.videoId == song.videoId,
-                            onClick = { onSongClick(song, longListens) },
-                            onMore = { onSongMore(song) }
-                        )
-                    }
-                }
             }
             "For You" -> {
                 // Your personal YT Music Playlists
@@ -2619,18 +2595,12 @@ fun HomeScreen(
                                     ) { rapSubFilter = sub.name }
                                     .padding(horizontal = 16.dp, vertical = 8.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(sub.icon, fontSize = 14.sp)
-                                    Text(
-                                        text = sub.name,
-                                        fontSize = 13.sp,
-                                        color = if (active) Color.White else Color.White.copy(alpha = 0.7f),
-                                        fontWeight = if (active) FontWeight.ExtraBold else FontWeight.SemiBold
-                                    )
-                                }
+                                Text(
+                                    text = sub.name,
+                                    fontSize = 13.sp,
+                                    color = if (active) Color.White else Color.White.copy(alpha = 0.7f),
+                                    fontWeight = if (active) FontWeight.ExtraBold else FontWeight.SemiBold
+                                )
                             }
                         }
                     }
@@ -2681,8 +2651,48 @@ fun HomeScreen(
                 }
             }
             else -> {
+                // ── Long Listens special case ──
+                if (filter == "Long Listens") {
+                    if (longListens.isNotEmpty()) {
+                        item {
+                            SectionTitle("Long Listens")
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Extended mixes & albums over 45 minutes",
+                                fontSize = 12.sp,
+                                color = VinColors.Secondary,
+                                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
+                            )
+                        }
+                        items(longListens, key = { it.videoId }) { song ->
+                            SongListItem(
+                                song = song,
+                                isPlaying = vm.currentSong?.videoId == song.videoId,
+                                onClick = { onSongClick(song, longListens) },
+                                onMore = { onSongMore(song) }
+                            )
+                        }
+                    } else if (isLoadingLongListens) {
+                        item {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().height(200.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(36.dp))
+                                    Text("Loading long mixes...", color = VinColors.Secondary, fontSize = 13.sp)
+                                }
+                            }
+                        }
+                    } else {
+                        item { EmptyScreenState("No long listens found. Try again later.") }
+                    }
+                }
                 // ── Mood & Genre Sections (artist-specific + generic mood playlists)
-                if ((isMoodLoading || isCategoryLoading) && moodSections.isEmpty() && categoryPlaylists.isEmpty()) {
+                else if ((isMoodLoading || isCategoryLoading) && moodSections.isEmpty() && categoryPlaylists.isEmpty()) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().height(300.dp),
@@ -2759,12 +2769,56 @@ fun HomeScreen(
     } // end PullToRefreshBox
     } // end Box background aura
 
+    val photoPickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri: android.net.Uri? ->
+        if (uri != null) {
+            try {
+                val file = java.io.File(ctx.filesDir, "user_custom_avatar.jpg")
+                ctx.contentResolver.openInputStream(uri)?.use { input ->
+                    file.outputStream().use { output -> input.copyTo(output) }
+                }
+                prefs.edit().putString("custom_profile_image_path", file.absolutePath).apply()
+            } catch (e: Exception) {
+                Log.e("HomeScreen", "Failed to save custom profile image: ${e.message}")
+            }
+        }
+    }
+
     if (showProfileDialog) {
+        val hasCustomPhoto = remember(prefs.getString("custom_profile_image_path", null)) {
+            prefs.getString("custom_profile_image_path", null)?.let { java.io.File(it).exists() } == true
+        }
+
         AlertDialog(
             onDismissRequest = { showProfileDialog = false },
-            title = { Text("Edit Profile Name", color = VinColors.Primary) },
+            title = { Text("Edit Profile", color = VinColors.Primary) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    UserAvatar(avatarIndex = avatarIndex, size = 64.dp, name = editName)
+                    
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { photoPickerLauncher.launch("image/*") },
+                            colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent, contentColor = Color.White),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Change Photo", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                        if (hasCustomPhoto) {
+                            OutlinedButton(
+                                onClick = {
+                                    prefs.edit().remove("custom_profile_image_path").apply()
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Red)
+                            ) {
+                                Text("Remove", fontSize = 12.sp)
+                            }
+                        }
+                    }
+
                     OutlinedTextField(
                         value = editName,
                         onValueChange = { editName = it },
@@ -2775,7 +2829,8 @@ fun HomeScreen(
                             focusedTextColor = VinColors.Primary, unfocusedTextColor = VinColors.Primary,
                             focusedContainerColor = VinColors.White10, unfocusedContainerColor = VinColors.White10
                         ),
-                        shape = RoundedCornerShape(12.dp)
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             },
@@ -3672,14 +3727,13 @@ private suspend fun loadRapSubSections(
 
 @Composable
 private fun SectionTitle(text: String) {
-    Row(
+    Text(
+        text,
         modifier = Modifier.padding(horizontal = 20.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(Modifier.size(5.dp, 20.dp).clip(RoundedCornerShape(2.dp)).background(VinColors.Accent))
-        Spacer(Modifier.width(8.dp))
-        Text(text, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, color = VinColors.Primary)
-    }
+        fontSize = 22.sp,
+        fontWeight = FontWeight.ExtraBold,
+        color = VinColors.Primary
+    )
 }
 
 @Composable
@@ -4214,7 +4268,7 @@ fun RecommendedPlaylistCard(playlist: com.vinmusic.innertube.AlbumItem, modifier
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            text = playlist.title,
+            text = playlist.title.orEmpty(),
             color = Color.White,
             fontSize = 14.sp,
             fontWeight = FontWeight.Medium,
@@ -4222,7 +4276,7 @@ fun RecommendedPlaylistCard(playlist: com.vinmusic.innertube.AlbumItem, modifier
             overflow = TextOverflow.Ellipsis
         )
         Text(
-            text = playlist.author,
+            text = playlist.author.orEmpty(),
             color = Color.Gray,
             fontSize = 12.sp,
             maxLines = 1,

@@ -1825,8 +1825,13 @@ object InnerTube {
                     m["channelRenderer"]?.let { c ->
                         val cr   = c as? Map<*, *> ?: return@let
                         val id   = cr["channelId"] as? String ?: return@let
-                        val name = (cr["title"] as? Map<*, *>)?.get("simpleText") as? String ?: return@let
-                        val subs = (cr["subscriberCountText"] as? Map<*, *>)?.get("simpleText") as? String ?: ""
+                        val name = ((cr["title"] as? Map<*, *>)?.get("simpleText") as? String)
+                            ?: ((cr["title"] as? Map<*, *>)?.get("runs") as? List<*>)
+                                ?.firstOrNull()?.let { (it as? Map<*, *>)?.get("text") as? String }
+                            ?: return@let
+                        val subs = ((cr["subscriberCountText"] as? Map<*, *>)?.get("simpleText") as? String)
+                            ?: ((cr["subscriberCountText"] as? Map<*, *>)?.get("runs") as? List<*>)
+                                ?.firstOrNull()?.let { (it as? Map<*, *>)?.get("text") as? String } ?: ""
                         val thumb = ((cr["thumbnail"] as? Map<*, *>)?.get("thumbnails") as? List<*>)
                             ?.lastOrNull()?.let { (it as? Map<*, *>)?.get("url") as? String }
                             ?.let {
@@ -1858,7 +1863,20 @@ object InnerTube {
                     }
                 }
             }
-            val finalResults = AllSearchResults(songs, videos.distinctBy { it.videoId }.take(30), artists, albums)
+
+            // Enrich artist list with direct YTM search artists if empty or missing exact query match
+            val cleanQuery = query.trim().lowercase()
+            val hasExactArtist = artists.any { it.name.lowercase().contains(cleanQuery) }
+            if (!hasExactArtist) {
+                val ytmArtistId = resolveArtistChannelId(query)
+                if (ytmArtistId.isNotBlank() && artists.none { it.channelId == ytmArtistId }) {
+                    val cd = fetchChannelData(ytmArtistId, query)
+                    val artThumb = cd.avatarUrl.ifEmpty { cd.bannerUrl }
+                    artists.add(0, ArtistItem(ytmArtistId, cd.title.ifEmpty { query }, artThumb, cd.subscriberCount))
+                }
+            }
+
+            val finalResults = AllSearchResults(songs, videos.distinctBy { it.videoId }.take(30), artists.distinctBy { it.channelId }, albums)
             searchAllCache.put(query, Pair(System.currentTimeMillis(), finalResults))
             finalResults
         } catch (e: Exception) { AllSearchResults() }
@@ -1874,21 +1892,309 @@ object InnerTube {
     // ── Channel browse (artist banner + bio) ─────────────────────────────────
     data class ChannelData(val bannerUrl: String = "", val bio: String = "", val subscriberCount: String = "", val title: String = "", val avatarUrl: String = "")
 
-    fun fetchChannelData(channelId: String): ChannelData {
-        if (channelId.isBlank()) return ChannelData()
-        val body = mapOf("browseId" to channelId,
-            "context" to mapOf("client" to mapOf("clientName" to "WEB",
-                "clientVersion" to "2.20231219.04.00", "hl" to "en", "gl" to "IN")))
-        val raw = try {
-            http.newCall(Request.Builder().url("$BASE/browse?prettyPrint=false")
-                .post(gson.toJson(body).toRequestBody(JSON))
-                .header("Content-Type", "application/json").header("User-Agent", "Mozilla/5.0")
-                .build()).execute().use { it.body?.string() }
-        } catch (e: Exception) { null } ?: return ChannelData()
+    private val channelDataCache = android.util.LruCache<String, Pair<Long, ChannelData>>(30)
+    private val resolveArtistCache = android.util.LruCache<String, Pair<Long, String>>(50)
+
+    fun fetchChannelData(channelIdInput: String, artistNameFallback: String = ""): ChannelData {
+        var activeChannelId = channelIdInput.trim()
+        android.util.Log.d("VinArtistDebug", "fetchChannelData called: channelId='$activeChannelId' fallback='$artistNameFallback'")
+
+        // 0. If channelId is missing, resolve it from YTM search by artist name
+        if (activeChannelId.isBlank() && artistNameFallback.isNotBlank()) {
+            activeChannelId = resolveArtistChannelId(artistNameFallback)
+            android.util.Log.d("VinArtistDebug", "resolveArtistChannelId returned: '$activeChannelId'")
+        }
+
+        // Check cache (10 min TTL)
+        val cacheKey = activeChannelId.ifBlank { artistNameFallback }.lowercase()
+        val cached = channelDataCache.get(cacheKey)
+        if (cached != null && System.currentTimeMillis() - cached.first < 600_000) {
+            android.util.Log.d("VinArtistDebug", "fetchChannelData CACHE HIT for '$cacheKey'")
+            return cached.second
+        }
+
+        var banner = ""
+        var avatar = ""
+        var subs = ""
+        var title = ""
+        var bio = ""
+
+        if (activeChannelId.isNotBlank()) {
+            // Fetch WEB + WEB_REMIX in PARALLEL for speed
+            val webBody = mapOf(
+                "browseId" to activeChannelId,
+                "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to "2.20231219.04.00", "hl" to "en", "gl" to "IN"))
+            )
+            val ytmBody = mapOf(
+                "browseId" to activeChannelId,
+                "context" to mapOf("client" to mapOf("clientName" to "WEB_REMIX", "clientVersion" to "1.20231218.01.00", "hl" to "en", "gl" to "IN"))
+            )
+
+            var webParsed: ChannelData? = null
+            var ytmParsed: ChannelData? = null
+
+            val webThread = Thread {
+                try {
+                    val raw = http.newCall(Request.Builder()
+                        .url("$BASE/browse?prettyPrint=false")
+                        .post(gson.toJson(webBody).toRequestBody(JSON))
+                        .header("Content-Type", "application/json")
+                        .header("User-Agent", "Mozilla/5.0")
+                        .build()
+                    ).execute().use { it.body?.string() }
+                    if (raw != null) webParsed = parseChannelDataJson(raw)
+                } catch (e: Exception) { android.util.Log.e("VinArtistDebug", "WEB error: ${e.message}") }
+            }
+            val ytmThread = Thread {
+                try {
+                    val rawYtm = http.newCall(Request.Builder()
+                        .url("https://music.youtube.com/youtubei/v1/browse?prettyPrint=false")
+                        .post(gson.toJson(ytmBody).toRequestBody(JSON))
+                        .header("Content-Type", "application/json")
+                        .header("User-Agent", "Mozilla/5.0")
+                        .build()
+                    ).execute().use { it.body?.string() }
+                    if (rawYtm != null) ytmParsed = parseYtmChannelDataJson(rawYtm)
+                } catch (e: Exception) { android.util.Log.e("VinArtistDebug", "YTM error: ${e.message}") }
+            }
+
+            webThread.start()
+            ytmThread.start()
+            webThread.join()
+            ytmThread.join()
+
+            // Merge: start with WEB data, then override with YTM (better banners)
+            webParsed?.let {
+                banner = it.bannerUrl; avatar = it.avatarUrl; subs = it.subscriberCount; title = it.title; bio = it.bio
+                android.util.Log.d("VinArtistDebug", "WEB: banner='${banner.take(60)}' avatar='${avatar.take(60)}' title='$title'")
+            }
+            val isTopicChannel = title.contains("- Topic", ignoreCase = true)
+            ytmParsed?.let { ytm ->
+                android.util.Log.d("VinArtistDebug", "YTM: banner='${ytm.bannerUrl.take(60)}' avatar='${ytm.avatarUrl.take(60)}' title='${ytm.title}'")
+                if (ytm.bannerUrl.isNotBlank()) banner = ytm.bannerUrl
+                if (ytm.avatarUrl.isNotBlank()) avatar = ytm.avatarUrl
+                if (subs.isBlank() || isTopicChannel) subs = ytm.subscriberCount.ifBlank { subs }
+                if (title.isBlank() || isTopicChannel) title = ytm.title.ifBlank { title }
+                if (bio.isBlank()) bio = ytm.bio
+            }
+        }
+
+        // 3. Fallbacks: cross-assign banner/avatar if one is missing
+        if (avatar.isBlank() && banner.isNotBlank()) avatar = banner
+        if (banner.isBlank() && avatar.isNotBlank()) banner = avatar
+
+        val finalTitle = title.ifBlank { artistNameFallback }
+
+        // Fetch real artist bio from Wikipedia if missing or generic
+        var finalBio = bio
+        if (finalTitle.isNotEmpty()) {
+            val wikiBio = fetchArtistBio(finalTitle)
+            if (wikiBio.isNotEmpty()) {
+                finalBio = wikiBio
+            } else if (finalBio.contains("Subscribe", ignoreCase = true) || finalBio.contains("Official Channel", ignoreCase = true)) {
+                val cleanTitle = finalTitle.replace("- Topic", "").replace("VEVO", "", ignoreCase = true).trim()
+                val cleanWikiBio = fetchArtistBio(cleanTitle)
+                if (cleanWikiBio.isNotEmpty()) {
+                    finalBio = cleanWikiBio
+                }
+            }
+        }
+
+        val result = ChannelData(bannerUrl = banner, bio = finalBio, subscriberCount = subs, title = finalTitle, avatarUrl = avatar)
+        channelDataCache.put(cacheKey, Pair(System.currentTimeMillis(), result))
+        return result
+    }
+
+    private fun resolveArtistChannelId(artistName: String): String {
+        android.util.Log.d("VinArtistDebug", "resolveArtistChannelId called: '$artistName'")
+        // Check cache (5 min TTL)
+        val cacheKey = artistName.replace(".", "").trim().lowercase()
+        val cached = resolveArtistCache.get(cacheKey)
+        if (cached != null && System.currentTimeMillis() - cached.first < 300_000) {
+            android.util.Log.d("VinArtistDebug", "resolveArtistChannelId CACHE HIT: '${cached.second}'")
+            return cached.second
+        }
         return try {
+            val cleanName = artistName.replace("- Topic", "", ignoreCase = true).replace("VEVO", "", ignoreCase = true).replace(".", "").trim().lowercase()
+            android.util.Log.d("VinArtistDebug", "cleanName='$cleanName'")
+
+            var exactId = ""
+            var partialId = ""
+
+            fun checkCandidate(title: String, browseId: String, pageType: String) {
+                val cleanTitle = title.replace(".", "").trim().lowercase()
+                android.util.Log.d("VinArtistDebug", "candidate: cleanTitle='$cleanTitle' browseId='$browseId' pageType='$pageType'")
+                if (cleanTitle == cleanName && exactId.isEmpty()) {
+                    exactId = browseId
+                    android.util.Log.d("VinArtistDebug", "EXACT match: '$cleanTitle' == '$cleanName' -> $browseId")
+                } else if ((cleanTitle.contains(cleanName) || cleanName.contains(cleanTitle)) && cleanTitle.isNotBlank() && partialId.isEmpty()) {
+                    partialId = browseId
+                    android.util.Log.d("VinArtistDebug", "PARTIAL match: '$cleanTitle' <-> '$cleanName' -> $browseId")
+                }
+            }
+
+            fun isArtistPageType(pageType: String): Boolean =
+                pageType == "MUSIC_PAGE_TYPE_ARTIST" || pageType == "MUSIC_PAGE_TYPE_USER_CHANNEL"
+
+            fun extractPageType(nav: Map<*, *>?): String =
+                (((nav?.get("browseEndpointContextSupportedConfigs") as? Map<*, *>)
+                    ?.get("browseEndpointContextMusicConfig") as? Map<*, *>)?.get("pageType") as? String) ?: ""
+
+            fun scanForArtistId(node: Any?) {
+                when (node) {
+                    is Map<*, *> -> {
+                        // 1. Standard list items (related artists in search results)
+                        val item = node["musicResponsiveListItemRenderer"] as? Map<*, *>
+                        if (item != null) {
+                            val nav = ((item["navigationEndpoint"] as? Map<*, *>)?.get("browseEndpoint") as? Map<*, *>)
+                            val pageType = extractPageType(nav)
+                            if (isArtistPageType(pageType)) {
+                                val flex = item["flexColumns"] as? List<*>
+                                val title = flex?.firstOrNull()?.let {
+                                    ((((it as? Map<*, *>)?.get("musicResponsiveListItemFlexColumnRenderer") as? Map<*, *>)
+                                        ?.get("text") as? Map<*, *>)?.get("runs") as? List<*>)
+                                        ?.firstOrNull()?.let { (it as? Map<*, *>)?.get("text") as? String }
+                                } ?: ""
+                                val browseId = (nav?.get("browseId") as? String) ?: ""
+                                checkCandidate(title, browseId, pageType)
+                            }
+                        }
+
+                        // 2. Top Result card (musicCardShelfRenderer) — this is where the searched artist usually appears
+                        val cardShelf = node["musicCardShelfRenderer"] as? Map<*, *>
+                        if (cardShelf != null) {
+                            val cardTitle = ((cardShelf["title"] as? Map<*, *>)?.get("runs") as? List<*>)
+                                ?.firstOrNull()?.let { (it as? Map<*, *>)?.get("text") as? String } ?: ""
+                            val cardNav = ((cardShelf["title"] as? Map<*, *>)?.get("runs") as? List<*>)
+                                ?.firstOrNull()?.let {
+                                    ((it as? Map<*, *>)?.get("navigationEndpoint") as? Map<*, *>)?.get("browseEndpoint") as? Map<*, *>
+                                }
+                            val cardPageType = extractPageType(cardNav)
+                            val cardBrowseId = (cardNav?.get("browseId") as? String) ?: ""
+                            if (isArtistPageType(cardPageType) && cardBrowseId.isNotBlank()) {
+                                android.util.Log.d("VinArtistDebug", "TOP RESULT card: title='$cardTitle' browseId='$cardBrowseId' pageType='$cardPageType'")
+                                checkCandidate(cardTitle, cardBrowseId, cardPageType)
+                            }
+                            // Also check subtitle for artist page type
+                            val subtitleNav = (cardShelf["navigationEndpoint"] as? Map<*, *>)?.get("browseEndpoint") as? Map<*, *>
+                            val subtitlePageType = extractPageType(subtitleNav)
+                            val subtitleBrowseId = (subtitleNav?.get("browseId") as? String) ?: ""
+                            if (isArtistPageType(subtitlePageType) && subtitleBrowseId.isNotBlank() && cardBrowseId.isBlank()) {
+                                checkCandidate(cardTitle, subtitleBrowseId, subtitlePageType)
+                            }
+                        }
+
+                        // 3. Two-column item (another possible renderer)
+                        val twoCol = node["musicTwoColumnItemRenderer"] as? Map<*, *>
+                        if (twoCol != null) {
+                            val tTitle = ((twoCol["title"] as? Map<*, *>)?.get("runs") as? List<*>)
+                                ?.firstOrNull()?.let { (it as? Map<*, *>)?.get("text") as? String } ?: ""
+                            val tNav = ((twoCol["navigationEndpoint"] as? Map<*, *>)?.get("browseEndpoint") as? Map<*, *>)
+                            val tPageType = extractPageType(tNav)
+                            val tBrowseId = (tNav?.get("browseId") as? String) ?: ""
+                            if (isArtistPageType(tPageType) && tBrowseId.isNotBlank()) {
+                                checkCandidate(tTitle, tBrowseId, tPageType)
+                            }
+                        }
+
+                        node.values.forEach { scanForArtistId(it) }
+                    }
+                    is List<*> -> node.forEach { scanForArtistId(it) }
+                }
+            }
+
+            // First attempt: unfiltered search (picks up Top Result card)
+            val body = mapOf(
+                "query" to artistName,
+                "context" to mapOf("client" to mapOf("clientName" to "WEB_REMIX", "clientVersion" to "1.20231218.01.00", "hl" to "en", "gl" to "IN"))
+            )
+            val raw = http.newCall(Request.Builder()
+                .url("https://music.youtube.com/youtubei/v1/search?prettyPrint=false")
+                .post(gson.toJson(body).toRequestBody(JSON))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "Mozilla/5.0")
+                .build()
+            ).execute().use { it.body?.string() } ?: return ""
+
             val root = gson.fromJson(raw, Map::class.java)
-            val hdr  = (root["header"] as? Map<*, *>)?.get("c4TabbedHeaderRenderer") as? Map<*, *>
-                ?: (root["header"] as? Map<*, *>)?.get("interactiveTabbedHeaderRenderer") as? Map<*, *>
+            scanForArtistId(root)
+
+            // Second attempt: filtered artist search if nothing found yet
+            if (exactId.isEmpty() && partialId.isEmpty()) {
+                android.util.Log.d("VinArtistDebug", "Trying filtered artist search...")
+                val filteredBody = mapOf(
+                    "query" to artistName,
+                    "params" to "EgWKAQIIAWoKEAMQBBAKEAkQBQ%3D%3D",
+                    "context" to mapOf("client" to mapOf("clientName" to "WEB_REMIX", "clientVersion" to "1.20231218.01.00", "hl" to "en", "gl" to "IN"))
+                )
+                val filteredRaw = http.newCall(Request.Builder()
+                    .url("https://music.youtube.com/youtubei/v1/search?prettyPrint=false")
+                    .post(gson.toJson(filteredBody).toRequestBody(JSON))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", "Mozilla/5.0")
+                    .build()
+                ).execute().use { it.body?.string() }
+
+                if (filteredRaw != null) {
+                    val filteredRoot = gson.fromJson(filteredRaw, Map::class.java)
+                    scanForArtistId(filteredRoot)
+                }
+            }
+
+            val result = exactId.ifEmpty { partialId }
+            android.util.Log.d("VinArtistDebug", "resolveArtistChannelId result: '$result' (exact='$exactId' partial='$partialId')")
+            resolveArtistCache.put(cacheKey, Pair(System.currentTimeMillis(), result))
+            result
+        } catch (e: Exception) { android.util.Log.e("VinArtistDebug", "resolveArtistChannelId error: ${e.message}"); "" }
+    }
+
+    private fun parseChannelDataJson(rawJson: String): ChannelData {
+        return try {
+            val root = gson.fromJson(rawJson, Map::class.java)
+            val header = root["header"] as? Map<*, *> ?: emptyMap<String, Any>()
+
+            var banner = ""
+            var avatar = ""
+            var subs = ""
+            var title = ((root["metadata"] as? Map<*, *>)
+                ?.get("channelMetadataRenderer") as? Map<*, *>)?.get("title") as? String ?: ""
+            var bio = ((root["metadata"] as? Map<*, *>)
+                ?.get("channelMetadataRenderer") as? Map<*, *>)?.get("description") as? String ?: ""
+
+            // 1. YouTube's New pageHeaderRenderer / pageHeaderViewModel
+            val pageHeaderViewModel = ((header["pageHeaderRenderer"] as? Map<*, *>)
+                ?.get("content") as? Map<*, *>)
+                ?.get("pageHeaderViewModel") as? Map<*, *>
+
+            if (pageHeaderViewModel != null) {
+                // Banner
+                val bannerSources = (((pageHeaderViewModel["banner"] as? Map<*, *>)
+                    ?.get("imageBannerViewModel") as? Map<*, *>)
+                    ?.get("image") as? Map<*, *>)
+                    ?.get("sources") as? List<*>
+                banner = bannerSources?.lastOrNull()?.let { (it as? Map<*, *>)?.get("url") as? String } ?: ""
+
+                // Avatar
+                val avatarSources = (((((pageHeaderViewModel["image"] as? Map<*, *>)
+                    ?.get("decoratedAvatarViewModel") as? Map<*, *>)
+                    ?.get("avatar") as? Map<*, *>)
+                    ?.get("avatarViewModel") as? Map<*, *>)
+                    ?.get("image") as? Map<*, *>)
+                    ?.get("sources") as? List<*>
+                avatar = avatarSources?.lastOrNull()?.let { (it as? Map<*, *>)?.get("url") as? String } ?: ""
+
+                // Title fallback
+                if (title.isBlank()) {
+                    title = (((pageHeaderViewModel["title"] as? Map<*, *>)
+                        ?.get("dynamicTextViewModel") as? Map<*, *>)
+                        ?.get("text") as? Map<*, *>)
+                        ?.get("content") as? String ?: ""
+                }
+            }
+
+            // 2. Legacy headers fallback (c4TabbedHeaderRenderer, interactiveTabbedHeaderRenderer)
+            val hdr = (header["c4TabbedHeaderRenderer"] as? Map<*, *>)
+                ?: (header["interactiveTabbedHeaderRenderer"] as? Map<*, *>)
 
             fun extractUrl(node: Map<*, *>?, key: String): String {
                 val thumbnails = (node?.get(key) as? Map<*, *>)?.get("thumbnails") as? List<*>
@@ -1901,44 +2207,69 @@ object InnerTube {
                     } ?: ""
             }
 
-            var banner = extractUrl(hdr, "banner")
-            if (banner.isBlank()) {
-                banner = extractUrl(hdr, "cover")
-            }
-            if (banner.isBlank()) {
-                val topLevelHeader = root["header"] as? Map<*, *>
-                banner = extractUrl(topLevelHeader, "banner")
-            }
-            if (banner.isBlank()) {
-                val musicImmersive = (root["header"] as? Map<*, *>)?.get("musicImmersiveHeaderRenderer") as? Map<*, *>
-                banner = extractUrl(musicImmersive, "banner")
-                if (banner.isBlank()) banner = extractUrl(musicImmersive, "background")
+            if (banner.isBlank()) banner = extractUrl(hdr, "banner")
+            if (banner.isBlank()) banner = extractUrl(hdr, "cover")
+            if (banner.isBlank()) banner = extractUrl(header, "banner")
+
+            if (avatar.isBlank()) avatar = extractUrl(hdr, "avatar")
+            if (subs.isBlank()) subs = (hdr?.get("subscriberCountText") as? Map<*, *>)?.get("simpleText") as? String ?: ""
+
+            ChannelData(bannerUrl = banner, bio = bio, subscriberCount = subs, title = title, avatarUrl = avatar)
+        } catch (e: Exception) {
+            ChannelData()
+        }
+    }
+
+    private fun parseYtmChannelDataJson(rawJson: String): ChannelData {
+        return try {
+            val root = gson.fromJson(rawJson, Map::class.java)
+            val header = root["header"] as? Map<*, *> ?: emptyMap<String, Any>()
+
+            val mihr = (header["musicImmersiveHeaderRenderer"] as? Map<*, *>)
+                ?: (header["musicVisualHeaderRenderer"] as? Map<*, *>)
+                ?: (header["musicHeaderRenderer"] as? Map<*, *>)
+
+            if (mihr == null) return ChannelData()
+
+            val titleRuns = (mihr["title"] as? Map<*, *>)?.get("runs") as? List<*>
+            val title = titleRuns?.firstOrNull()?.let { (it as? Map<*, *>)?.get("text") as? String } ?: ""
+
+            val subBtn = mihr["subscriptionButton"] as? Map<*, *>
+            val subRuns = (((subBtn?.get("subscribeButtonRenderer") as? Map<*, *>)
+                ?.get("subscriberCountText") as? Map<*, *>)?.get("runs") as? List<*>)
+            val subs = subRuns?.firstOrNull()?.let { (it as? Map<*, *>)?.get("text") as? String } ?: ""
+
+            fun extractUrl(node: Map<*, *>?): String {
+                val thumbnails = (node?.get("thumbnail") as? Map<*, *>)?.get("thumbnails") as? List<*>
+                return thumbnails?.lastOrNull()?.let { (it as? Map<*, *>)?.get("url") as? String } ?: ""
             }
 
-            val avatar = extractUrl(hdr, "avatar")
-            val subs = (hdr?.get("subscriberCountText") as? Map<*, *>)?.get("simpleText") as? String ?: ""
-            val title = ((root["metadata"] as? Map<*, *>)
-                ?.get("channelMetadataRenderer") as? Map<*, *>)?.get("title") as? String ?: ""
-            var bio  = ((root["metadata"] as? Map<*, *>)
-                ?.get("channelMetadataRenderer") as? Map<*, *>)?.get("description") as? String ?: ""
-            
-            // Attempt to fetch real artist bio from Wikipedia to replace generic YouTube channel descriptions (which users reported as "fake info")
-            if (title.isNotEmpty()) {
-                val wikiBio = fetchArtistBio(title)
-                if (wikiBio.isNotEmpty()) {
-                    bio = wikiBio
-                } else if (bio.contains("Subscribe", ignoreCase = true) || bio.contains("Official Channel", ignoreCase = true)) {
-                    // Try without "Topic" or "Vevo"
-                    val cleanTitle = title.replace("- Topic", "").replace("VEVO", "", ignoreCase = true).trim()
-                    val cleanWikiBio = fetchArtistBio(cleanTitle)
-                    if (cleanWikiBio.isNotEmpty()) {
-                        bio = cleanWikiBio
-                    }
-                }
-            }
+            val bNode = (mihr["thumbnail"] as? Map<*, *>)?.get("musicThumbnailRenderer") as? Map<*, *>
+            val banner = extractUrl(bNode)
 
-            ChannelData(banner, bio, subs, title, avatar)
+            val aNode = (mihr["foregroundThumbnail"] as? Map<*, *>)?.get("musicThumbnailRenderer") as? Map<*, *>
+            val avatar = extractUrl(aNode)
+
+            val bioRuns = (mihr["description"] as? Map<*, *>)?.get("runs") as? List<*>
+            val bio = bioRuns?.joinToString("") { (it as? Map<*, *>)?.get("text") as? String ?: "" } ?: ""
+
+            ChannelData(bannerUrl = banner, bio = bio, subscriberCount = subs, title = title, avatarUrl = avatar)
         } catch (e: Exception) { ChannelData() }
+    }
+
+    fun fetchDeezerArtistImage(artistName: String): String? {
+        if (artistName.isBlank()) return null
+        return try {
+            val cleanName = artistName.replace("- Topic", "", ignoreCase = true).replace("VEVO", "", ignoreCase = true).trim()
+            val url = "https://api.deezer.com/search/artist?q=${java.net.URLEncoder.encode(cleanName, "UTF-8")}"
+            val raw = http.newCall(Request.Builder().url(url).header("User-Agent", "Mozilla/5.0").build()).execute().use { it.body?.string() } ?: return null
+            val root = gson.fromJson(raw, Map::class.java)
+            val data = root["data"] as? List<*>
+            val first = data?.firstOrNull() as? Map<*, *>
+            val picXl = first?.get("picture_xl") as? String
+            val picBig = first?.get("picture_big") as? String
+            picXl?.ifBlank { null } ?: picBig?.ifBlank { null }
+        } catch (e: Exception) { null }
     }
 
     private fun fetchArtistBio(artistName: String): String {
@@ -2396,7 +2727,7 @@ class AlbumItem(
     thumbnail: String,
     val songCount: String = ""
 ) {
-    val thumbnail: String = if (thumbnail.startsWith("//")) "https:$thumbnail" else if (thumbnail.startsWith("http://")) thumbnail.replace("http://", "https://") else thumbnail
+    val thumbnail: String = thumbnail?.let { t -> if (t.startsWith("//")) "https:$t" else if (t.startsWith("http://")) t.replace("http://", "https://") else t } ?: ""
 
     operator fun component1() = playlistId
     operator fun component2() = title

@@ -16,6 +16,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.*
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -36,7 +37,8 @@ fun ArtistProfileScreen(
     vm: PlayerViewModel,
     onBack: () -> Unit,
     onSongClick: (VideoItem, List<VideoItem>) -> Unit,
-    onAlbumClick: (AlbumItem) -> Unit
+    onAlbumClick: (AlbumItem) -> Unit,
+    onArtistClick: ((ArtistItem) -> Unit)? = null
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
@@ -165,25 +167,14 @@ fun ArtistProfileScreen(
         }
     }
 
-    // Similar artists
-    LaunchedEffect("similar_${artist.name}") {
-        withContext(Dispatchers.IO) {
-            try {
-                val r = InnerTube.searchAll("artists like ${artist.name} music")
-                val result = r.artists.filter { it.channelId != artist.channelId }
-                    .distinctBy { it.channelId }.take(8)
-                withContext(Dispatchers.Main) { similar = result }
-            } catch (_: Exception) {}
-        }
-    }
+    // Similar artists (disabled)
 
     // Channel bio + banner + dynamic avatar
     var avatar by remember { mutableStateOf(artist.thumbnail) }
-    LaunchedEffect("channel_${artist.channelId}") {
-        if (artist.channelId.isEmpty()) return@LaunchedEffect
+    LaunchedEffect("channel_${artist.channelId}_${artist.name}") {
         withContext(Dispatchers.IO) {
             try {
-                val cd = InnerTube.fetchChannelData(artist.channelId)
+                val cd = InnerTube.fetchChannelData(artist.channelId, artist.name)
                 withContext(Dispatchers.Main) {
                     if (cd.bannerUrl.isNotEmpty()) banner = cd.bannerUrl
                     if (cd.bio.isNotEmpty()) bio = cd.bio
@@ -222,7 +213,7 @@ fun ArtistProfileScreen(
             ) {
                 // Highly faded background banner image (translucent face in background)
                 val bannerSrc = banner.ifEmpty {
-                    topSongs.firstOrNull()?.thumbnailHd ?: artist.thumbnail
+                    avatar.ifEmpty { topSongs.firstOrNull()?.thumbnailHd ?: artist.thumbnail }
                 }
                 AsyncImage(
                     model = bannerSrc,
@@ -659,60 +650,6 @@ fun ArtistProfileScreen(
                 Spacer(Modifier.height(4.dp))
             }
         }
-
-        // ── Fans also like ────────────────────────────────────────────────────
-        if (similar.isNotEmpty()) {
-            item {
-                Text(
-                    "Fans might also like",
-                    fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = Color.White,
-                    modifier = Modifier.padding(start = 16.dp, top = 24.dp, bottom = 12.dp)
-                )
-            }
-            item {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(18.dp)
-                ) {
-                    items(similar, key = { "sim_${it.channelId}" }) { a ->
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier.width(80.dp)
-                        ) {
-                            Box(
-                                Modifier.size(72.dp)
-                                    .background(
-                                        Brush.linearGradient(listOf(VinColors.Accent.copy(0.7f), VinColors.AccentLight.copy(0.7f))),
-                                        CircleShape
-                                    )
-                                    .padding(2.dp)
-                            ) {
-                                if (a.thumbnail.isNotEmpty())
-                                    AsyncImage(
-                                        model = a.thumbnail, contentDescription = null,
-                                        modifier = Modifier.fillMaxSize().clip(CircleShape),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                else Box(
-                                    Modifier.fillMaxSize().clip(CircleShape).background(VinColors.White10),
-                                    Alignment.Center
-                                ) {
-                                    Icon(Icons.Default.Person, null, tint = VinColors.Secondary)
-                                }
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                a.name, fontSize = 11.sp, color = Color.White.copy(0.85f),
-                                maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(16.dp))
-            }
-        }
     }
 }
 
@@ -795,10 +732,10 @@ private fun ArtSongRow(index: Int, song: VideoItem, isPlaying: Boolean, onClick:
             }
         }
         // Thumbnail
-        Box(Modifier.size(50.dp).clip(RoundedCornerShape(8.dp))) {
+        Box(Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))) {
             AsyncImage(
                 model = song.thumbnail, contentDescription = null,
-                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop
+                modifier = Modifier.fillMaxSize().scale(1.3f), contentScale = ContentScale.Crop
             )
             if (isPlaying) {
                 Box(Modifier.fillMaxSize().background(Color.Black.copy(0.4f)))

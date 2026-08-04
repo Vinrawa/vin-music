@@ -609,7 +609,27 @@ object RecommendationManager {
         val tamilKeywords = listOf("tamil", "anirudh", "arrahman", "ilayaraja", "kadhal", "kadhala", "kollywood", "yuvan", "srinivas", "vijay", "ajith", "kamal", "rajini")
         val koreanKeywords = listOf("k-pop", "bts", "blackpink", "twice", "korean", "newjeans", "stray kids", "exo", "jungkook", "jimin", "seventeen")
 
-        if (punjabiKeywords.any { fullText.contains(it) }) {
+        // Known Hindi artists for more reliable detection
+        val knownHindiArtists = listOf(
+            "arijit singh", "atif aslam", "jubin nautiyal", "shreya ghoshal", "pritam",
+            "sonu nigam", "alka yagnik", "udit narayan", "kumar sanu", "kishore kumar",
+            "lata mangeshkar", "mohit chauhan", "shaan", "sunidhi chauh", "neha kakkar",
+            "honey singh", "badshah", "raftaar", "divine", "emiway", "mc stan", "seedhe maut",
+            "kr\$na", "king", "darshan raval", "stebin ben", "vaibhav gupta"
+        )
+        val knownPunjabiArtists = listOf(
+            "sidhu moose wala", "diljit dosanjh", "ap dhillon", "karan aujla", "shubh",
+            "gurinder gill", "ammy virk", "garry sandhu", "prem dhillon", "amrit maan",
+            "karan aujla", "bohemia", "lehmber hussainpuri", "sukshinder shinda"
+        )
+
+        // Check artist name against known artists first (most reliable)
+        val authorLower = author.lowercase(Locale.ROOT)
+        if (knownPunjabiArtists.any { authorLower.contains(it) }) {
+            language = "Punjabi"
+        } else if (knownHindiArtists.any { authorLower.contains(it) }) {
+            language = "Hindi"
+        } else if (punjabiKeywords.any { fullText.contains(it) }) {
             language = "Punjabi"
         } else if (hindiKeywords.any { fullText.contains(it) }) {
             language = "Hindi"
@@ -1517,8 +1537,7 @@ object RecommendationManager {
         val hour = calendar.get(java.util.Calendar.HOUR_OF_DAY)
         val expectedTimeSectionKey = when {
             hour in 5..11 -> "Morning Acoustic Sunshine"
-            hour in 12..16 -> "Midday Chill & Focus"
-            hour in 17..20 -> "Sunset Vibe & Energy"
+            hour in 12..20 -> "Midday Chill & Focus"
             else -> "Midnight Sanctuary"
         }
 
@@ -1596,18 +1615,21 @@ object RecommendationManager {
             .filter { it.isNotBlank() && it.lowercase() != "unknown" && !isCorporateOrDistributorChannel(it) }
         val cleanListenedCount = listenedArtists.map { normalizeArtistName(it) }.distinct().size
 
-        val fallbackMoreFromArtists = listOf(
-            "Arijit Singh", "Sidhu Moose Wala", "Karan Aujla", "Diljit Dosanjh",
-            "The Weeknd", "Drake", "Anuv Jain", "Travis Scott"
-        )
         val topArtistsList = profile.topArtists.map { it.first }.filter { it.isNotBlank() }
-        
-        // Cold start safety rule: If user has heard fewer than 5 different artists overall, 
-        // don't lock their feed onto J. Cole. Suggest highly diverse fallback artists instead!
+
+        // Only show "More from artist" for artists the user has actually listened to
+        // For cold start (< 5 artists), use their top played artists instead of hardcoded fallback
         val moreFromArtists = if (cleanListenedCount >= 5) {
             topArtistsList.take(5)
+        } else if (cleanListenedCount > 0) {
+            // Use top played artists from interaction signals
+            interactionSignals.sortedByDescending { it.playCount }
+                .map { it.author.trim() }
+                .filter { it.isNotBlank() && !isCorporateOrDistributorChannel(it) }
+                .distinct()
+                .take(3)
         } else {
-            fallbackMoreFromArtists.take(5)
+            emptyList()
         }
         
         // Add a separate CurationTask per artist
@@ -1630,23 +1652,33 @@ object RecommendationManager {
         val rewindQueries = emptyList<String>() // Rewind is handled offline from local DB candidates!
         tasks.add(CurationTask("Rewind: Listen Back", rewindQueries, null, "rewind_listen_back"))
 
-        // 4. Similar songs (dynamically seeded by most recently played track to adapt to music taste changes)
-        // Cold start safety rule: if they listened to fewer than 5 different artists, do not seed with a single artist play.
+        // 4. Similar songs (dynamically seeded by most representative track)
+        // Uses weighted scoring: play count + recency + likes to find the best seed
         val recentPlayed = historyList.firstOrNull()
         val topPlayedList = interactionSignals.sortedByDescending { it.playCount }
-        
+
         val similarSeed = if (cleanListenedCount >= 5) {
-            if (recentPlayed != null) {
-                db.interactionSignalDao().get(recentPlayed.videoId) ?: InteractionSignal(
-                    videoId = recentPlayed.videoId,
-                    title = recentPlayed.title,
-                    author = recentPlayed.author,
-                    durationText = recentPlayed.durationText,
-                    playCount = 1
-                )
-            } else {
-                topPlayedList.firstOrNull { it.playCount > 0 }
-            }
+            // Find the most representative seed: combine play count, recency, and likes
+            val scoredTracks = interactionSignals
+                .filter { it.playCount > 0 }
+                .map { sig ->
+                    val recencyScore = if (sig.lastPlayedAt > 0) {
+                        val hoursAgo = (System.currentTimeMillis() - sig.lastPlayedAt) / (1000 * 60 * 60)
+                        when {
+                            hoursAgo < 24 -> 30.0    // Played today
+                            hoursAgo < 72 -> 20.0    // Played in last 3 days
+                            hoursAgo < 168 -> 10.0   // Played in last week
+                            else -> 5.0
+                        }
+                    } else 0.0
+                    val playScore = (sig.playCount * 2.0).coerceAtMost(20.0)
+                    val likeScore = if (sig.isLiked) 15.0 else 0.0
+                    val completeScore = (sig.completeCount * 1.5).coerceAtMost(10.0)
+                    sig to (playScore + recencyScore + likeScore + completeScore)
+                }
+                .sortedByDescending { it.second }
+
+            scoredTracks.firstOrNull()?.first
         } else {
             null
         }
@@ -1674,11 +1706,31 @@ object RecommendationManager {
         } else if (similarSeed != null) {
             val seedMetaFallback = inferMetadata(VideoItem(similarSeed.videoId, similarSeed.title, similarSeed.author, similarSeed.durationText))
             val genreLower = seedMetaFallback.genre.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop").replace("punjabi folk", "punjabi")
-            listOf(
-                "$genreLower similar vibes official hits",
-                "$genreLower underrated songs 2026",
-                "$genreLower fresh releases"
-            )
+            val artistName = similarSeed.author.trim()
+
+            // Build queries based on seed track's genre, mood, and artist
+            val queries = mutableListOf<String>()
+
+            // Primary: genre + mood queries
+            queries.add("$genreLower similar vibes official hits")
+            queries.add("$genreLower ${seedMetaFallback.mood.lowercase()} songs official")
+
+            // Secondary: artist similarity queries
+            val similarGenres = genreSimilarMap?.get(genreLower)?.take(2) ?: emptyList()
+            for (sg in similarGenres) {
+                val sgDisplay = sg.replace(Regex("(?<=[a-z])(?=[A-Z])"), " ").lowercase()
+                queries.add("$sgDisplay official popular songs")
+            }
+
+            // Tertiary: energy-based queries
+            val energyTerm = when {
+                seedMetaFallback.energy < 0.35 -> "chill relaxed"
+                seedMetaFallback.energy > 0.75 -> "energetic upbeat"
+                else -> "mid tempo"
+            }
+            queries.add("$genreLower $energyTerm official audio")
+
+            queries.take(5)
         } else {
             // Cold start: no listening history — serve diverse genre discovery
             val coldStartGenres = listOf("hip hop", "pop", "indie", "r&b", "bollywood", "electronic")
@@ -1784,10 +1836,10 @@ object RecommendationManager {
         tasks.add(CurationTask(
             sectionKey = "Deep cuts & hidden gems",
             queries = listOf(
-                "underrated music hidden gems",
-                "deep cuts official audio",
-                "lesser known indie songs",
-                "underrated rap bollywood punjabi songs"
+                "underrated indie songs official audio",
+                "lesser known artist hits official",
+                "overlooked tracks worth listening",
+                "underrated rap bollywood punjabi songs official"
             ),
             seedItem = null,
             sourceType = "hidden_gems"
@@ -1818,18 +1870,6 @@ object RecommendationManager {
                     } + listOf("chill ambient focus music official", "soft instrumental study songs"),
                     seedItem = null,
                     sourceType = "afternoon_vibe"
-                )
-            }
-            "Sunset Vibe & Energy" -> {
-                val genreTerms = topGenresForTime.ifEmpty { listOf("hip hop", "punjabi") }
-                CurationTask(
-                    sectionKey = expectedTimeSectionKey,
-                    queries = genreTerms.flatMap { g ->
-                        val gLower = g.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop").replace("punjabi folk", "punjabi")
-                        listOf("$gLower energetic hits official", "$gLower popular trending")
-                    } + listOf("energetic hits official audio 2026", "high energy music popular"),
-                    seedItem = null,
-                    sourceType = "evening_vibe"
                 )
             }
             else -> {
@@ -1957,6 +1997,15 @@ object RecommendationManager {
                     }
                     if (isNonMusicVideo(title, author)) continue
                     if (isUnofficialContent(title, author)) continue
+
+                    // Filter out songs that are literally named "deep cut" or "hidden gem"
+                    if (task.sourceType == "hidden_gems") {
+                        val titleLower = title.lowercase(Locale.ROOT)
+                        if (titleLower.contains("deep cut") || titleLower.contains("hidden gem") ||
+                            titleLower.contains("underrated songs") || titleLower.contains("best of")) {
+                            continue
+                        }
+                    }
 
                     if (profile.skippedTracks.contains(item.videoId) || 
                         profile.skippedArtists.contains(normAuthor)) {

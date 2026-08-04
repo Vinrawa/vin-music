@@ -34,7 +34,6 @@ import com.vinmusic.innertube.VideoItem
 import com.vinmusic.player.PlayerViewModel
 import com.vinmusic.recommendation.RecommendationManager
 import com.vinmusic.ui.theme.VinColors
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.LazyColumn
@@ -51,34 +50,38 @@ import kotlinx.coroutines.Deferred
 import kotlin.math.roundToInt
 import kotlin.random.Random
 
-// Diverse premium discovery query templates
+// Diverse premium discovery query templates - focused on quality and variety
 private val DISCOVER_QUERIES = listOf(
-    "trending viral hindi songs 2025",
-    "best punjabi hits 2025",
-    "top english pop hits 2025",
-    "new bollywood songs 2025",
-    "top tamil hits 2025",
-    "trending k-pop songs 2025",
-    "new indie songs 2025",
-    "best rap hip hop 2025",
-    "romantic songs 2025"
-)
-
-private data class DiscoverGenreFilter(
-    val label: String,
-    val query: String,
-    val matchTerms: List<String>
-)
-
-private val DISCOVER_GENRE_FILTERS = listOf(
-    DiscoverGenreFilter("Hip-Hop", "best hip hop rap songs trending", listOf("hip hop", "hip-hop", "rap", "trap", "drill")),
-    DiscoverGenreFilter("Bollywood", "bollywood hit songs trending", listOf("bollywood", "hindi", "filmi")),
-    DiscoverGenreFilter("Punjabi", "punjabi hit songs trending", listOf("punjabi", "sidhu", "karan aujla", "diljit")),
-    DiscoverGenreFilter("Pop", "english pop hits trending", listOf("pop", "english", "billboard")),
-    DiscoverGenreFilter("Indie", "indie pop songs trending", listOf("indie", "alternative", "acoustic")),
-    DiscoverGenreFilter("R&B", "r&b soul songs trending", listOf("r&b", "rnb", "soul", "weeknd", "sza")),
-    DiscoverGenreFilter("Rock", "rock songs trending", listOf("rock", "alt rock", "band")),
-    DiscoverGenreFilter("Romantic", "romantic songs trending", listOf("romantic", "romance", "love"))
+    "best rap hip hop songs 2025",
+    "top r&b soul hits 2025",
+    "new electronic dance music 2025",
+    "best jazz fusion songs",
+    "top neo soul hits",
+    "new synthwave retrowave 2025",
+    "best lo-fi hip hop beats",
+    "top funk disco classics",
+    "new ambient chill music",
+    "best dream pop shoegaze",
+    "top alternative rock 2025",
+    "new bedroom pop indie",
+    "best trip hop downtempo",
+    "top progressive rock modern",
+    "new art pop experimental",
+    "best afrobeat songs 2025",
+    "top reggae dancehall hits",
+    "new latin reggaeton 2025",
+    "best punk rock songs",
+    "top country hits 2025",
+    "new k-pop hits 2025",
+    "best metal songs 2025",
+    "top house techno music",
+    "new drum and bass 2025",
+    "best acoustic folk songs",
+    "top grime uk rap",
+    "new vaporwave chill",
+    "best bossa nova songs",
+    "top blues rock classics",
+    "new hyperpop experimental"
 )
 
 // Data class to wrap song with dynamic recommendation metadata
@@ -141,18 +144,9 @@ private fun isDiscoverCandidate(song: VideoItem): Boolean {
     return true
 }
 
-private fun discoverMatchesGenreFilter(song: VideoItem, filter: DiscoverGenreFilter?): Boolean {
-    if (filter == null) return true
-    val meta = RecommendationManager.inferMetadata(song)
-    val haystack = listOf(song.title, song.author, meta.genre, meta.mood, meta.language)
-        .joinToString(" ")
-        .lowercase()
-    return filter.matchTerms.any { term -> haystack.contains(term.lowercase()) }
-}
-
-private fun buildDiscoverDeck(pool: List<DiscoverSong>, filter: DiscoverGenreFilter? = null): List<DiscoverSong> {
+private fun buildDiscoverDeck(pool: List<DiscoverSong>): List<DiscoverSong> {
     return pool
-        .filter { isDiscoverCandidate(it.videoItem) && discoverMatchesGenreFilter(it.videoItem, filter) }
+        .filter { isDiscoverCandidate(it.videoItem) }
         .distinctBy { discoverSongKey(it.videoItem) }
         .sortedByDescending { it.vibeScore + Random.nextInt(0, 7) }
         .fold(mutableListOf<DiscoverSong>()) { acc, song ->
@@ -199,7 +193,6 @@ fun DiscoverScreen(
     // Floating toast popup state
     var showToastMessage by remember { mutableStateOf<String?>(null) }
 
-    var selectedGenreFilter by remember { mutableStateOf<DiscoverGenreFilter?>(null) }
     var selectedMix by remember { mutableStateOf<com.vinmusic.recommendation.SpotifyMix?>(null) }
 
     val ctx = LocalContext.current
@@ -214,7 +207,7 @@ fun DiscoverScreen(
     }
 
     // ── Load personalized smart discovery pool ──
-    fun loadDiscoverSongs(genreFilter: DiscoverGenreFilter? = selectedGenreFilter) {
+    fun loadDiscoverSongs() {
         isLoading = true
         scope.launch(Dispatchers.IO) {
             try {
@@ -226,11 +219,12 @@ fun DiscoverScreen(
 
                 val discoverPool = mutableListOf<DiscoverSong>()
                 fun addCandidate(song: VideoItem, reason: String, score: Int) {
-                    if (isDiscoverCandidate(song) && discoverMatchesGenreFilter(song, genreFilter)) {
+                    if (isDiscoverCandidate(song)) {
                         discoverPool.add(DiscoverSong(song, reason, score.coerceIn(70, 100)))
                     }
                 }
 
+                // Seed from liked songs - high weight
                 liked.shuffled().take(8).forEach { song ->
                     addCandidate(
                         VideoItem(song.videoId, song.title, song.author, song.durationText),
@@ -238,6 +232,7 @@ fun DiscoverScreen(
                         Random.nextInt(91, 99)
                     )
                 }
+                // Seed from history - medium weight
                 history.take(10).forEach { song ->
                     addCandidate(
                         VideoItem(song.videoId, song.title, song.author, song.durationText),
@@ -245,6 +240,7 @@ fun DiscoverScreen(
                         Random.nextInt(86, 96)
                     )
                 }
+                // Seed from playlists
                 playlistSongs.shuffled().take(8).forEach { song ->
                     addCandidate(
                         VideoItem(song.videoId, song.title, song.author, song.durationText),
@@ -253,7 +249,7 @@ fun DiscoverScreen(
                     )
                 }
 
-                val instantDeck = buildDiscoverDeck(discoverPool, genreFilter)
+                val instantDeck = buildDiscoverDeck(discoverPool)
                 if (instantDeck.isNotEmpty()) {
                     withContext(Dispatchers.Main) {
                         cards = instantDeck
@@ -292,10 +288,11 @@ fun DiscoverScreen(
                 coroutineScope {
                     val deferreds = mutableListOf<Deferred<List<DiscoverSong>>>()
 
+                    // Quick picks from recommendation engine
                     deferreds.add(async(Dispatchers.IO) {
                         try {
                             vm.recommendationRepository.getQuickPicks()
-                                .filter { isDiscoverCandidate(it) && discoverMatchesGenreFilter(it, genreFilter) }
+                                .filter { isDiscoverCandidate(it) }
                                 .take(12)
                                 .map { song ->
                                     DiscoverSong(
@@ -307,6 +304,7 @@ fun DiscoverScreen(
                         } catch (_: Exception) { emptyList() }
                     })
 
+                    // Radio seeds from liked/history/playlist songs
                     val radioSeeds = (liked.map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
                         history.map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
                         playlistSongs.map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
@@ -319,7 +317,7 @@ fun DiscoverScreen(
                         deferreds.add(async(Dispatchers.IO) {
                             try {
                                 vm.recommendationRepository.getSongRadio(seed.videoId, seed.title, seed.author)
-                                    .filter { isDiscoverCandidate(it) && discoverMatchesGenreFilter(it, genreFilter) }
+                                    .filter { isDiscoverCandidate(it) }
                                     .take(6)
                                     .map { song ->
                                         DiscoverSong(
@@ -332,31 +330,12 @@ fun DiscoverScreen(
                         })
                     }
 
-                    genreFilter?.let { filter ->
-                        listOf(filter.query, "${filter.query} songs", "${filter.label} music mix").forEach { query ->
-                            deferreds.add(async(Dispatchers.IO) {
-                                try {
-                                    InnerTube.search(query)
-                                        .filter { isDiscoverCandidate(it) }
-                                        .take(8)
-                                        .map { song ->
-                                            DiscoverSong(
-                                                videoItem = song,
-                                                recommendationReason = "${filter.label} lane",
-                                                vibeScore = Random.nextInt(88, 99)
-                                            )
-                                        }
-                                } catch (_: Exception) { emptyList() }
-                            })
-                        }
-                    }
-
-                    // 2. Fetch popular/new songs from seed artists concurrently
+                    // Artist-specific searches
                     seedArtists.forEach { artist ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
                                 InnerTube.search("$artist popular songs")
-                                    .filter { isDiscoverCandidate(it) && discoverMatchesGenreFilter(it, genreFilter) }
+                                    .filter { isDiscoverCandidate(it) }
                                     .take(3)
                                     .map { song ->
                                         DiscoverSong(
@@ -371,7 +350,7 @@ fun DiscoverScreen(
                         deferreds.add(async(Dispatchers.IO) {
                             try {
                                 InnerTube.search("$artist new song")
-                                    .filter { isDiscoverCandidate(it) && discoverMatchesGenreFilter(it, genreFilter) }
+                                    .filter { isDiscoverCandidate(it) }
                                     .take(2)
                                     .map { song ->
                                         DiscoverSong(
@@ -384,12 +363,12 @@ fun DiscoverScreen(
                         })
                     }
 
-                    // 3. Similar to Liked Songs seed concurrently
+                    // Similar to Liked Songs seed
                     seedLikes.forEach { likedSong ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
                                 InnerTube.search("songs like ${likedSong.title} ${likedSong.author}")
-                                    .filter { isDiscoverCandidate(it) && discoverMatchesGenreFilter(it, genreFilter) }
+                                    .filter { isDiscoverCandidate(it) }
                                     .take(4)
                                     .map { song ->
                                         DiscoverSong(
@@ -402,12 +381,12 @@ fun DiscoverScreen(
                         })
                     }
 
-                    // 4. Similar to Playlist Songs seed concurrently
+                    // Similar to Playlist Songs seed
                     seedPlaylists.forEach { plSong ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
                                 InnerTube.search("songs like ${plSong.title} ${plSong.author}")
-                                    .filter { isDiscoverCandidate(it) && discoverMatchesGenreFilter(it, genreFilter) }
+                                    .filter { isDiscoverCandidate(it) }
                                     .take(4)
                                     .map { song ->
                                         DiscoverSong(
@@ -420,12 +399,12 @@ fun DiscoverScreen(
                         })
                     }
 
-                    // 5. Fresh serendipity query templates concurrently
-                    DISCOVER_QUERIES.shuffled().take(2).forEach { freshQuery ->
+                    // Fresh discovery queries for variety
+                    DISCOVER_QUERIES.shuffled().take(3).forEach { freshQuery ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
                                 InnerTube.search(freshQuery)
-                                    .filter { isDiscoverCandidate(it) && discoverMatchesGenreFilter(it, genreFilter) }
+                                    .filter { isDiscoverCandidate(it) }
                                     .take(5)
                                     .map { song ->
                                         DiscoverSong(
@@ -438,12 +417,47 @@ fun DiscoverScreen(
                         })
                     }
 
+                    // Genre-diverse queries for variety (different from user's usual taste)
+                    val genreDiversityQueries = listOf(
+                        "best jazz songs all time",
+                        "top electronic music 2025",
+                        "best classical crossover",
+                        "top afrobeat songs 2025",
+                        "new reggae dancehall hits",
+                        "best metal songs trending",
+                        "top punk rock songs",
+                        "new latin reggaeton hits",
+                        "best drum and bass 2025",
+                        "top country hits 2025",
+                        "new k-pop songs trending",
+                        "best grime uk rap",
+                        "top house techno 2025",
+                        "new bossa nova songs",
+                        "best blues rock classics"
+                    )
+                    genreDiversityQueries.shuffled().take(3).forEach { query ->
+                        deferreds.add(async(Dispatchers.IO) {
+                            try {
+                                InnerTube.search(query)
+                                    .filter { isDiscoverCandidate(it) }
+                                    .take(3)
+                                    .map { song ->
+                                        DiscoverSong(
+                                            videoItem = song,
+                                            recommendationReason = "Expand your taste",
+                                            vibeScore = Random.nextInt(75, 88)
+                                        )
+                                    }
+                            } catch (_: Exception) { emptyList() }
+                        })
+                    }
+
                     val results = deferreds.awaitAll().flatten()
                     discoverPool.addAll(results)
                 }
 
                 // 6. Deduplicate, score-sort, and keep artist diversity.
-                val uniqueDiscover = buildDiscoverDeck(discoverPool, genreFilter)
+                val uniqueDiscover = buildDiscoverDeck(discoverPool)
 
                 withContext(Dispatchers.Main) {
                     val visibleCard = cards.lastOrNull()
@@ -471,7 +485,7 @@ fun DiscoverScreen(
         val remainingCards = cards.dropLast(1)
         cards = remainingCards
         if (remainingCards.size <= 4 && !isLoading) {
-            loadDiscoverSongs(selectedGenreFilter)
+            loadDiscoverSongs()
         }
     }
 
@@ -493,7 +507,7 @@ fun DiscoverScreen(
                 Spacer(Modifier.height(8.dp))
                 Text("Ready for another customized batch?", color = VinColors.Secondary, fontSize = 14.sp)
                 Spacer(Modifier.height(20.dp))
-                Button(onClick = { loadDiscoverSongs(selectedGenreFilter) }, colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent)) {
+                Button(onClick = { loadDiscoverSongs() }, colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent)) {
                     Icon(Icons.Default.Refresh, null, tint = Color.White)
                     Spacer(Modifier.width(8.dp))
                     Text("Refresh Deck", color = Color.White, fontWeight = FontWeight.Bold)
@@ -563,13 +577,8 @@ fun DiscoverScreen(
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
                 DiscoverGenreFilterRow(
-                    selected = selectedGenreFilter,
-                    onSelected = { filter ->
-                        selectedGenreFilter = filter
-                        cards = emptyList()
-                        autoPreviewEnabled = true
-                        loadDiscoverSongs(filter)
-                    }
+                    selected = null,
+                    onSelected = { }
                 )
 
                 Box(
@@ -1091,8 +1100,8 @@ fun DiscoverCard(
 
 @Composable
 private fun DiscoverGenreFilterRow(
-    selected: DiscoverGenreFilter?,
-    onSelected: (DiscoverGenreFilter?) -> Unit
+    selected: Unit?,
+    onSelected: (Unit?) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -1107,73 +1116,18 @@ private fun DiscoverGenreFilterRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = selected?.let { "${it.label} Deck" } ?: "Swipe by genre",
+                text = "All Songs",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.ExtraBold,
                 color = Color.White
             )
             Text(
-                text = if (selected == null) "All songs" else "Filtered",
+                text = "Smart matching",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 color = VinColors.AccentLight
             )
         }
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            item {
-                DiscoverGenreChip(
-                    label = "All",
-                    selected = selected == null,
-                    onClick = { onSelected(null) }
-                )
-            }
-            items(DISCOVER_GENRE_FILTERS, key = { it.label }) { filter ->
-                DiscoverGenreChip(
-                    label = filter.label,
-                    selected = selected?.label == filter.label,
-                    onClick = { onSelected(filter) }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun DiscoverGenreChip(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(
-                if (selected) {
-                    Brush.horizontalGradient(listOf(Color(0xFFC5A880), Color(0xFF8C7355)))
-                } else {
-                    Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.12f), Color.White.copy(alpha = 0.04f)))
-                }
-            )
-            .border(
-                width = 1.dp,
-                color = if (selected) Color.Transparent else Color.White.copy(alpha = 0.12f),
-                shape = RoundedCornerShape(20.dp)
-            )
-            .clickable { onClick() }
-            .padding(horizontal = 15.dp, vertical = 9.dp)
-    ) {
-        Text(
-            text = label,
-            fontSize = 12.sp,
-            color = Color.White,
-            fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 

@@ -814,10 +814,10 @@ fun FullPlayerScreen(
                 )
 
                 GlassActionButton(
-                    icon = Icons.Default.Tune,
-                    label = "Remix",
-                    active = activePanel == "Remix",
-                    onClick = { activePanel = if (activePanel == "Remix") null else "Remix" }
+                    icon = Icons.Default.Equalizer,
+                    label = "Equaliser",
+                    active = activePanel == "Equaliser",
+                    onClick = { activePanel = if (activePanel == "Equaliser") null else "Equaliser" }
                 )
 
                 GlassActionButton(
@@ -1063,7 +1063,7 @@ fun FullPlayerScreen(
                                 when (activePanel) {
                                     "Lyrics" -> LyricsPanel(vm)
                                     "Queue"  -> QueuePanel(vm)
-                                    "Remix"  -> RemixPanel(vm)
+                                    "Equaliser"  -> RemixPanel(vm)
                                     "Credits" -> FullCreditsPanel(
                                         author = song.author,
                                         description = creditsDescription
@@ -1148,10 +1148,10 @@ private fun PlayerSeekBar(vm: PlayerViewModel, animatedAccent: Color) {
     Slider(
         value = vm.progress,
         onValueChange = { vm.seekTo(it) },
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).height(24.dp),
         colors = SliderDefaults.colors(
             thumbColor = Color.White,
-            activeTrackColor = VinColors.Accent,
+            activeTrackColor = Color.White,
             inactiveTrackColor = VinColors.White20
         )
     )
@@ -1219,9 +1219,31 @@ fun KaraokeLine(
 @Composable
 fun LyricsPanel(vm: PlayerViewModel) {
     val listState = rememberLazyListState()
+    var userInterruptedSync by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    // Auto-scroll to current lyric index
     LaunchedEffect(vm.currentLyricIndex) {
-        if (vm.currentLyricIndex > 1) {
+        if (vm.currentLyricIndex > 1 && !userInterruptedSync) {
             listState.animateScrollToItem((vm.currentLyricIndex - 2).coerceAtLeast(0))
+        }
+    }
+
+    // Check if user has scrolled away from current lyric - show resync if so
+    val isNearCurrentLyric by remember {
+        derivedStateOf {
+            val firstVisible = listState.firstVisibleItemIndex
+            val lastVisible = firstVisible + listState.layoutInfo.visibleItemsInfo.size
+            val currentIndex = vm.currentLyricIndex
+            // User is "near" current lyric if current index is within visible range ±2
+            currentIndex in (firstVisible - 2)..(lastVisible + 2)
+        }
+    }
+
+    // When user stops scrolling, check if they're out of sync
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (!listState.isScrollInProgress && !isNearCurrentLyric) {
+            userInterruptedSync = true
         }
     }
 
@@ -1229,7 +1251,6 @@ fun LyricsPanel(vm: PlayerViewModel) {
     var editText by remember { mutableStateOf("") }
     var editIsSynced by remember { mutableStateOf(false) }
     var showCandidatePicker by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -1595,6 +1616,51 @@ fun LyricsPanel(vm: PlayerViewModel) {
             }
         }
 
+        // Re-sync button - only shows when user has scrolled away from current lyric
+        if (userInterruptedSync && !isNearCurrentLyric) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(VinColors.Accent.copy(alpha = 0.9f))
+                        .clickable {
+                            userInterruptedSync = false
+                            // Scroll back to current lyric
+                            if (vm.currentLyricIndex > 1) {
+                                scope.launch {
+                                    listState.animateScrollToItem((vm.currentLyricIndex - 2).coerceAtLeast(0))
+                                }
+                            }
+                        }
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Re-sync",
+                            tint = Color.White,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = "Re-sync",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+        }
+
         // Edit Dialog
         if (showEditDialog) {
             AlertDialog(
@@ -1774,7 +1840,6 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Bass Booster",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFFC5A880), Color(0xFF1E1A14))),
                     active = vm.eqPreset == "Bass Boost",
                     onClick = {
                         val preset = EQ_PRESETS.find { it.name == "Bass Boost" }
@@ -1786,7 +1851,6 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Lo-Fi Lounge",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFFB39873), Color(0xFF191612))),
                     active = vm.eqPreset == "Lofi",
                     onClick = {
                         val preset = EQ_PRESETS.find { it.name == "Lofi" }
@@ -1798,7 +1862,6 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Vocal Focus",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFFD6BE9C), Color(0xFF2C251C))),
                     active = vm.eqPreset == "Vocal",
                     onClick = {
                         val preset = EQ_PRESETS.find { it.name == "Vocal" }
@@ -1810,7 +1873,6 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Acoustic Clarity",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFFA38C6D), Color(0xFF171411))),
                     active = vm.eqPreset == "Treble+",
                     onClick = {
                         val preset = EQ_PRESETS.find { it.name == "Treble+" }
@@ -1822,7 +1884,6 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Slowed + Reverb",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFFC5A880), Color(0xFF251F17))),
                     active = vm.isSlowedReverb,
                     onClick = {
                         vm.toggleSlowedReverb()
@@ -1833,7 +1894,6 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "Concert Hall",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFFD0A04E), Color(0xFF17120C))),
                     active = vm.concertHallEnabled,
                     onClick = {
                         val preset = EQ_PRESETS.find { it.name == "Concert Hall" }
@@ -1845,7 +1905,6 @@ fun RemixPanel(vm: PlayerViewModel) {
                 SmartEQPresetChip(
                     name = "8D Audio Mode",
                     icon = "",
-                    gradient = Brush.linearGradient(listOf(Color(0xFFB39873), Color(0xFF15120E))),
                     active = vm.is8dEnabled,
                     onClick = {
                         vm.toggle8dAudio()
@@ -1875,7 +1934,13 @@ fun RemixPanel(vm: PlayerViewModel) {
             lowMid = vm.eqLowMid,
             mid = vm.eqMid,
             treble = vm.eqTreble,
-            air = vm.eqAir
+            air = vm.eqAir,
+            onSubBassChange = { vm.eqSubBass = it; vm.applyEQ() },
+            onBassChange = { vm.eqBass = it; vm.applyEQ() },
+            onLowMidChange = { vm.eqLowMid = it; vm.applyEQ() },
+            onMidChange = { vm.eqMid = it; vm.applyEQ() },
+            onTrebleChange = { vm.eqTreble = it; vm.applyEQ() },
+            onAirChange = { vm.eqAir = it; vm.applyEQ() }
         )
 
         Spacer(Modifier.height(4.dp))
@@ -1941,6 +2006,17 @@ fun OptionsSheetV2(
     onSleepTimer: () -> Unit, onAddToPlaylist: () -> Unit, onDismiss: () -> Unit
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    val db = com.vinmusic.data.db.VinDatabase.getInstance(ctx)
+    val scope = rememberCoroutineScope()
+    var isDownloaded by remember(song.videoId) { mutableStateOf(false) }
+
+    LaunchedEffect(song.videoId) {
+        withContext(Dispatchers.IO) {
+            val existing = db.downloadDao().get(song.videoId)
+            isDownloaded = existing != null && existing.status == "completed"
+        }
+    }
+
     Column(modifier = Modifier.padding(bottom = 32.dp)) {
         Row(modifier = Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -1954,10 +2030,47 @@ fun OptionsSheetV2(
         }
         HorizontalDivider(color = VinColors.GlassBorder)
         data class Opt(val icon: androidx.compose.ui.graphics.vector.ImageVector, val label: String, val action: () -> Unit)
-        listOf(
+        val options = mutableListOf(
             Opt(Icons.Default.Favorite,    if (vm.isLiked(song.videoId)) "Unlike" else "Like Song") { vm.toggleLike(song); onDismiss() },
             Opt(Icons.AutoMirrored.Filled.PlaylistAdd, "Add to Playlist") { onAddToPlaylist(); onDismiss() },
-            Opt(Icons.Default.Download,    "Download Song") {
+        )
+
+        if (isDownloaded) {
+            options.add(Opt(Icons.Default.Delete, "Remove Download") {
+                scope.launch(Dispatchers.IO) {
+                    val download = db.downloadDao().get(song.videoId)
+                    if (download != null) {
+                        // Remove from Media3 cache
+                        try {
+                            val downloadCache = com.vinmusic.player.PlayerSingleton.getDownloadCache(ctx)
+                            downloadCache?.removeResource(song.videoId)
+                        } catch (_: Exception) {}
+
+                        // Delete thumbnail file
+                        download.thumbnailPath?.let { path ->
+                            try { java.io.File(path).delete() } catch (_: Exception) {}
+                        }
+
+                        // Remove from database
+                        db.downloadDao().delete(song.videoId)
+
+                        // Update interaction signal
+                        val signal = db.interactionSignalDao().get(song.videoId)
+                        if (signal != null) {
+                            signal.isDownloaded = false
+                            db.interactionSignalDao().insert(signal)
+                        }
+
+                        withContext(Dispatchers.Main) {
+                            isDownloaded = false
+                            android.widget.Toast.makeText(ctx, "Download removed", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                onDismiss()
+            })
+        } else {
+            options.add(Opt(Icons.Default.Download, "Download Song") {
                 val intent = android.content.Intent(ctx, com.vinmusic.download.DownloadService::class.java).apply {
                     action = com.vinmusic.download.DownloadService.ACTION_ENQUEUE
                     putExtra(com.vinmusic.download.DownloadService.EXTRA_VIDEO_ID, song.videoId)
@@ -1967,10 +2080,13 @@ fun OptionsSheetV2(
                 }
                 ctx.startService(intent)
                 onDismiss()
-            },
-            Opt(Icons.Default.Timer,       "Sleep Timer") { onSleepTimer() },
-            Opt(Icons.Default.Share,       "Share") { onDismiss() },
-        ).forEach { opt ->
+            })
+        }
+
+        options.add(Opt(Icons.Default.Timer,       "Sleep Timer") { onSleepTimer() })
+        options.add(Opt(Icons.Default.Share,       "Share") { onDismiss() })
+
+        options.forEach { opt ->
             Row(modifier = Modifier.fillMaxWidth().clickable { opt.action() }
                 .padding(horizontal = 20.dp, vertical = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(20.dp),
@@ -2023,8 +2139,17 @@ fun EQGraph(
     lowMid: Float,
     mid: Float,
     treble: Float,
-    air: Float
+    air: Float,
+    onSubBassChange: (Float) -> Unit = {},
+    onBassChange: (Float) -> Unit = {},
+    onLowMidChange: (Float) -> Unit = {},
+    onMidChange: (Float) -> Unit = {},
+    onTrebleChange: (Float) -> Unit = {},
+    onAirChange: (Float) -> Unit = {}
 ) {
+    val callbacks = listOf(onSubBassChange, onBassChange, onLowMidChange, onMidChange, onTrebleChange, onAirChange)
+    var activeDragIndex by remember { mutableIntStateOf(-1) }
+
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
@@ -2033,6 +2158,44 @@ fun EQGraph(
             .clip(RoundedCornerShape(12.dp))
             .background(VinColors.White10)
             .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(12.dp))
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        val width = size.width.toFloat()
+                        val stepX = width / 5f
+                        val heights = listOf(subBass, bass, lowMid, mid, treble, air)
+                        val midY = size.height / 2f
+                        var closestIndex = -1
+                        var closestDist = Float.MAX_VALUE
+                        heights.forEachIndexed { i, db ->
+                            val fraction = db / 15f
+                            val y = midY - (fraction * (size.height / 2.5f))
+                            val x = i * stepX
+                            val dx = (offset.x - x).toDouble()
+                            val dy = (offset.y - y).toDouble()
+                            val dist = kotlin.math.sqrt(dx * dx + dy * dy).toFloat()
+                            if (dist < closestDist && dist < 40.dp.toPx()) {
+                                closestDist = dist
+                                closestIndex = i
+                            }
+                        }
+                        activeDragIndex = closestIndex
+                    },
+                    onDrag = { change, _ ->
+                        if (activeDragIndex in 0..5) {
+                            val width = size.width.toFloat()
+                            val height = size.height.toFloat()
+                            val midY = height / 2f
+                            val newY = change.position.y.coerceIn(8.dp.toPx(), height - 8.dp.toPx())
+                            val fraction = (midY - newY) / (height / 2.5f)
+                            val dbValue = (fraction * 15f).coerceIn(-15f, 15f)
+                            callbacks[activeDragIndex](dbValue)
+                        }
+                    },
+                    onDragEnd = { activeDragIndex = -1 },
+                    onDragCancel = { activeDragIndex = -1 }
+                )
+            }
     ) {
         val width = size.width
         val height = size.height
@@ -2323,21 +2486,19 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
             runCatching {
                 val res = com.vinmusic.innertube.InnerTube.searchAll(cleanName)
                 val artist = res.artists.maxByOrNull { artistSearchScore(cleanName, it.name, it.subscriberCount) }
-                if (artist == null) return@withContext null
-                android.util.Log.d("AboutArtistCard", "Found artist: ${artist.name} channelId=${artist.channelId}")
-                val channelData = runCatching { com.vinmusic.innertube.InnerTube.fetchChannelData(artist.channelId) }.getOrNull()
+                val channelData = runCatching { com.vinmusic.innertube.InnerTube.fetchChannelData(artist?.channelId.orEmpty(), cleanName) }.getOrNull()
                 android.util.Log.d("AboutArtistCard", "channelData banner='${channelData?.bannerUrl}' avatar='${channelData?.avatarUrl}'")
 
                 if (localBanner == null && channelData?.bannerUrl.isNullOrBlank().not()) {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        com.vinmusic.download.ArtistBannerCache.downloadBanner(ctx, cleanName, artist.channelId)
+                        com.vinmusic.download.ArtistBannerCache.downloadBanner(ctx, cleanName, artist?.channelId.orEmpty())
                     }
                 }
 
                 Triple(
-                    artist.thumbnail.ifBlank { channelData?.avatarUrl.orEmpty() },
+                    channelData?.avatarUrl.orEmpty().ifBlank { artist?.thumbnail.orEmpty() },
                     channelData?.bannerUrl.orEmpty(),
-                    formatMonthlyListenersText(artist.subscriberCount.ifBlank { channelData?.subscriberCount.orEmpty() })
+                    formatMonthlyListenersText(artist?.subscriberCount?.ifBlank { channelData?.subscriberCount.orEmpty() }.orEmpty())
                 )
             }.getOrNull()
         }
@@ -3035,7 +3196,6 @@ fun parseDescriptionCredits(description: String?): List<Pair<String, String>> {
 fun SmartEQPresetChip(
     name: String,
     icon: String,
-    gradient: Brush,
     active: Boolean,
     onClick: () -> Unit
 ) {
@@ -3046,7 +3206,7 @@ fun SmartEQPresetChip(
         modifier = Modifier
             .graphicsLayer(scaleX = scale.value, scaleY = scale.value)
             .clip(RoundedCornerShape(20.dp))
-            .background(if (active) gradient else Brush.linearGradient(listOf(VinColors.White10, VinColors.White10)))
+            .background(if (active) VinColors.Accent else VinColors.White10)
             .border(1.dp, if (active) Color.White.copy(alpha = 0.3f) else VinColors.GlassBorder, RoundedCornerShape(20.dp))
             .clickable {
                 scope.launch {

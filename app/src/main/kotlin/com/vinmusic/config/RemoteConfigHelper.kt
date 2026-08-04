@@ -34,7 +34,8 @@ object RemoteConfigHelper {
                 KEY_MIN_SUPPORTED_VERSION to 6L,
                 KEY_LYRICS_PROVIDER_PRIORITY to "KuGou,NetEase,Jsoup",
                 KEY_STREAM_EXTRACT_FALLBACK to true,
-                KEY_SMART_AUTOPLAY_DEFAULT to true
+                KEY_SMART_AUTOPLAY_DEFAULT to true,
+                KEY_LASTFM_API_KEY to "526331c755d4f3a5e8c965230186a29b"
             )
             remoteConfig.setDefaultsAsync(defaults)
 

@@ -648,6 +648,40 @@ object PlayerSingleton {
                 var artBytes: ByteArray? = null
                 var onlineAndCached = isCachedComplete && isDeviceOnline
 
+                // Load artwork bytes locally first. Doing this here covers all play paths (downloaded, cached, and online).
+                val ctx = context
+                if (ctx != null) {
+                    try {
+                        val database = com.vinmusic.data.db.VinDatabase.getInstance(ctx)
+                        val dl = database.downloadDao().get(song.videoId)
+                        if (dl?.thumbnailPath != null) {
+                            val file = java.io.File(dl.thumbnailPath)
+                            if (file.exists() && file.length() > 0) artBytes = file.readBytes()
+                        }
+                        if (artBytes == null) {
+                            val cachePath = java.io.File(ctx.filesDir, "thumbnails/${song.videoId}.jpg")
+                            if (cachePath.exists() && cachePath.length() > 0) artBytes = cachePath.readBytes()
+                        }
+                        if (artBytes == null) {
+                            artBytes = loadArtBytesFromCoilCache(ctx, song.videoId, song.thumbnail, song.thumbnailHd)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Local artwork load failed: ${e.message}")
+                    }
+                }
+
+                // Immediately update notification with artwork bytes if we found them locally
+                if (artBytes != null) {
+                    withContext(Dispatchers.Main) {
+                        if (currentSong?.videoId == song.videoId) {
+                            notificationMediaItem = buildMediaItem(song, null, artBytes)
+                        }
+                    }
+                    if (ctx != null) {
+                        saveArtBytesToLocal(ctx, song.videoId, artBytes)
+                    }
+                }
+
                 // If song is fully downloaded, play it instantly from local cache (offline style) even if online
                 if (isDownloadCacheValid) {
                     Log.d(TAG, "Playing fully downloaded song instantly: videoId=${song.videoId}")
@@ -656,28 +690,6 @@ object PlayerSingleton {
                 } else if (isCachedComplete && !onlineAndCached) {
                     Log.d(TAG, "Playing fully cached offline song (device is offline): videoId=${song.videoId}")
                     url = "https://music.youtube.com/cache/${song.videoId}"
-
-                    val ctx = context
-                    if (ctx != null) {
-                        try {
-                            val database = com.vinmusic.data.db.VinDatabase.getInstance(ctx)
-                            val dl = database.downloadDao().get(song.videoId)
-                            if (dl?.thumbnailPath != null) {
-                                val file = java.io.File(dl.thumbnailPath)
-                                if (file.exists() && file.length() > 0) artBytes = file.readBytes()
-                            }
-                            if (artBytes == null) {
-                                val cachePath = java.io.File(ctx.filesDir, "thumbnails/${song.videoId}.jpg")
-                                if (cachePath.exists() && cachePath.length() > 0) artBytes = cachePath.readBytes()
-                            }
-                            // Fallback: try Coil disk cache for offline songs too
-                            if (artBytes == null) {
-                                artBytes = loadArtBytesFromCoilCache(ctx, song.videoId, song.thumbnail, song.thumbnailHd)
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Offline artwork load failed: ${e.message}")
-                        }
-                    }
                 } else {
                     errorMessage = null
                     // Fetch stream URL and artwork bytes in parallel
@@ -692,45 +704,6 @@ object PlayerSingleton {
                                 null
                             }
                         }
-                    }
-                    
-                    // 1. Immediately try to load local cached artwork for instant notification cover
-                    val ctx = context
-                    if (ctx != null) {
-                        try {
-                            val database = com.vinmusic.data.db.VinDatabase.getInstance(ctx)
-                            val dl = database.downloadDao().get(song.videoId)
-                            if (dl?.thumbnailPath != null) {
-                                val file = java.io.File(dl.thumbnailPath)
-                                if (file.exists() && file.length() > 0) artBytes = file.readBytes()
-                            }
-                            // Fallback: check standard filesDir directory
-                            if (artBytes == null) {
-                                val cachePath = java.io.File(ctx.filesDir, "thumbnails/${song.videoId}.jpg")
-                                if (cachePath.exists() && cachePath.length() > 0) artBytes = cachePath.readBytes()
-                            }
-                            // Fallback: try Coil disk cache (populated from UI browsing)
-                            if (artBytes == null) {
-                                artBytes = loadArtBytesFromCoilCache(ctx, song.videoId, song.thumbnail, song.thumbnailHd)
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Artwork disk load failed: ${e.message}")
-                        }
-                    }
-
-                    // 2. IMMEDIATELY update notification with artwork bytes (before stream URL fetch)
-                    // This makes the cover appear instantly instead of waiting 2-5s for stream URL
-                    if (artBytes != null) {
-                        withContext(Dispatchers.Main) {
-                            if (currentSong?.videoId == song.videoId) {
-                                notificationMediaItem = buildMediaItem(song, null, artBytes)
-                                // ForwardingPlayer reads notificationMediaItem automatically;
-                                // the notification will pick up artwork bytes when it refreshes
-                                // after the stream URL is set.
-                            }
-                        }
-                        // Save to local thumbnail file for future offline use
-                        saveArtBytesToLocal(ctx, song.videoId, artBytes)
                     }
 
                     var fetchedUrl = urlDeferred.await()

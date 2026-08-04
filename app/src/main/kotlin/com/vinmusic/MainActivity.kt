@@ -52,6 +52,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.first
 
 @AndroidEntryPoint
@@ -103,11 +104,25 @@ class MainActivity : ComponentActivity() {
         
         enableEdgeToEdge()
 
-        // Restore Material You (Monet) preference
-        val prefs = getSharedPreferences("vin_music_prefs", MODE_PRIVATE)
-        com.vinmusic.ui.theme.MonetState.enabled.value = prefs.getBoolean("monet_enabled", false)
-
         val authVm: AuthViewModel by viewModels()
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val db = com.vinmusic.data.db.VinDatabase.getInstance(applicationContext)
+                val downloads = db.downloadDao().getAllFlow().first()
+                val exportText = StringBuilder()
+                exportText.appendLine("=== VIN MUSIC DOWNLOADED SONGS EXPORT ===")
+                exportText.appendLine("Total Downloaded Songs: ${downloads.size}\n")
+                downloads.forEachIndexed { i, d ->
+                    exportText.appendLine("${i + 1}. ${d.title} - ${d.author} (${d.durationText}) [ID: ${d.videoId}] Path: ${d.filePath}")
+                }
+                val exportFile = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "vin_downloaded_songs.txt")
+                exportFile.writeText(exportText.toString())
+                android.util.Log.d("VIN_DOWNLOADS_EXPORT", exportText.toString())
+            } catch (e: Exception) {
+                android.util.Log.e("VIN_DOWNLOADS_EXPORT", "Export error: ${e.message}")
+            }
+        }
 
         setContent {
             VinMusicTheme {
@@ -339,7 +354,8 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                             showFullPlayer = true
                         },
                         onSongMore = { selectedSongForOptions = it },
-                        onAlbumClick = { selectedAlbumForDetail = it }
+                        onAlbumClick = { selectedAlbumForDetail = it },
+                        isPlayerOpen = showFullPlayer
                     )
                 }
                 composable("library") {

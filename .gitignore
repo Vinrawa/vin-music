@@ -49,6 +49,9 @@ hs_err_pid*.log
 
 # Debug scripts and API captures
 scratch/
+logcat_dump.txt
+.mimocode/
+
 
 # Local working notes / regression snapshots (keep local, don't commit)
 *_OLD.txt

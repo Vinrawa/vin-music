@@ -1,7 +1,7 @@
 {
-  "latestVersionCode": 14,
-  "latestVersionName": "2.17",
-  "apkUrl": "https://github.com/Vinrawa/Vin-music-v2/releases/download/v2.1.7/app-release.apk",
+  "latestVersionCode": 15,
+  "latestVersionName": "2.1.9",
+  "apkUrl": "https://github.com/Vinrawa/Vin-music-v2/releases/download/v2.1.9/app-release.apk",
   "forceUpdate": false,
-  "releaseNotes": "Security hardening, rich synced lyrics with karaoke, build performance improvements, and bug fixes."
+  "releaseNotes": "Background playback & stability fixes, Play Next, Add to Queue, Queue Reordering (long-press), Save Queue as Playlist, TasteDNA fixes, and Profile Listening Stats."
 }

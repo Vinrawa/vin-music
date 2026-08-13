@@ -17,6 +17,10 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -1062,7 +1066,27 @@ fun FullPlayerScreen(
                             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                                 when (activePanel) {
                                     "Lyrics" -> LyricsPanel(vm)
-                                    "Queue"  -> QueuePanel(vm)
+                                    "Queue"  -> QueuePanel(
+                                        vm = vm,
+                                        onSaveAsPlaylist = {
+                                            panelScope.launch(Dispatchers.IO) {
+                                                val playlistId = db.playlistDao().insertPlaylist(
+                                                    com.vinmusic.data.db.PlaylistEntity(name = "Queue - ${java.text.SimpleDateFormat("MMM d, h:mm a", java.util.Locale.getDefault()).format(java.util.Date())}")
+                                                )
+                                                val songs = vm.queue.mapIndexed { index, queueSong ->
+                                                    com.vinmusic.data.db.PlaylistSongEntity(
+                                                        playlistId = playlistId,
+                                                        videoId = queueSong.videoId,
+                                                        title = queueSong.title,
+                                                        author = queueSong.author,
+                                                        durationText = queueSong.durationText,
+                                                        position = index
+                                                    )
+                                                }
+                                                db.playlistDao().insertSongs(songs)
+                                            }
+                                        }
+                                    )
                                     "Equaliser"  -> RemixPanel(vm)
                                     "Credits" -> FullCreditsPanel(
                                         author = song.author,
@@ -1763,9 +1787,32 @@ fun LyricsPanel(vm: PlayerViewModel) {
 
 // ── Queue Panel ───────────────────────────────────────────────────────────────
 
-@OptIn(UnstableApi::class)
+@OptIn(UnstableApi::class, ExperimentalFoundationApi::class)
 @Composable
-fun QueuePanel(vm: PlayerViewModel) {
+fun QueuePanel(vm: PlayerViewModel, onSaveAsPlaylist: (() -> Unit)? = null) {
+    var showMoveDialog by remember { mutableStateOf(false) }
+    var selectedMoveIndex by remember { mutableIntStateOf(-1) }
+    val haptic = LocalHapticFeedback.current
+
+    // Move-to-position dialog
+    if (showMoveDialog && selectedMoveIndex in vm.queue.indices) {
+        MoveToPositionDialog(
+            songTitle = vm.queue[selectedMoveIndex].title,
+            currentPosition = selectedMoveIndex + 1,
+            queueSize = vm.queue.size,
+            onMove = { targetPosition ->
+                val targetIndex = (targetPosition - 1).coerceIn(0, vm.queue.size - 1)
+                vm.moveQueueItem(selectedMoveIndex, targetIndex)
+                showMoveDialog = false
+                selectedMoveIndex = -1
+            },
+            onDismiss = {
+                showMoveDialog = false
+                selectedMoveIndex = -1
+            }
+        )
+    }
+
     LazyColumn(modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(4.dp)) {
         item {
@@ -1773,12 +1820,35 @@ fun QueuePanel(vm: PlayerViewModel) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 8.dp, horizontal = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("Queue", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = VinColors.Primary)
+                Spacer(Modifier.weight(1f))
+                if (onSaveAsPlaylist != null && vm.queue.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(VinColors.White10)
+                            .clickable { onSaveAsPlaylist() }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.PlaylistAdd,
+                                contentDescription = null,
+                                tint = VinColors.AccentLight,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text("Save", fontSize = 11.sp, color = VinColors.Primary)
+                        }
+                    }
+                    Spacer(Modifier.width(6.dp))
+                }
                 Box(
-                    modifier = Modifier
+                        modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
                         .background(VinColors.White10)
                         .clickable { vm.smartSortQueueByBPM() }
@@ -1799,11 +1869,18 @@ fun QueuePanel(vm: PlayerViewModel) {
                 }
             }
         }
-        itemsIndexed(vm.queue) { i, song ->
+        itemsIndexed(vm.queue, key = { _, song -> song.videoId }) { i, song ->
             Row(modifier = Modifier.fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
                 .background(if (i == vm.queueIndex) VinColors.White10 else Color.Transparent)
-                .clickable { vm.setQueue(vm.queue, i) }
+                .combinedClickable(
+                    onClick = { vm.setQueue(vm.queue, i) },
+                    onLongClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        selectedMoveIndex = i
+                        showMoveDialog = true
+                    }
+                )
                 .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1821,6 +1898,92 @@ fun QueuePanel(vm: PlayerViewModel) {
             }
         }
     }
+}
+
+// ── Move to Position Dialog ──────────────────────────────────────────────────
+
+@Composable
+fun MoveToPositionDialog(
+    songTitle: String,
+    currentPosition: Int,
+    queueSize: Int,
+    onMove: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var positionText by remember { mutableStateOf(currentPosition.toString()) }
+    var isError by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = VinColors.Surface2,
+        shape = RoundedCornerShape(24.dp),
+        tonalElevation = 8.dp,
+        title = {
+            Text("Move Song", color = VinColors.Primary, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = songTitle,
+                    color = VinColors.AccentLight,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "Currently at position $currentPosition of $queueSize",
+                    color = VinColors.Secondary,
+                    fontSize = 12.sp
+                )
+                OutlinedTextField(
+                    value = positionText,
+                    onValueChange = { newValue ->
+                        if (newValue.all { it.isDigit() } && newValue.length <= 4) {
+                            positionText = newValue
+                            val num = newValue.toIntOrNull()
+                            isError = num == null || num < 1 || num > queueSize
+                        }
+                    },
+                    label = { Text("Move to position (1-$queueSize)", color = VinColors.Secondary) },
+                    isError = isError,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        focusedTextColor = VinColors.Primary,
+                        unfocusedTextColor = VinColors.Primary,
+                        cursorColor = VinColors.Accent,
+                        focusedIndicatorColor = VinColors.Accent,
+                        unfocusedIndicatorColor = VinColors.GlassBorder,
+                        errorIndicatorColor = Color(0xFFFF5555)
+                    ),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val target = positionText.toIntOrNull()
+                    if (target != null && target in 1..queueSize) {
+                        onMove(target)
+                    }
+                },
+                enabled = !isError && positionText.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent)
+            ) {
+                Text("Move", color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = VinColors.Secondary)
+            }
+        }
+    )
 }
 
 // ── Remix Panel ───────────────────────────────────────────────────────────────

@@ -169,6 +169,9 @@ fun SettingsScreen(
     }
 
     var topPlayedSongs by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
+    var totalListeningMinutes by remember { mutableIntStateOf(0) }
+    var dailyStreak by remember { mutableIntStateOf(0) }
+    var totalSongsPlayed by remember { mutableIntStateOf(0) }
 
     DisposableEffect(prefs) {
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -216,6 +219,53 @@ fun SettingsScreen(
                     .map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
                 scope.launch(Dispatchers.Main) {
                     topPlayedSongs = sorted
+                }
+            } catch (_: Exception) {}
+        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                val signals = db.interactionSignalDao().getAll()
+                val history = db.historyDao().getAllHistory()
+                
+                // Total songs played (unique)
+                val songsPlayed = history.size
+                
+                // Estimate total listening time from play counts and durations
+                var totalSeconds = 0L
+                for (sig in signals) {
+                    val durationParts = sig.durationText.split(":")
+                    val durationSecs = when (durationParts.size) {
+                        2 -> (durationParts[0].toIntOrNull() ?: 0) * 60 + (durationParts[1].toIntOrNull() ?: 0)
+                        3 -> (durationParts[0].toIntOrNull() ?: 0) * 3600 + (durationParts[1].toIntOrNull() ?: 0) * 60 + (durationParts[2].toIntOrNull() ?: 0)
+                        else -> 180 // default 3 min
+                    }
+                    totalSeconds += durationSecs.toLong() * sig.playCount
+                }
+                val minutes = (totalSeconds / 60).toInt()
+                
+                // Calculate daily streak from history timestamps
+                val cal = java.util.Calendar.getInstance()
+                val dayFormat = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.getDefault())
+                val activeDays = history.map { dayFormat.format(java.util.Date(it.playedAt)) }.toSet().sorted().reversed()
+                
+                var streak = 0
+                val today = dayFormat.format(java.util.Date())
+                var expectedDay = today
+                for (day in activeDays) {
+                    if (day == expectedDay) {
+                        streak++
+                        cal.time = dayFormat.parse(day)!!
+                        cal.add(java.util.Calendar.DAY_OF_YEAR, -1)
+                        expectedDay = dayFormat.format(cal.time)
+                    } else if (day < expectedDay) {
+                        break
+                    }
+                }
+                
+                scope.launch(Dispatchers.Main) {
+                    totalListeningMinutes = minutes
+                    dailyStreak = streak
+                    totalSongsPlayed = songsPlayed
                 }
             } catch (_: Exception) {}
         }
@@ -406,6 +456,82 @@ fun SettingsScreen(
                             )
                         }
                     }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+
+        // ── Listening Stats ──────────────────────────────────────────────────
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Listening Time Card
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(VinColors.Surface)
+                    .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(20.dp))
+                    .padding(16.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.Default.AccessTime, null, tint = VinColors.AccentLight, modifier = Modifier.size(20.dp))
+                    Text(
+                        text = if (totalListeningMinutes >= 60) "${totalListeningMinutes / 60}h ${totalListeningMinutes % 60}m" else "${totalListeningMinutes}m",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = VinColors.Primary
+                    )
+                    Text("Listening Time", fontSize = 11.sp, color = VinColors.Secondary)
+                }
+            }
+            
+            // Daily Streak Card
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(VinColors.Surface)
+                    .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(20.dp))
+                    .padding(16.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.Default.LocalFireDepartment, null, tint = Color(0xFFFF8C42), modifier = Modifier.size(20.dp))
+                    Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "$dailyStreak",
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = VinColors.Primary
+                        )
+                        Text("days", fontSize = 13.sp, color = VinColors.Secondary, modifier = Modifier.padding(bottom = 2.dp))
+                    }
+                    Text("Daily Streak", fontSize = 11.sp, color = VinColors.Secondary)
+                }
+            }
+            
+            // Songs Played Card
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(VinColors.Surface)
+                    .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(20.dp))
+                    .padding(16.dp)
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.Default.MusicNote, null, tint = VinColors.Accent, modifier = Modifier.size(20.dp))
+                    Text(
+                        text = "$totalSongsPlayed",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = VinColors.Primary
+                    )
+                    Text("Songs Played", fontSize = 11.sp, color = VinColors.Secondary)
                 }
             }
         }

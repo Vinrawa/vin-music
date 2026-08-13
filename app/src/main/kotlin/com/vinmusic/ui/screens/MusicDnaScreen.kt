@@ -70,11 +70,18 @@ fun MusicDnaScreen(
                         .sortedByDescending { it.second }
                         .take(5)
                         
-                    // Top Genres (inferred from top songs for simplicity)
+                    // Top Genres (inferred from top 100 most-played songs for performance)
                     val genreMap = HashMap<String, Int>()
-                    allHistory.forEach { song ->
-                        val genre = com.vinmusic.recommendation.RecommendationManager.inferMetadata(com.vinmusic.innertube.VideoItem(song.videoId, song.title, song.author)).genre
-                        genreMap[genre] = (genreMap[genre] ?: 0) + 1
+                    val topForGenres = songGroups.map { it.value.first() to it.value.size }
+                        .sortedByDescending { it.second }
+                        .take(100)
+                    topForGenres.forEach { (song, playCount) ->
+                        try {
+                            val genre = com.vinmusic.recommendation.RecommendationManager.inferMetadata(
+                                com.vinmusic.innertube.VideoItem(song.videoId, song.title, song.author)
+                            ).genre
+                            genreMap[genre] = (genreMap[genre] ?: 0) + playCount
+                        } catch (_: Exception) { /* skip on error */ }
                     }
                     favoriteGenres = genreMap.entries.map { it.key to it.value }.sortedByDescending { it.second }.take(4)
                 }

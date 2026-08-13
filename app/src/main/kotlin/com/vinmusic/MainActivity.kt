@@ -570,6 +570,8 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                 isDownloaded = isDownloaded,
                 onLikeToggle = { vm.toggleLike(song) },
                 onAddToPlaylist = { showAddPlaylistGlobal = song },
+                onPlayNext = { vm.playNextInQueue(song) },
+                onAddToQueue = { vm.addToEndOfQueue(song) },
                 onDownloadToggle = {
                     if (isDownloaded) {
                         scope.launch(Dispatchers.IO) {

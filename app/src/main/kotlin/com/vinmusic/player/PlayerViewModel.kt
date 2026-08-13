@@ -353,7 +353,7 @@ class PlayerViewModel @Inject constructor(
         try {
             val ctx = getApplication<android.app.Application>()
             val intent = android.content.Intent(ctx, VinMusicService::class.java)
-            ctx.startService(intent)
+            androidx.core.content.ContextCompat.startForegroundService(ctx, intent)
             ctx.bindService(intent, object : android.content.ServiceConnection {
                 override fun onServiceConnected(name: android.content.ComponentName?, service: android.os.IBinder?) {}
                 override fun onServiceDisconnected(name: android.content.ComponentName?) {}
@@ -388,6 +388,18 @@ class PlayerViewModel @Inject constructor(
         currentTimeMs     = 0L
         durationMs        = 0L
         PlayerSingleton.setQueue(songs, startIndex)
+    }
+
+    fun playNextInQueue(song: VideoItem) {
+        PlayerSingleton.playNextInQueue(song)
+    }
+
+    fun addToEndOfQueue(song: VideoItem) {
+        PlayerSingleton.addToEndOfQueue(song)
+    }
+
+    fun moveQueueItem(from: Int, to: Int) {
+        PlayerSingleton.moveQueueItem(from, to)
     }
 
     fun playSongWithRadio(song: VideoItem) {

@@ -84,79 +84,16 @@ object PlayerSingleton {
     private var prefs: android.content.SharedPreferences? = null
     internal var context: Context? = null
 
-    private var wakeLock: android.os.PowerManager.WakeLock? = null
-    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
-    private var releaseWakeLockJob: Job? = null
+    // WakeLock/WifiLock management removed — ExoPlayer's setWakeMode(C.WAKE_MODE_NETWORK) handles this automatically
 
     private fun acquireWakeLocks(ctx: Context) {
-        releaseWakeLockJob?.cancel()
-        scope.launch(Dispatchers.IO) {
-            try {
-                if (wakeLock == null) {
-                    val powerManager = ctx.applicationContext.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-                    wakeLock = powerManager.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "VinMusic::TransitionWakeLock").apply {
-                        setReferenceCounted(false)
-                    }
-                }
-                wakeLock?.acquire(60 * 60 * 1000L) // 1 hour timeout (resilient background)
-                Log.d(TAG, "WakeLock acquired")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to acquire WakeLock: ${e.message}")
-            }
-
-            try {
-                if (wifiLock == null) {
-                    val wifiManager = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-                    val lockType = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                        android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
-                    } else {
-                        @Suppress("DEPRECATION")
-                        android.net.wifi.WifiManager.WIFI_MODE_FULL
-                    }
-                    wifiLock = wifiManager.createWifiLock(lockType, "VinMusic::TransitionWifiLock").apply {
-                        setReferenceCounted(false)
-                    }
-                }
-                @Suppress("DEPRECATION")
-                wifiLock?.acquire()
-                Log.d(TAG, "WifiLock acquired")
-                scope.launch(Dispatchers.IO) {
-                    delay(30_000)
-                    try {
-                        if (wifiLock?.isHeld == true) {
-                            wifiLock?.release()
-                            Log.d(TAG, "WifiLock safety timeout released")
-                        }
-                    } catch (_: Exception) {}
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to acquire WifiLock: ${e.message}")
-            }
-        }
+        // No-op: ExoPlayer's setWakeMode(C.WAKE_MODE_NETWORK) handles both
+        // CPU and WiFi wake locks automatically. Manual locks were removed
+        // because a 30-second WiFi lock timeout was killing background streams.
     }
 
     private fun releaseWakeLocks() {
-        releaseWakeLockJob?.cancel()
-        releaseWakeLockJob = scope.launch(Dispatchers.IO) {
-            delay(5000) // 5 second delay to survive gapless transitions in background
-            try {
-                if (wakeLock?.isHeld == true) {
-                    wakeLock?.release()
-                    Log.d(TAG, "WakeLock released")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to release WakeLock: ${e.message}")
-            }
-
-            try {
-                if (wifiLock?.isHeld == true) {
-                    wifiLock?.release()
-                    Log.d(TAG, "WifiLock released")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to release WifiLock: ${e.message}")
-            }
-        }
+        // No-op: ExoPlayer manages wake locks via setWakeMode(C.WAKE_MODE_NETWORK)
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -693,20 +630,31 @@ object PlayerSingleton {
                 } else {
                     errorMessage = null
                     // Fetch stream URL and artwork bytes in parallel
-                    val urlDeferred = if (prefetchedUrlDeferred != null && prefetchedUrlDeferred.first == song.videoId) {
-                        prefetchedUrlDeferred.second
-                    } else {
+                    var fetchedUrl: String? = null
+                    
+                    if (prefetchedUrlDeferred != null && prefetchedUrlDeferred.first == song.videoId) {
+                        fetchedUrl = prefetchedUrlDeferred.second.await()
+                    }
+                    
+                    if (fetchedUrl == null) {
                         val quality = prefs?.getString("streaming_quality", "High (256kbps)") ?: "High (256kbps)"
-                        async(Dispatchers.IO) {
-                            try {
-                                InnerTube.getStreamUrl(song.videoId, quality)
-                            } catch (e: Exception) {
-                                null
+                        // Retry up to 2 times with 1-second delay for resilient playback
+                        for (attempt in 1..2) {
+                            fetchedUrl = withContext(Dispatchers.IO) {
+                                try {
+                                    InnerTube.getStreamUrl(song.videoId, quality)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Stream URL fetch attempt $attempt failed: ${e.message}")
+                                    null
+                                }
+                            }
+                            if (fetchedUrl != null) break
+                            if (attempt < 2) {
+                                Log.d(TAG, "Retrying stream URL fetch in 1s (attempt ${attempt + 1}/2)...")
+                                delay(1000)
                             }
                         }
                     }
-
-                    var fetchedUrl = urlDeferred.await()
                     
                     // Graceful Fallback: If network stream fetch fails but song is cached, fall back to offline playback instead of failing!
                     if (fetchedUrl == null && isCachedComplete) {
@@ -729,7 +677,7 @@ object PlayerSingleton {
                     // Ensure service is running
                     try {
                         val intent = android.content.Intent(ctx, VinMusicService::class.java)
-                        ctx.startService(intent)
+                        androidx.core.content.ContextCompat.startForegroundService(ctx, intent)
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to start VinMusicService in playSong: ${e.message}")
                     }
@@ -827,6 +775,51 @@ object PlayerSingleton {
         queue      = songs
         queueIndex = startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
         if (songs.isNotEmpty()) playSong(songs[queueIndex])
+    }
+
+    fun playNextInQueue(song: VideoItem) {
+        val currentQueue = queue.toMutableList()
+        // Remove if already in queue to avoid duplicates
+        currentQueue.removeAll { it.videoId == song.videoId }
+        val insertAt = (queueIndex + 1).coerceIn(0, currentQueue.size)
+        currentQueue.add(insertAt, song)
+        queue = currentQueue
+        // Adjust queueIndex if the current song shifted
+        if (currentSong != null) {
+            val newIdx = currentQueue.indexOfFirst { it.videoId == currentSong?.videoId }
+            if (newIdx >= 0) queueIndex = newIdx
+        }
+        Log.d(TAG, "Play Next: inserted '${song.title}' at position ${insertAt + 1}")
+    }
+
+    fun addToEndOfQueue(song: VideoItem) {
+        val currentQueue = queue.toMutableList()
+        // Don't add duplicates
+        if (currentQueue.any { it.videoId == song.videoId }) {
+            Log.d(TAG, "Add to Queue: '${song.title}' already in queue")
+            return
+        }
+        currentQueue.add(song)
+        queue = currentQueue
+        Log.d(TAG, "Add to Queue: appended '${song.title}' at position ${currentQueue.size}")
+    }
+
+    fun moveQueueItem(fromIndex: Int, toIndex: Int) {
+        if (fromIndex == toIndex) return
+        if (fromIndex !in queue.indices || toIndex !in queue.indices) return
+        
+        val mutableQueue = queue.toMutableList()
+        val movedItem = mutableQueue.removeAt(fromIndex)
+        mutableQueue.add(toIndex, movedItem)
+        
+        // Update queueIndex to follow the currently playing song
+        val currentVideoId = currentSong?.videoId
+        queue = mutableQueue
+        if (currentVideoId != null) {
+            val newIdx = mutableQueue.indexOfFirst { it.videoId == currentVideoId }
+            if (newIdx >= 0) queueIndex = newIdx
+        }
+        Log.d(TAG, "Queue reorder: moved '${movedItem.title}' from ${fromIndex + 1} to ${toIndex + 1}")
     }
 
     fun playNext() {

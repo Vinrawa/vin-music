@@ -532,6 +532,8 @@ fun SongOptionsSheet(
     isDownloaded: Boolean,
     onLikeToggle: () -> Unit,
     onAddToPlaylist: () -> Unit,
+    onPlayNext: (() -> Unit)? = null,
+    onAddToQueue: (() -> Unit)? = null,
     onRemoveFromPlaylist: (() -> Unit)? = null,
     onDownloadToggle: () -> Unit,
     onShare: () -> Unit,
@@ -616,6 +618,30 @@ fun SongOptionsSheet(
                         onDismiss()
                     }
                 )
+
+                if (onPlayNext != null) {
+                    OptionRow(
+                        icon = Icons.Default.QueuePlayNext,
+                        iconTint = VinColors.AccentLight,
+                        text = "Play Next",
+                        onClick = {
+                            onPlayNext()
+                            onDismiss()
+                        }
+                    )
+                }
+
+                if (onAddToQueue != null) {
+                    OptionRow(
+                        icon = Icons.Default.Queue,
+                        iconTint = VinColors.Secondary,
+                        text = "Add to Queue",
+                        onClick = {
+                            onAddToQueue()
+                            onDismiss()
+                        }
+                    )
+                }
 
                 if (onRemoveFromPlaylist != null) {
                     OptionRow(

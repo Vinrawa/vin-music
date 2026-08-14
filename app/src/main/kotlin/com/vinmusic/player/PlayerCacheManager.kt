@@ -6,6 +6,7 @@ import android.net.NetworkCapabilities
 import android.util.Log
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.ContentMetadata
 import androidx.room.withTransaction
 import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
@@ -13,6 +14,7 @@ import com.vinmusic.data.db.VinDatabase
 
 import com.vinmusic.innertube.InnerTube
 import com.vinmusic.innertube.VideoItem
+import com.vinmusic.diagnostics.ReliabilityDiagnostics
 import kotlinx.coroutines.*
 
 @UnstableApi
@@ -67,8 +69,15 @@ object PlayerCacheManager {
         val pCache = PlayerSingleton.getCache(ctx)
         val pCacheBytes = pCache?.getCachedBytes(videoId, 0, -1) ?: 0L
         val isPlayerCached = pCacheBytes > 1_000_000L
-        val isCachedComplete = isDownloadCacheValid || isPlayerCached
-        val totalCachedBytes = if (isDownloadCacheValid) dlCacheBytes else if (isPlayerCached) pCacheBytes else 0L
+        val playerContentLength = pCache?.getContentMetadata(videoId)
+            ?.get(ContentMetadata.KEY_CONTENT_LENGTH, -1L) ?: -1L
+        // Prefetch stores only 2.5MB. Do not mistake that partial range for a
+        // complete offline track; otherwise offline playback stops early and
+        // the network fallback is skipped.
+        val isPlayerCacheComplete = playerContentLength > 0L &&
+            pCacheBytes >= (playerContentLength * 0.99).toLong()
+        val isCachedComplete = isDownloadCacheValid || isPlayerCacheComplete
+        val totalCachedBytes = if (isDownloadCacheValid) dlCacheBytes else if (isPlayerCacheComplete) pCacheBytes else 0L
         val onlineState = isOnline(ctx)
 
         CacheCheckResult(
@@ -131,57 +140,63 @@ object PlayerCacheManager {
                         continue
                     }
                     
-                    // Get stream URL (either by waiting for nextStreamUrlDeferred or fetching it)
-                    var streamUrl: String? = null
-                    val deferredPair = nextStreamUrlDeferred
-                    if (offset == 0 && deferredPair != null && deferredPair.first == nextSong.videoId) {
-                        Log.d(TAG, "prefetchNextSongs: Found active stream URL prefetch deferred. Waiting...")
-                        streamUrl = deferredPair.second.await()
-                    } else {
-                        Log.d(TAG, "prefetchNextSongs: Fetching stream URL for prefetch offset=$offset...")
-                        streamUrl = InnerTube.getStreamUrl(nextSong.videoId, quality)
-                    }
-                    
-                    if (streamUrl.isNullOrBlank()) {
-                        Log.d(TAG, "prefetchNextSongs: Song stream URL is empty for offset=$offset. Skipping.")
-                        continue
-                    }
-                    
                     val cache = PlayerSingleton.getCache(ctx) ?: continue
-                    Log.d(TAG, "prefetchNextSongs: Starting prefetch of 2.5MB for song ${nextSong.title} (offset $offset, videoId=${nextSong.videoId})")
-                    
-                    val httpFactory = DefaultHttpDataSource.Factory()
-                        .setUserAgent("com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12; GB) gzip")
-                        .setConnectTimeoutMs(30_000)
-                        .setReadTimeoutMs(30_000)
-                        .setAllowCrossProtocolRedirects(true)
-                        .setDefaultRequestProperties(mapOf(
-                            "Origin"  to "https://www.youtube.com",
-                            "Referer" to "https://www.youtube.com/"
-                        ))
-                    
-                    val cacheDataSource = androidx.media3.datasource.cache.CacheDataSource.Factory()
-                        .setCache(cache)
-                        .setUpstreamDataSourceFactory(httpFactory)
-                        .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-                        .createDataSource()
-                    
-                    val dataSpec = androidx.media3.datasource.DataSpec.Builder()
-                        .setUri(android.net.Uri.parse(streamUrl))
-                        .setPosition(0)
-                        .setLength(2_500_000L) // 2.5MB (Approx. 2 mins of audio)
-                        .setKey(nextSong.videoId)
-                        .build()
-                    
-                    val cacheWriter = androidx.media3.datasource.cache.CacheWriter(
-                        cacheDataSource,
-                        dataSpec,
-                        null,
-                        null
-                    )
-                    
-                    cacheWriter.cache()
-                    Log.d(TAG, "prefetchNextSongs: Successfully completed prefetch of 2.5MB for ${nextSong.title} (offset $offset)")
+                    var cached = false
+                    var lastError: Exception? = null
+                    for (attempt in 1..2) {
+                        val streamUrl = try {
+                            val deferredPair = nextStreamUrlDeferred
+                            if (attempt == 1 && offset == 0 && deferredPair != null && deferredPair.first == nextSong.videoId) {
+                                Log.d(TAG, "prefetchNextSongs: Found active stream URL prefetch deferred. Waiting...")
+                                deferredPair.second.await()
+                            } else {
+                                Log.d(TAG, "prefetchNextSongs: Fetching stream URL for prefetch offset=$offset attempt=$attempt...")
+                                ReliabilityDiagnostics.record("prefetch", "resolve", nextSong.videoId, attempt = attempt, status = "started")
+                                InnerTube.getStreamUrl(nextSong.videoId, quality)
+                            }
+                        } catch (e: Exception) {
+                            lastError = e
+                            null
+                        }
+                        if (streamUrl.isNullOrBlank()) continue
+
+                        try {
+                            val httpFactory = DefaultHttpDataSource.Factory()
+                                .setUserAgent(PlayerSingleton.STREAM_USER_AGENT)
+                                .setConnectTimeoutMs(30_000)
+                                .setReadTimeoutMs(30_000)
+                                .setAllowCrossProtocolRedirects(true)
+                                .setDefaultRequestProperties(mapOf(
+                                    "Origin" to "https://www.youtube.com",
+                                    "Referer" to "https://www.youtube.com/",
+                                    "Accept-Encoding" to "identity",
+                                    "Range" to "bytes=0-"
+                                ))
+                            val cacheDataSource = androidx.media3.datasource.cache.CacheDataSource.Factory()
+                                .setCache(cache)
+                                .setUpstreamDataSourceFactory(httpFactory)
+                                .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+                                .createDataSource()
+                            val dataSpec = androidx.media3.datasource.DataSpec.Builder()
+                                .setUri(android.net.Uri.parse(streamUrl))
+                                .setPosition(0)
+                                .setLength(2_500_000L)
+                                .setKey(nextSong.videoId)
+                                .build()
+                            androidx.media3.datasource.cache.CacheWriter(cacheDataSource, dataSpec, null, null).cache()
+                            cached = true
+                            ReliabilityDiagnostics.record("prefetch", "cache", nextSong.videoId, attempt = attempt, status = "ok")
+                            Log.d(TAG, "prefetchNextSongs: Successfully completed prefetch of 2.5MB for ${nextSong.title} (offset $offset)")
+                            break
+                        } catch (e: Exception) {
+                            lastError = e
+                            val status = (e as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode
+                            ReliabilityDiagnostics.record("prefetch", "cache", nextSong.videoId, attempt = attempt, status = "failed", httpCode = status, error = e.javaClass.simpleName, details = e.message)
+                            if (status == 401 || status == 403) runCatching { cache.removeResource(nextSong.videoId) }
+                            if (attempt < 2) delay(350)
+                        }
+                    }
+                    if (!cached) Log.w(TAG, "prefetchNextSongs failed for ${nextSong.videoId}: ${lastError?.message}")
                 }
             } catch (e: CancellationException) {
                 Log.d(TAG, "prefetchNextSongs cancelled.")

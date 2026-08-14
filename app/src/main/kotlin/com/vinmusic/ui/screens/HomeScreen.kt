@@ -127,6 +127,7 @@ private val QUICK_PLAYLISTS = listOf(
 fun HomeScreen(
     vm: PlayerViewModel,
     onSongClick: (VideoItem, List<VideoItem>) -> Unit,
+    onPlayQueue: (VideoItem, List<VideoItem>) -> Unit = onSongClick,
     onSearchClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onSongMore: (VideoItem) -> Unit,
@@ -820,7 +821,7 @@ fun HomeScreen(
         HomeSpotifyMixDetailScreen(
             mix = mix,
             onBack = { selectedSpotifyMix = null },
-            onPlaySong = { song, queue -> onSongClick(song, queue) },
+            onPlaySong = { song, queue -> onPlayQueue(song, queue) },
             onImport = {
                 if (mix.songs.isNotEmpty()) {
                     scope.launch(Dispatchers.IO) {
@@ -854,7 +855,7 @@ fun HomeScreen(
             songs = recommendedPlaylistSongs,
             isLoading = isLoadingPlaylistSongs,
             onBack = { selectedRecommendedPlaylist = null },
-            onPlaySong = { song, queue -> onSongClick(song, queue) },
+            onPlaySong = { song, queue -> onPlayQueue(song, queue) },
             onImport = {
                 if (recommendedPlaylistSongs.isNotEmpty()) {
                     scope.launch(Dispatchers.IO) {
@@ -2145,7 +2146,7 @@ fun HomeScreen(
                                 modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
                             ) {
                                 items(rewindMixes, key = { it.id }) { mix ->
-                                    SpotifyMixCard(
+                                    SpotifyMixCompactCard(
                                         mix = mix,
                                         onClick = { selectedSpotifyMix = mix }
                                     )
@@ -2268,7 +2269,7 @@ fun HomeScreen(
                             val downloadedSongs = downloads.map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
                             items(downloadedSongs.take(8), key = { it.videoId }) { song ->
                                 TrackCard(song = song) {
-                                    onSongClick(song, downloadedSongs)
+                                    onPlayQueue(song, downloadedSongs)
                                 }
                             }
                         }
@@ -2479,7 +2480,7 @@ fun HomeScreen(
                                 modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
                             ) {
                                 items(rewindMixes, key = { it.id }) { mix ->
-                                    SpotifyMixCard(
+                                    SpotifyMixCompactCard(
                                         mix = mix,
                                         onClick = { selectedSpotifyMix = mix }
                                     )
@@ -2923,7 +2924,7 @@ fun HomeScreen(
                         onClick = {
                             if (mix.songs.isNotEmpty()) {
                                 val tracks = mix.songs.map { it.videoItem }
-                                onSongClick(tracks[0], tracks)
+                                onPlayQueue(tracks[0], tracks)
                                 selectedSpotifyMix = null
                             }
                         },
@@ -3005,7 +3006,7 @@ fun HomeScreen(
                                         .background(VinColors.White10)
                                         .clickable {
                                             val tracks = mix.songs.map { it.videoItem }
-                                            onSongClick(song, tracks)
+                                            onPlayQueue(song, tracks)
                                             selectedSpotifyMix = null
                                         }
                                         .padding(8.dp),
@@ -4075,6 +4076,69 @@ fun SpotifyMixCard(
             lineHeight = 14.sp,
             modifier = Modifier.padding(horizontal = 4.dp)
         )
+    }
+}
+
+@Composable
+fun SpotifyMixCompactCard(
+    mix: com.vinmusic.recommendation.SpotifyMix,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val coverUrl = mix.songs.firstOrNull()?.videoItem?.thumbnail
+
+    Row(
+        modifier = Modifier
+            .width(210.dp)
+            .graphicsLayer(
+                scaleX = if (isPressed) 0.96f else 1f,
+                scaleY = if (isPressed) 0.96f else 1f
+            )
+            .clip(RoundedCornerShape(18.dp))
+            .background(VinColors.White10)
+            .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(18.dp))
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(12.dp))
+        ) {
+            if (coverUrl != null) {
+                AsyncImage(
+                    model = coverUrl,
+                    contentDescription = mix.title,
+                    modifier = Modifier.fillMaxSize().scale(1.35f),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Box(Modifier.fillMaxSize().background(VinColors.Accent.copy(alpha = 0.25f)), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = VinColors.AccentLight, modifier = Modifier.size(24.dp))
+                }
+            }
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                mix.title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+            Text(
+                mix.description,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
+                color = VinColors.Secondary
+            )
+        }
     }
 }
 

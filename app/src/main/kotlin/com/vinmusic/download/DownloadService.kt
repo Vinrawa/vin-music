@@ -16,6 +16,7 @@ import androidx.room.withTransaction
 import com.vinmusic.data.db.*
 import com.vinmusic.innertube.InnerTube
 import com.vinmusic.player.PlayerSingleton
+import com.vinmusic.diagnostics.ReliabilityDiagnostics
 import kotlinx.coroutines.*
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -52,6 +53,7 @@ class DownloadService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        ReliabilityDiagnostics.init(applicationContext)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildServiceNotification("Initializing downloads...", 0))
     }
@@ -168,11 +170,14 @@ class DownloadService : Service() {
             val db = VinDatabase.getInstance(applicationContext)
 
             Log.d(TAG, "Fetching stream URL for download: $videoId")
+            ReliabilityDiagnostics.record("download", "start", videoId, status = "started")
             val prefs = applicationContext.getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
             val quality = prefs.getString("download_quality", "High (256 kbps)")
             fun resolveDownloadUrl(): String? {
                 repeat(2) { attempt ->
+                    ReliabilityDiagnostics.record("download", "resolve_attempt", videoId, attempt = attempt + 1, status = "started")
                     val resolved = InnerTube.getStreamUrl(videoId, quality)
+                    ReliabilityDiagnostics.record("download", "resolve_attempt", videoId, attempt = attempt + 1, status = if (resolved.isNullOrBlank()) "empty" else "ok")
                     if (!resolved.isNullOrBlank()) return resolved
                     if (attempt == 0) Thread.sleep(350)
                 }
@@ -181,6 +186,7 @@ class DownloadService : Service() {
             val url = resolveDownloadUrl()
             if (url == null) {
                 Log.e(TAG, "Failed to fetch stream URL for download: $videoId")
+                ReliabilityDiagnostics.record("download", "resolve_end", videoId, status = "failed", error = "stream_url_null", details = InnerTube.lastDebugMsg)
                 db.downloadDao().insert(entity.copy(status = "failed"))
                 updateNotification()
                 checkQueue()
@@ -227,6 +233,7 @@ class DownloadService : Service() {
                     put("Origin", "https://www.youtube.com")
                     put("Referer", "https://www.youtube.com/")
                     put("Accept-Encoding", "identity")
+                    put("Range", "bytes=0-")
                 }
 
                 val httpDataSourceFactory = DefaultHttpDataSource.Factory()
@@ -290,6 +297,7 @@ class DownloadService : Service() {
                         } catch (e: Exception) {
                             lastError = e
                             Log.e(TAG, "Error caching unknown-length stream attempt ${attempt + 1}: ${e.message}")
+                            ReliabilityDiagnostics.record("download", "cache", videoId, attempt = attempt + 1, status = "failed", httpCode = (e as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode, error = e.javaClass.simpleName, details = e.message)
                             val refreshed = resolveDownloadUrl()
                             if (!refreshed.isNullOrBlank()) {
                                 activeUrl = refreshed
@@ -335,6 +343,7 @@ class DownloadService : Service() {
                         } catch (e: Exception) {
                             lastError = e
                             Log.e(TAG, "Error caching chunk starting at $bytesCached attempt ${attempt + 1}: ${e.message}")
+                            ReliabilityDiagnostics.record("download", "chunk", videoId, attempt = attempt + 1, status = "failed", httpCode = (e as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode, error = e.javaClass.simpleName, details = "offset=$bytesCached ${e.message}")
                             val refreshed = resolveDownloadUrl()
                             if (!refreshed.isNullOrBlank()) {
                                 activeUrl = refreshed
@@ -441,13 +450,16 @@ class DownloadService : Service() {
                 }
 
                 Log.d(TAG, "Download finished successfully: $videoId. Total cached bytes stored: $finalCachedBytes. Expected content length: $contentLength")
+                ReliabilityDiagnostics.record("download", "complete", videoId, status = "ok", details = "bytes=$finalCachedBytes")
 
             } catch (e: CancellationException) {
                 Log.d(TAG, "Download cancelled: $videoId")
+                ReliabilityDiagnostics.record("download", "cancelled", videoId, status = "cancelled")
                 db.downloadDao().insert(downloadingEntity.copy(status = "failed", progress = 0))
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error downloading $videoId: ${e.message}", e)
+                ReliabilityDiagnostics.record("download", "failed", videoId, status = "failed", httpCode = (e as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode, error = e.javaClass.simpleName, details = e.message)
                 val current = db.downloadDao().get(videoId)
                 if (current != null) {
                     db.downloadDao().insert(current.copy(status = "failed"))

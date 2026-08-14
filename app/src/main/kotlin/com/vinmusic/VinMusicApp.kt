@@ -12,6 +12,7 @@ import coil3.memory.MemoryCache
 import coil3.request.crossfade
 
 import io.sentry.android.core.SentryAndroid
+import com.vinmusic.diagnostics.ReliabilityDiagnostics
 
 @HiltAndroidApp
 class VinMusicApp : Application(), SingletonImageLoader.Factory {
@@ -27,6 +28,7 @@ class VinMusicApp : Application(), SingletonImageLoader.Factory {
         NewPipeInit.init()
         YTMusicApi.attachContext(this)
         com.vinmusic.config.RemoteConfigHelper.init()
+        ReliabilityDiagnostics.init(this)
     }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {

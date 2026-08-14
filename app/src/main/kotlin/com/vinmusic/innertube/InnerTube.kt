@@ -20,8 +20,10 @@ object InnerTube {
     /** Last log message — shown on screen without ADB */
     var lastDebugMsg = ""; private set
 
-    /** Visitor data token (fetched once, used in every player request) */
+    /** Visitor data token, refreshed periodically for long-running sessions. */
     @Volatile private var visitorData = ""
+    @Volatile private var visitorFetchedAt = 0L
+    private const val VISITOR_TTL_MS = 30 * 60 * 1000L
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -69,8 +71,8 @@ object InnerTube {
 
     // ── Visitor data ──────────────────────────────────────────────────────────
     /** Fetches a fresh YouTube visitor data token (helps bypass LOGIN_REQUIRED) */
-    private fun ensureVisitorData() {
-        if (visitorData.isNotEmpty()) return
+    private fun ensureVisitorData(force: Boolean = false) {
+        if (!force && visitorData.isNotEmpty() && System.currentTimeMillis() - visitorFetchedAt < VISITOR_TTL_MS) return
         try {
             val html = http.newCall(Request.Builder()
                 .url("https://www.youtube.com/")
@@ -82,6 +84,7 @@ object InnerTube {
                 Regex("\"VISITOR_DATA\":\"([^\"]+)\"").find(it)?.groupValues?.get(1)
             }
             visitorData = vd ?: ""
+            visitorFetchedAt = System.currentTimeMillis()
             log("visitorData: ${if (vd != null) "${vd.take(20)}... [OK]" else "not found"}")
         } catch (e: Exception) {
             log("visitorData fetch err: ${e.message?.take(60)}")
@@ -905,6 +908,106 @@ object InnerTube {
     }
 
     // ── YouTube Music Browse and Search API ───────────────────────────────────
+
+    /**
+     * Load an artist's actual YouTube channel Videos tab and rank it by the
+     * view-count metadata returned by YouTube (Popular order).
+     */
+    fun getArtistChannelVideos(channelIdInput: String, artistNameFallback: String = ""): List<VideoItem> {
+        var channelId = channelIdInput.trim()
+        if (channelId.isBlank() && artistNameFallback.isNotBlank()) {
+            channelId = resolveArtistChannelId(artistNameFallback)
+        }
+        if (channelId.isBlank()) return emptyList()
+
+        fun fetch(params: String?): String? {
+            val body = buildMap<String, Any> {
+                put("browseId", channelId)
+                put("context", mapOf("client" to mapOf(
+                    "clientName" to "WEB",
+                    "clientVersion" to "2.20231219.04.00",
+                    "hl" to "en",
+                    "gl" to "IN"
+                )))
+                if (!params.isNullOrBlank()) put("params", params)
+            }
+            return try {
+                http.newCall(Request.Builder()
+                    .url("$BASE/browse?prettyPrint=false")
+                    .post(gson.toJson(body).toRequestBody(JSON))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .header("X-YouTube-Client-Name", "1")
+                    .header("X-YouTube-Client-Version", "2.20231219.04.00")
+                    .header("Origin", "https://www.youtube.com")
+                    .header("Referer", "https://www.youtube.com/")
+                    .build()
+                ).execute().use { it.body?.string() }
+            } catch (e: Exception) {
+                log("getArtistChannelVideos request error: ${e.message}")
+                null
+            }
+        }
+
+        fun viewCount(text: String): Long {
+            val match = Regex("([0-9]+(?:\\.[0-9]+)?)[ ]*([kmb])?")
+                .find(text.lowercase().replace(",", "")) ?: return 0L
+            val number = match.groupValues[1].toDoubleOrNull() ?: return 0L
+            val multiplier = when (match.groupValues.getOrNull(2)) {
+                "k" -> 1_000.0
+                "m" -> 1_000_000.0
+                "b" -> 1_000_000_000.0
+                else -> 1.0
+            }
+            return (number * multiplier).toLong()
+        }
+
+        fun parse(raw: String): List<Pair<VideoItem, Long>> {
+            val result = mutableListOf<Pair<VideoItem, Long>>()
+            try {
+                val root = gson.fromJson(raw, Map::class.java)
+                fun scan(node: Any?) {
+                    when (node) {
+                        is Map<*, *> -> {
+                            val rich = node["richItemRenderer"] as? Map<*, *>
+                            val content = rich?.get("content") as? Map<*, *>
+                            val renderer = (node["videoRenderer"]
+                                ?: node["gridVideoRenderer"]
+                                ?: content?.get("videoRenderer")
+                                ?: content?.get("gridVideoRenderer")) as? Map<*, *>
+                            if (renderer != null) {
+                                val id = renderer["videoId"] as? String ?: ""
+                                val title = ytText(renderer["title"])
+                                val author = ytText(renderer["ownerText"])
+                                    .ifBlank { ytText(renderer["shortBylineText"]) }
+                                    .ifBlank { artistNameFallback }
+                                val duration = ytText(renderer["lengthText"])
+                                val views = ytText(renderer["viewCountText"])
+                                    .ifBlank { ytText(renderer["shortViewCountText"]) }
+                                if (id.isNotBlank() && title.isNotBlank()) {
+                                    result += VideoItem(id, title, author, duration) to viewCount(views)
+                                }
+                            }
+                            node.values.forEach { scan(it) }
+                        }
+                        is List<*> -> node.forEach { scan(it) }
+                    }
+                }
+                scan(root)
+            } catch (e: Exception) {
+                log("getArtistChannelVideos parse error: ${e.message}")
+            }
+            return result
+        }
+
+        val parsed = fetch("EgZ2aWRlb3M%3D")?.let(::parse).orEmpty()
+        val fallback = if (parsed.isEmpty()) fetch(null)?.let(::parse).orEmpty() else emptyList()
+        return (parsed + fallback)
+            .distinctBy { it.first.videoId }
+            .sortedByDescending { it.second }
+            .take(50)
+            .map { it.first }
+    }
 
     /**
      * Curated YouTube Music Browse API: Retrieves proper albums and singles for an artist
@@ -1882,12 +1985,14 @@ object InnerTube {
         } catch (e: Exception) { AllSearchResults() }
     }
 
-    /** Get top songs for an artist by name */
+    /** Get top songs for an artist, preferring the artist channel's Popular videos. */
     fun getArtistTopSongs(artistName: String): List<VideoItem> =
-        (search("$artistName top songs") + searchYouTubeArtistUploads(artistName))
-            .distinctBy { it.videoId }
-            .sortedByDescending { artistUploadScore(artistName, it) }
-            .take(50)
+        getArtistChannelVideos("", artistName).ifEmpty {
+            (search("$artistName top songs") + searchYouTubeArtistUploads(artistName))
+                .distinctBy { it.videoId }
+                .sortedByDescending { artistUploadScore(artistName, it) }
+                .take(50)
+        }
 
     // ── Channel browse (artist banner + bio) ─────────────────────────────────
     data class ChannelData(val bannerUrl: String = "", val bio: String = "", val subscriberCount: String = "", val title: String = "", val avatarUrl: String = "")

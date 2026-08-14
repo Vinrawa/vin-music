@@ -570,6 +570,11 @@ abstract class VinDatabase : RoomDatabase() {
 
         private val MIGRATION_14_15 = object : Migration(14, 15) {
             override fun migrate(database: SupportSQLiteDatabase) {
+                // These nullable thumbnail columns were added to DownloadEntity
+                // but were missing from the 14 -> 15 migration. Existing users
+                // therefore crashed during Room schema validation on launch.
+                database.execSQL("ALTER TABLE `downloads` ADD COLUMN `thumbnailPath` TEXT")
+                database.execSQL("ALTER TABLE `downloads` ADD COLUMN `thumbnailUrl` TEXT")
                 database.execSQL("ALTER TABLE `cached_lyrics` ADD COLUMN `source` TEXT NOT NULL DEFAULT ''")
                 database.execSQL("ALTER TABLE `cached_lyrics` ADD COLUMN `fetchedAt` INTEGER NOT NULL DEFAULT 0")
                 database.execSQL("ALTER TABLE `cached_lyrics` ADD COLUMN `pinned` INTEGER NOT NULL DEFAULT 0")

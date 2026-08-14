@@ -15,6 +15,7 @@ import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
@@ -25,6 +26,7 @@ import androidx.compose.ui.unit.*
 import androidx.media3.common.util.UnstableApi
 import coil3.compose.AsyncImage
 import com.vinmusic.player.PlayerViewModel
+import com.vinmusic.player.EQ_PRESETS
 import com.vinmusic.ui.theme.VinColors
 import com.vinmusic.ui.components.UserAvatar
 import com.vinmusic.innertube.VideoItem
@@ -433,7 +435,7 @@ fun SettingsScreen(
                             AsyncImage(
                                 model = song.thumbnail,
                                 contentDescription = song.title,
-                                modifier = Modifier.fillMaxSize(),
+                                modifier = Modifier.fillMaxSize().scale(1.35f),
                                 contentScale = ContentScale.Crop
                             )
                         }
@@ -693,6 +695,7 @@ fun SettingsScreen(
 
         // ── Google Cloud Sync Card ──
         val currentUser = authVm.currentUser
+        val cloudConnected = currentUser != null || authVm.authState is AuthViewModel.AuthState.Authenticated
         val syncState = authVm.syncState
         val lastSyncMessage = authVm.lastSyncMessage
         
@@ -700,16 +703,20 @@ fun SettingsScreen(
         val launcher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.StartActivityForResult()
         ) { result ->
-            if (result.resultCode == android.app.Activity.RESULT_OK) {
+            if (result.resultCode == android.app.Activity.RESULT_OK && result.data != null) {
                 val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
                 try {
                     val account = task.getResult(com.google.android.gms.common.api.ApiException::class.java)
                     if (account != null) {
                         authVm.signInWithGoogle(account)
                     }
-                } catch (e: Exception) {
-                    Toast.makeText(ctx, "Google Sign-In failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                } catch (e: com.google.android.gms.common.api.ApiException) {
+                    val message = "Google Sign-In failed (${e.statusCode}). Please try again."
+                    authVm.reportGoogleSignInError(message)
+                    Toast.makeText(ctx, message, Toast.LENGTH_SHORT).show()
                 }
+            } else if (result.resultCode != android.app.Activity.RESULT_OK) {
+                authVm.reportGoogleSignInError("Google sign-in was cancelled.")
             }
         }
 
@@ -753,14 +760,14 @@ fun SettingsScreen(
                             color = VinColors.Primary
                         )
                         Text(
-                            text = if (currentUser != null) "Backup linked to ${currentUser.email}"
+                            text = if (cloudConnected) "Backup linked to ${currentUser?.email ?: "Google account"}"
                                    else "Tap Connect to backup your playlists & likes",
                             fontSize = 12.sp,
                             color = VinColors.Secondary,
                             lineHeight = 16.sp
                         )
                     }
-                    if (currentUser == null) {
+                    if (!cloudConnected) {
                         Button(
                             onClick = {
                                 if (!authVm.isGoogleConfigured(ctx)) {
@@ -778,7 +785,7 @@ fun SettingsScreen(
                     }
                 }
 
-                if (currentUser != null) {
+                if (cloudConnected) {
                     HorizontalDivider(color = VinColors.GlassBorder.copy(alpha = 0.3f))
                     
                     if (lastSyncMessage.isNotEmpty()) {
@@ -1212,6 +1219,24 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    Text("Presets", fontSize = 12.sp, color = VinColors.Secondary)
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        EQ_PRESETS.forEach { preset ->
+                            FilterChip(
+                                selected = vm.eqPreset == preset.name,
+                                onClick = { vm.eqEnabled = true; vm.applyPreset(preset) },
+                                label = { Text(preset.name, fontSize = 11.sp) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = VinColors.Accent.copy(alpha = 0.25f),
+                                    selectedLabelColor = VinColors.AccentLight,
+                                    labelColor = VinColors.Secondary
+                                )
+                            )
+                        }
+                    }
                     listOf(
                         "60 Hz" to vm.eqSubBass to { v: Float -> vm.eqSubBass = v; vm.applyEQ() },
                         "230 Hz" to vm.eqBass to { v: Float -> vm.eqBass = v; vm.applyEQ() },
@@ -1244,6 +1269,35 @@ fun SettingsScreen(
                                 )
                             )
                         }
+                    }
+                    Text("Effects", fontSize = 12.sp, color = VinColors.Secondary)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = vm.concertHallEnabled,
+                            onClick = { vm.updateConcertHallEnabled(!vm.concertHallEnabled) },
+                            label = { Text("Concert Hall", fontSize = 11.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = VinColors.Accent.copy(alpha = 0.25f),
+                                selectedLabelColor = VinColors.AccentLight,
+                                labelColor = VinColors.Secondary
+                            )
+                        )
+                        FilterChip(
+                            selected = vm.audioNormalizationEnabled,
+                            onClick = {
+                                vm.audioNormalizationEnabled = !vm.audioNormalizationEnabled
+                                vm.applyEQ()
+                            },
+                            label = { Text("Loudness", fontSize = 11.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = VinColors.Accent.copy(alpha = 0.25f),
+                                selectedLabelColor = VinColors.AccentLight,
+                                labelColor = VinColors.Secondary
+                            )
+                        )
                     }
                 }
             },

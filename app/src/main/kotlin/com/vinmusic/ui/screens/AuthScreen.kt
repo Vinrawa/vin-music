@@ -1,6 +1,7 @@
 package com.vinmusic.ui.screens
 
 import android.content.Context
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -120,17 +121,31 @@ fun AuthScreen(
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
-            try {
+        Log.d("AuthScreen", "Google sign-in result: resultCode=${result.resultCode}, hasData=${result.data != null}")
+        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+        try {
+                if (result.resultCode != android.app.Activity.RESULT_OK && result.data == null) {
+                    authVm.reportGoogleSignInError("Google sign-in was cancelled.")
+                    Toast.makeText(context, "Google sign-in was cancelled or could not start.", Toast.LENGTH_SHORT).show()
+                    return@rememberLauncherForActivityResult
+                }
                 val account = task.getResult(com.google.android.gms.common.api.ApiException::class.java)
-                if (account != null) {
+                Log.d("AuthScreen", "Google account: email=${account?.email}, hasIdToken=${account?.idToken != null}")
+                if (account == null) {
+                    authVm.reportGoogleSignInError("Google did not return an account.")
+                } else {
                     authVm.signInWithGoogle(account)
                 }
+            } catch (e: com.google.android.gms.common.api.ApiException) {
+                val message = "Google sign-in failed (status ${e.statusCode})."
+                Log.e("AuthScreen", message, e)
+                authVm.reportGoogleSignInError(message)
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
-                Toast.makeText(context, "Google Sign-In failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                Log.e("AuthScreen", "Google sign-in result failed", e)
+                authVm.reportGoogleSignInError(e.message ?: "Google sign-in failed.")
+                Toast.makeText(context, "Google sign-in failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
-        }
     }
 
     var nameInput by remember { mutableStateOf("") }

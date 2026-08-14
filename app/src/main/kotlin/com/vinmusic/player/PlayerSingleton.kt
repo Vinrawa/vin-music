@@ -13,6 +13,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
@@ -20,6 +21,7 @@ import androidx.room.withTransaction
 import com.vinmusic.data.db.*
 import com.vinmusic.innertube.InnerTube
 import com.vinmusic.innertube.VideoItem
+import com.vinmusic.diagnostics.ReliabilityDiagnostics
 import com.vinmusic.recommendation.RecommendationRepository
 import kotlinx.coroutines.*
 import java.io.File
@@ -37,6 +39,9 @@ import coil3.toBitmap
 @UnstableApi
 object PlayerSingleton {
     private const val TAG = "VIN_PLAYER"
+    internal const val STREAM_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
 
@@ -125,6 +130,7 @@ object PlayerSingleton {
             _player ?: run {
                 val ctx = context.applicationContext
                 this.context = ctx
+                ReliabilityDiagnostics.init(ctx)
                 val databaseInstance = VinDatabase.getInstance(ctx)
                 db = databaseInstance
                 val recDb = com.vinmusic.recommendation.RecommendationDatabase.getInstance(ctx)
@@ -174,16 +180,24 @@ object PlayerSingleton {
                         // Re-apply stored playback parameters after song loads
                         reapplyPlaybackParameters()
                         prefetchNextSong()
+                        ReliabilityDiagnostics.record("playback", "ready", currentSong?.videoId, status = "ok")
                     }
                     Player.STATE_BUFFERING -> isLoading = true
                     Player.STATE_ENDED     -> onSongEnded()
                     Player.STATE_IDLE      -> releaseWakeLocks()
                 }
             }
-                        override fun onPlayerError(error: PlaybackException) {
+            override fun onPlayerError(error: PlaybackException) {
                 val msg = error.message ?: "unknown"
                 val cause = error.cause?.message ?: "no cause"
+                val httpCode = findHttpCode(error)
                 Log.e(TAG, "PlayerError: $msg | cause: $cause", error)
+                ReliabilityDiagnostics.record(
+                    "playback", "error", currentSong?.videoId,
+                    attempt = errorRetryCount + 1,
+                    status = "failed", httpCode = httpCode,
+                    error = msg, details = cause
+                )
                 
                 val song = currentSong
                 if (errorRetryCount < 2 && song != null) {
@@ -192,13 +206,26 @@ object PlayerSingleton {
                     errorRetryCount++
                     scope.launch {
                         nextStreamUrlDeferred = null
+                        if (httpCode == 401 || httpCode == 403) {
+                            // The online player cache is disposable. Sweep it on an
+                            // authorization failure so an expired/partial signed URL
+                            // cannot survive and force the user to clear app data.
+                            runCatching { context?.let { clearPlayerCache(it, "http_$httpCode") } }
+                            ReliabilityDiagnostics.record(
+                                "playback", "cache_invalidate", song.videoId,
+                                attempt = errorRetryCount, status = "ok", httpCode = httpCode
+                            )
+                        }
                         playSong(song, startPositionMs = pos)
                     }
                     return
                 }
                 
                 isLoading    = false
-                errorMessage = "Playback error. Tap a song to retry."
+                errorMessage = when (httpCode) {
+                    401, 403 -> "YouTube rejected this stream. Tap to retry."
+                    else -> "Playback failed. Check your connection and retry."
+                }
                 playerInstance.stop()
                 releaseWakeLocks()
             }
@@ -349,20 +376,36 @@ object PlayerSingleton {
         }
     }
 
+    /** Clear only the disposable online player cache; downloaded songs are separate. */
+    private fun clearPlayerCache(context: Context, reason: String) {
+        val cache = getCache(context) ?: return
+        val keys = runCatching { cache.keys.toList() }.getOrDefault(emptyList())
+        keys.forEach { key -> runCatching { cache.removeResource(key) } }
+        Log.w(TAG, "Cleared player cache after $reason (${keys.size} entries)")
+        ReliabilityDiagnostics.record(
+            "playback", "cache_clear", currentSong?.videoId,
+            status = "ok", details = reason
+        )
+    }
+
     private fun createDynamicHttpDataSourceFactory(): androidx.media3.datasource.DataSource.Factory {
         return androidx.media3.datasource.DataSource.Factory {
             object : androidx.media3.datasource.DataSource {
                 private var currentDataSource: androidx.media3.datasource.DataSource? = null
                 override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {}
                 override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
-                    val url = dataSpec.uri.toString()
-                    val resolvedUa = com.vinmusic.innertube.InnerTube.getUserAgentForUrl(url)
-                    val requestProps = buildMap<String, String> {
-                        if (resolvedUa.startsWith("Mozilla")) {
-                            put("Origin", "https://www.youtube.com")
-                            put("Referer", "https://www.youtube.com/")
-                        }
-                    }
+                    // The resolver's `c=IOS`/`c=ANDROID_VR` query parameter
+                    // does not mean the signed googlevideo request should use
+                    // that app's UA. Match the working download request.
+                    val resolvedUa = STREAM_USER_AGENT
+                    val requestProps = mapOf(
+                        "Origin" to "https://www.youtube.com",
+                        "Referer" to "https://www.youtube.com/",
+                        "Accept-Encoding" to "identity",
+                        // Some googlevideo responses reject an un-ranged initial GET.
+                        // Media3 overwrites this for seek/chunk DataSpecs.
+                        "Range" to "bytes=0-"
+                    )
                     val source = androidx.media3.datasource.DefaultHttpDataSource.Factory()
                         .setUserAgent(resolvedUa)
                         .setConnectTimeoutMs(30_000)
@@ -382,6 +425,15 @@ object PlayerSingleton {
                 }
             }
         }
+    }
+
+    private fun findHttpCode(error: Throwable): Int? {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is HttpDataSource.InvalidResponseCodeException) return current.responseCode
+            current = current.cause
+        }
+        return null
     }
 
     private fun buildPlayer(ctx: Context): ExoPlayer {
@@ -516,6 +568,7 @@ object PlayerSingleton {
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun playSong(song: VideoItem, startPositionMs: Long = 0L) {
+        ReliabilityDiagnostics.record("playback", "start", song.videoId, status = "started")
         context?.let { acquireWakeLocks(it) }
         fetchJob?.cancel()
         val safeStartPositionMs = startPositionMs.coerceAtLeast(0L)
@@ -566,6 +619,7 @@ object PlayerSingleton {
         fetchJob = scope.launch {
             try {
                 Log.d(TAG, "Fetching stream/download for videoId=${song.videoId}")
+                ReliabilityDiagnostics.record("playback", "resolve_start", song.videoId, status = "started")
 
                 // 1. Offload SimpleCache queries, DB checks, and network checks entirely to Dispatchers.IO to avoid blocking the Main UI Thread and causing stuttering!
                 val cacheResult = withContext(Dispatchers.IO) {
@@ -634,12 +688,17 @@ object PlayerSingleton {
                     
                     if (prefetchedUrlDeferred != null && prefetchedUrlDeferred.first == song.videoId) {
                         fetchedUrl = prefetchedUrlDeferred.second.await()
+                        ReliabilityDiagnostics.record(
+                            "playback", "resolve_prefetch", song.videoId,
+                            status = if (fetchedUrl != null) "ok" else "empty"
+                        )
                     }
                     
                     if (fetchedUrl == null) {
                         val quality = prefs?.getString("streaming_quality", "High (256kbps)") ?: "High (256kbps)"
                         // Retry up to 2 times with 1-second delay for resilient playback
                         for (attempt in 1..2) {
+                            ReliabilityDiagnostics.record("playback", "resolve_attempt", song.videoId, attempt = attempt, status = "started")
                             fetchedUrl = withContext(Dispatchers.IO) {
                                 try {
                                     InnerTube.getStreamUrl(song.videoId, quality)
@@ -648,6 +707,10 @@ object PlayerSingleton {
                                     null
                                 }
                             }
+                            ReliabilityDiagnostics.record(
+                                "playback", "resolve_attempt", song.videoId,
+                                attempt = attempt, status = if (fetchedUrl != null) "ok" else "empty"
+                            )
                             if (fetchedUrl != null) break
                             if (attempt < 2) {
                                 Log.d(TAG, "Retrying stream URL fetch in 1s (attempt ${attempt + 1}/2)...")
@@ -667,6 +730,7 @@ object PlayerSingleton {
                         isLoading    = false
                         errorMessage = "Couldn't load this track. Check your connection and try again."
                         Log.e(TAG, "Stream URL is NULL for ${song.videoId} | ${InnerTube.lastDebugMsg}")
+                        ReliabilityDiagnostics.record("playback", "resolve_end", song.videoId, status = "failed", error = "stream_url_null", details = InnerTube.lastDebugMsg)
                         return@launch
                     }
                     url = fetchedUrl
@@ -686,6 +750,7 @@ object PlayerSingleton {
                     notificationMediaItem = mediaItem
 
                     Log.d(TAG, "Setting media item: ${url.take(80)}")
+                    ReliabilityDiagnostics.record("playback", "prepare", song.videoId, status = "started", details = if (onlineAndCached) "online_cached" else "network_or_download")
                     player.playWhenReady = true
                     
                     if (isCachedComplete) {
@@ -762,6 +827,7 @@ object PlayerSingleton {
                 throw e
             } catch (e: Throwable) {
                 Log.e(TAG, "Error in playSong fetch: ${e.message}", e)
+                ReliabilityDiagnostics.record("playback", "exception", song.videoId, status = "failed", error = e.javaClass.simpleName, details = e.message)
                 withContext(Dispatchers.Main) {
                     isLoading = false
                     errorMessage = "Couldn't play this track. Check your connection and try again."

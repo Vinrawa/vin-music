@@ -173,6 +173,26 @@ fun SearchScreen(
 
             if (merged.artists.isNotEmpty()) {
                 val artist = merged.artists[0]
+                // When the query resolves directly to an artist, enrich the
+                // Videos tab with that artist's own channel feed. The channel
+                // loader already ranks entries by YouTube view count, so these
+                // appear as the Popular videos first instead of generic search
+                // matches from unrelated uploaders.
+                scope.launch(Dispatchers.IO) {
+                    val channelVideos = runCatching {
+                        InnerTube.getArtistChannelVideos(artist.channelId, artist.name)
+                    }.getOrDefault(emptyList())
+                    if (channelVideos.isNotEmpty()) {
+                        withContext(Dispatchers.Main) {
+                            if (query.trim().equals(q.trim(), ignoreCase = true)) {
+                                allResults = allResults.copy(
+                                    videos = (channelVideos + allResults.videos)
+                                        .distinctBy { it.videoId }
+                                )
+                            }
+                        }
+                    }
+                }
                 scope.launch(Dispatchers.IO) {
                     var mergedReleases = emptyList<AlbumItem>()
                     try {

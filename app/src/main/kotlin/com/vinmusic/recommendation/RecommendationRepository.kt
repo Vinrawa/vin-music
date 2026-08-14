@@ -19,6 +19,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import javax.inject.Inject
@@ -46,6 +48,19 @@ class RecommendationRepository @Inject constructor(
     private val prefs = context.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE)
     private val gson = Gson()
     private val CACHE_EXPIRY_MS = 15 * 60 * 1000L // 15 minutes
+    /**
+     * Smart Queue requests can be triggered by both the player and the UI at the
+     * same time.  A single lock makes the second caller reuse the cache written by
+     * the first caller instead of starting another set of network searches.
+     */
+    private val smartQueueMutex = Mutex()
+
+    private fun normalizeQueueArtist(artist: String): String =
+        RecommendationManager.normalizeArtistName(artist).trim().lowercase(Locale.ROOT)
+
+    private fun sameQueueLanguage(first: String?, second: String?): Boolean =
+        !first.isNullOrBlank() && !second.isNullOrBlank() &&
+            first.trim().equals(second.trim(), ignoreCase = true)
 
     // ── Local Disk Cache Helpers ──────────────────────────────────────────────
 
@@ -515,14 +530,33 @@ class RecommendationRepository @Inject constructor(
         selected
     }
 
+    private data class SmartQueueCandidate(
+        val item: VideoItem,
+        val meta: SongMetadata,
+        val seedSimilarity: Double,
+        val tasteScore: Double,
+        val behaviorScore: Double,
+        val recentPenalty: Double,
+        val baseScore: Double
+    )
+
     suspend fun getSongRadio(videoId: String, fallbackTitle: String = "", fallbackAuthor: String = "", currentQueue: List<VideoItem> = emptyList()): List<VideoItem> = withContext(Dispatchers.IO) {
-        val cacheKey = "song_radio_v2_$videoId"
-        val cached = loadVideoItems(cacheKey)
+        smartQueueMutex.withLock {
+            getSongRadioInternal(videoId, fallbackTitle, fallbackAuthor, currentQueue)
+        }
+    }
+
+    private suspend fun getSongRadioInternal(videoId: String, fallbackTitle: String, fallbackAuthor: String, currentQueue: List<VideoItem>): List<VideoItem> {
+        // v3 invalidates the old random/stale queue and enforces the repository's
+        // 15-minute TTL for Smart Queue only. Home recommendation caches are untouched.
+        val cacheKey = "song_radio_v3_$videoId"
+        val cached = loadVideoItems(cacheKey, allowStale = false)
         if (cached != null && cached.isNotEmpty()) {
-            return@withContext cached
+            Log.d(TAG, "Smart Queue cache hit for seed=$videoId size=${cached.size}")
+            return cached
         }
 
-        Log.d(TAG, "Generating YTM-first radio for seed track $videoId...")
+        Log.d(TAG, "Generating Smart Queue for seed track $videoId...")
 
         val pool = mutableListOf<VideoItem>()
         
@@ -533,9 +567,17 @@ class RecommendationRepository @Inject constructor(
         val seedTitle = historyEntry?.title ?: likedEntry?.title ?: signalEntry?.title ?: fallbackTitle
         val seedAuthor = historyEntry?.author ?: likedEntry?.author ?: signalEntry?.author ?: fallbackAuthor
 
-        var seedMeta = if (seedTitle.isNotEmpty()) {
-            RecommendationManager.getCachedOrInferredMetadata(db, VideoItem(videoId, seedTitle, seedAuthor))
+        val profile = RecommendationManager.buildTasteProfile(db)
+        val seedMeta = if (seedTitle.isNotEmpty()) {
+            // Use real cached/estimated audio features whenever available. The
+            // title-based estimator remains the fallback for unknown tracks.
+            RecommendationManager.getCachedOrInferredMetadata(
+                db,
+                VideoItem(videoId, seedTitle, seedAuthor),
+                context
+            )
         } else null
+        val profileLanguage = profile.topLanguages.firstOrNull()?.first?.takeIf { it.isNotBlank() }
 
         val online = isOnline()
 
@@ -621,9 +663,12 @@ class RecommendationRepository @Inject constructor(
                     else -> "" // English - no prefix needed
                 }
 
+                // Keep query order deterministic. Exploration is controlled by
+                // the later ranking stage instead of randomising the candidate pool.
                 val crossGenres = listOf("rap hip hop", "pop", "r&b", "indie", "electronic", "rock", "lofi")
                     .filter { !genreLower.contains(it.take(3)) }
-                    .shuffled().take(3)
+                    .sortedBy { it }
+                    .take(3)
 
                 val searchQueries = mutableListOf<String>()
                 // Same language + genre queries
@@ -667,126 +712,231 @@ class RecommendationRepository @Inject constructor(
             val downloadedItems = downloads.map { 
                 VideoItem(it.videoId, it.title, it.author, it.durationText) 
             }
-            val available = downloadedItems.filter { it.videoId != videoId }.shuffled()
+            val available = downloadedItems
+                .filter { it.videoId != videoId }
+                .sortedWith(compareBy<VideoItem>({ it.author.lowercase(Locale.ROOT) }, { it.title.lowercase(Locale.ROOT) }, { it.videoId }))
             pool.addAll(available)
         }
 
-        val profile = RecommendationManager.buildTasteProfile(db)
-        val recentlyPlayedTitles = db.historyDao().getAllHistory().take(20).map { it.title }
-        val currentQueueArtists = currentQueue.map { it.author.lowercase(Locale.ROOT) }.toSet()
+        val history = db.historyDao().getAllHistory()
+        val recentlyPlayedIds = history.take(20).map { it.videoId }.toSet()
+        val recentlyPlayedTitles = history.take(20).map { RecommendationManager.normalizeTitle(it.title) }.toSet()
+        val signals = db.interactionSignalDao().getAll().associateBy { it.videoId }
+        val currentQueueArtists = currentQueue.map { normalizeQueueArtist(it.author) }.toSet()
 
-        val filteredPairs = pool.filter { item ->
-            item.videoId != videoId &&
-            !RecommendationManager.isCompilationTrack(item.title, item.durationText) &&
-            !RecommendationManager.isNonMusicVideo(item.title, item.author) &&
-            !RecommendationManager.isUnofficialContent(item.title, item.author) &&
-            !profile.skippedTracks.contains(item.videoId) &&
-            !profile.skippedArtists.contains(item.author.lowercase(Locale.ROOT)) &&
-            !(seedTitle.isNotEmpty() && RecommendationManager.isTooSimilar(seedTitle, item.title)) &&
-            !recentlyPlayedTitles.contains(item.title)
-        }.mapNotNull { item ->
-            val meta = RecommendationManager.getCachedOrInferredMetadata(db, item)
+        // De-duplicate before ranking. A related track can arrive from YTM,
+        // radio, Last.fm and search under different result objects.
+        val dedupedPool = pool.distinctBy {
+            "${RecommendationManager.normalizeTitle(it.title)}|${normalizeQueueArtist(it.author)}"
+        }
+        val duplicateRemoved = pool.size - dedupedPool.size
+
+        var recentlyPlayedRemoved = 0
+        val candidatePairs = dedupedPool.mapNotNull { item ->
+            if (item.videoId == videoId ||
+                RecommendationManager.isCompilationTrack(item.title, item.durationText) ||
+                RecommendationManager.isNonMusicVideo(item.title, item.author) ||
+                RecommendationManager.isUnofficialContent(item.title, item.author) ||
+                profile.skippedTracks.contains(item.videoId) ||
+                profile.skippedArtists.any { skipped -> normalizeQueueArtist(skipped) == normalizeQueueArtist(item.author) } ||
+                (seedTitle.isNotEmpty() && RecommendationManager.isTooSimilar(seedTitle, item.title))
+            ) {
+                return@mapNotNull null
+            }
+
+            val signal = signals[item.videoId]
+            val recentlyPlayed = item.videoId in recentlyPlayedIds ||
+                RecommendationManager.normalizeTitle(item.title) in recentlyPlayedTitles
+            val strongRepeatIntent = signal?.isLiked == true ||
+                (signal?.repeatCount ?: 0) > 0 ||
+                (signal?.completeCount ?: 0) >= 2
+            if (recentlyPlayed && !strongRepeatIntent) {
+                recentlyPlayedRemoved++
+                return@mapNotNull null
+            }
+
+            val meta = RecommendationManager.getCachedOrInferredMetadata(db, item, context)
             if (!meta.isOfficial) return@mapNotNull null
-            if (seedMeta != null && meta.language != seedMeta.language) return@mapNotNull null
             item to meta
         }
 
-        val scored = filteredPairs.map { (item, meta) ->
-            val tasteScore = if (seedMeta != null) {
-                val genreScore = if (meta.genre == seedMeta.genre) 1.0 else 0.0
-                val moodScore = if (meta.mood == seedMeta.mood) 1.0 else 0.2
-                val langScore = if (meta.language == seedMeta.language) 1.0 else 0.0
-                val energyDelta = Math.abs(meta.energy - seedMeta.energy)
-                val energyScore = (1.0 - energyDelta).coerceIn(0.0, 1.0)
-                val bpm1 = meta.tempo.toDouble()
-                val bpm2 = seedMeta.tempo.toDouble()
-                val effectiveTempoDelta = minOf(
-                    Math.abs(bpm1 - bpm2),
-                    Math.abs(bpm1 - bpm2 * 2.0),
-                    Math.abs(bpm1 * 2.0 - bpm2),
-                    Math.abs(bpm1 / 2.0 - bpm2),
-                    Math.abs(bpm1 - bpm2 / 2.0)
-                )
-                val tempoScore = Math.cos((effectiveTempoDelta / 60.0 * Math.PI).coerceIn(0.0, Math.PI)) / 2.0 + 0.5
-                genreScore * 0.25 + moodScore * 0.20 + langScore * 0.15 + energyScore * 0.20 + tempoScore * 0.20
+        // Language is a Smart Queue hard constraint. This is deliberately kept
+        // inside getSongRadio; Home's normal recommendation sections are not
+        // routed through this filter and remain mixed-language.
+        val queueLanguage = (seedMeta?.language?.takeIf { it.isNotBlank() } ?: profileLanguage)
+            ?: candidatePairs.groupingBy { it.second.language }.eachCount().maxByOrNull { it.value }?.key
+        val languageFilteredPairs = if (queueLanguage != null) {
+            candidatePairs.filter { sameQueueLanguage(it.second.language, queueLanguage) }
+        } else {
+            candidatePairs
+        }
+        val languageRemoved = candidatePairs.size - languageFilteredPairs.size
+
+        val now = System.currentTimeMillis()
+        val recentArtistCounts = history.take(20)
+            .groupingBy { normalizeQueueArtist(it.author) }
+            .eachCount()
+        fun behaviorScore(item: VideoItem): Double {
+            val signal = signals[item.videoId]
+            val ageMs = (now - (signal?.lastPlayedAt ?: 0L)).coerceAtLeast(0L)
+            val decay = if (signal == null || signal.lastPlayedAt <= 0L) 0.0
+            else Math.exp(-ageMs.toDouble() / (14.0 * 24.0 * 60.0 * 60.0 * 1000.0))
+            val positive = (signal?.completeCount ?: 0) * 0.20 +
+                (signal?.repeatCount ?: 0) * 0.35 +
+                (if (signal?.isLiked == true) 0.55 else 0.0) +
+                (if (signal?.isDownloaded == true) 0.10 else 0.0)
+            val negative = (signal?.skip20sCount ?: 0) * 0.55 +
+                (signal?.skipCount ?: 0) * 0.20
+            val recentArtistAffinity = (recentArtistCounts[normalizeQueueArtist(item.author)] ?: 0) * 0.04
+            return ((positive - negative) * decay + recentArtistAffinity).coerceIn(-1.0, 1.0)
+        }
+
+        fun tempoSimilarity(first: Int, second: Int): Double {
+            val bpm1 = first.toDouble()
+            val bpm2 = second.toDouble()
+            val effectiveDelta = minOf(
+                Math.abs(bpm1 - bpm2), Math.abs(bpm1 - bpm2 * 2.0),
+                Math.abs(bpm1 * 2.0 - bpm2), Math.abs(bpm1 / 2.0 - bpm2),
+                Math.abs(bpm1 - bpm2 / 2.0)
+            )
+            return Math.cos((effectiveDelta / 60.0 * Math.PI).coerceIn(0.0, Math.PI)) / 2.0 + 0.5
+        }
+
+        val scoredCandidates = languageFilteredPairs.map { (item, meta) ->
+            val seedSimilarity = if (seedMeta != null) {
+                val genre = if (meta.genre.equals(seedMeta.genre, ignoreCase = true)) 1.0 else 0.0
+                val mood = if (meta.mood.equals(seedMeta.mood, ignoreCase = true)) 1.0 else 0.25
+                val energy = (1.0 - Math.abs(meta.energy - seedMeta.energy)).coerceIn(0.0, 1.0)
+                val tempo = tempoSimilarity(meta.tempo, seedMeta.tempo)
+                val artist = when {
+                    normalizeQueueArtist(item.author) == normalizeQueueArtist(seedAuthor) -> 1.0
+                    RecommendationManager.isSimilarArtist(item.author, seedAuthor) -> 0.82
+                    else -> 0.35
+                }
+                genre * 0.24 + mood * 0.14 + energy * 0.24 + tempo * 0.23 + artist * 0.15
             } else {
-                RecommendationManager.calculateTasteSimilarity(meta, profile.tasteDNA)
+                0.35
             }
-            val officialBonus = if (meta.isOfficial) 0.15 else 0.0
-            val sameArtistPenalty = if (item.author.equals(seedAuthor, ignoreCase = true)) -0.5 else 0.0
-            val alreadyInQueuePenalty = if (currentQueueArtists.contains(item.author.lowercase(Locale.ROOT))) -0.3 else 0.0
-            item to (tasteScore + officialBonus + sameArtistPenalty + alreadyInQueuePenalty)
-        }.sortedByDescending { it.second }.map { it.first }
+            val tasteScore = RecommendationManager.calculateTasteSimilarity(meta, profile.tasteDNA)
+            val behavior = behaviorScore(item)
+            val recentPenalty = if (item.videoId in recentlyPlayedIds) -0.18 else 0.0
+            val currentQueuePenalty = if (normalizeQueueArtist(item.author) in currentQueueArtists) -0.12 else 0.0
+            val officialBonus = if (meta.isOfficial) 0.05 else 0.0
+            val baseScore = seedSimilarity * 0.52 + tasteScore * 0.30 + behavior * 0.13 +
+                recentPenalty + currentQueuePenalty + officialBonus
+            SmartQueueCandidate(item, meta, seedSimilarity, tasteScore, behavior, recentPenalty, baseScore)
+        }
 
         val sequenced = ArrayList<VideoItem>()
-        val remaining = ArrayList(scored)
+        val remaining = ArrayList(scoredCandidates)
         val artistCount = mutableMapOf<String, Int>()
-        var lastArtist = seedAuthor.lowercase(Locale.ROOT)
-        val seedAuthorLower = seedAuthor.lowercase(Locale.ROOT)
+        var lastArtist = normalizeQueueArtist(seedAuthor)
+        val seedAuthorLower = normalizeQueueArtist(seedAuthor)
+        var artistCapRemoved = 0
+
+        fun positionScore(candidate: SmartQueueCandidate, position: Int): Double {
+            // Close continuity first, then gradually hand more weight to the
+            // user's taste and controlled discovery.
+            val seedWeight = when {
+                position < 3 -> 0.64
+                position < 7 -> 0.48
+                else -> 0.34
+            }
+            val tasteWeight = when {
+                position < 3 -> 0.20
+                position < 7 -> 0.32
+                else -> 0.44
+            }
+            val discoveryBonus = if (position >= 7 &&
+                !RecommendationManager.isSimilarArtist(seedAuthor, candidate.item.author) &&
+                normalizeQueueArtist(candidate.item.author) != seedAuthorLower) 0.035 else 0.0
+            return candidate.seedSimilarity * seedWeight +
+                candidate.tasteScore * tasteWeight +
+                candidate.behaviorScore * 0.12 +
+                candidate.baseScore * 0.08 + discoveryBonus
+        }
 
         while (remaining.isNotEmpty() && sequenced.size < 20) {
-            val next = remaining.firstOrNull { candidate ->
-                val artist = candidate.author.lowercase(Locale.ROOT)
+            val position = sequenced.size
+            val eligible = remaining.filter { candidate ->
+                val artist = normalizeQueueArtist(candidate.item.author)
                 val count = artistCount[artist] ?: 0
                 val cap = if (artist == seedAuthorLower) 1 else 2
-                val lastIndex = sequenced.indexOfLast { it.author.lowercase(Locale.ROOT) == artist }
+                val lastIndex = sequenced.indexOfLast { normalizeQueueArtist(it.author) == artist }
                 val gap = if (lastIndex < 0) Int.MAX_VALUE else sequenced.size - lastIndex
                 count < cap &&
-                gap >= 3 &&
-                sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.title) }
-            } ?: remaining.firstOrNull { candidate ->
-                val artist = candidate.author.lowercase(Locale.ROOT)
-                val count = artistCount[artist] ?: 0
-                val cap2 = if (artist == seedAuthorLower) 1 else 2
-                count < cap2 &&
-                artist != lastArtist &&
-                sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.title) }
-            } ?: remaining.firstOrNull { candidate ->
-                val artist = candidate.author.lowercase(Locale.ROOT)
-                val count = artistCount[artist] ?: 0
-                val cap3 = if (artist == seedAuthorLower) 1 else 2
-                count < cap3 &&
-                sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.title) }
-            } ?: remaining.firstOrNull()
+                    (gap >= 3 || artist != lastArtist) &&
+                    sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.item.title) }
+            }
+            if (eligible.isEmpty()) {
+                artistCapRemoved += remaining.size
+                break
+            }
 
-            if (next == null) break
+            val next = eligible.sortedWith(
+                compareByDescending<SmartQueueCandidate> { positionScore(it, position) }
+                    .thenBy { RecommendationManager.normalizeTitle(it.item.title) }
+                    .thenBy { normalizeQueueArtist(it.item.author) }
+                    .thenBy { it.item.videoId }
+            ).first()
 
-            sequenced.add(next)
-            val artist = next.author.lowercase(Locale.ROOT)
+            Log.d(
+                TAG,
+                "Smart Queue pick=${position + 1} title='${next.item.title}' artist='${next.item.author}' " +
+                    "seed=${"%.3f".format(Locale.ROOT, next.seedSimilarity)} " +
+                    "taste=${"%.3f".format(Locale.ROOT, next.tasteScore)} " +
+                    "behavior=${"%.3f".format(Locale.ROOT, next.behaviorScore)} " +
+                    "final=${"%.3f".format(Locale.ROOT, positionScore(next, position))}"
+            )
+
+            sequenced.add(next.item)
+            val artist = normalizeQueueArtist(next.item.author)
             lastArtist = artist
             artistCount[artist] = (artistCount[artist] ?: 0) + 1
             remaining.remove(next)
-            remaining.removeAll { RecommendationManager.isTooSimilar(next.title, it.title) }
-        }
-
-        val uniqueArtistsInQueue = artistCount.size
-        if (uniqueArtistsInQueue < 5 && remaining.isNotEmpty()) {
-            val seenArtists = artistCount.keys.toMutableSet()
-            val discoveryCandidates = remaining.filter { it.author.lowercase(Locale.ROOT) !in seenArtists }
-            for (item in discoveryCandidates.shuffled().take(5 - uniqueArtistsInQueue)) {
-                if (sequenced.size >= 20) break
-                sequenced.add(item)
-                val a = item.author.lowercase(Locale.ROOT)
-                artistCount[a] = (artistCount[a] ?: 0) + 1
-                seenArtists.add(a)
-                remaining.remove(item)
+            remaining.removeAll {
+                RecommendationManager.isTooSimilar(next.item.title, it.item.title)
             }
         }
 
-        // Fallback: if pool empty, use history/liked songs
+        // Fallback: if the online/offline pool is empty, use only history/liked
+        // songs that still satisfy the Smart Queue language constraint.
         if (sequenced.isEmpty()) {
             Log.d(TAG, "Pool empty, falling back to history/liked songs.")
             val fallback = mutableListOf<VideoItem>()
-            fallback.addAll(db.historyDao().getAllHistory().take(30).map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
+            fallback.addAll(history.take(30).map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
             fallback.addAll(db.likedSongDao().getAll().take(30).map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
-            val filtered = fallback.filter { it.videoId != videoId }.distinctBy { it.videoId }.shuffled()
+            val filtered = fallback
+                .filter { it.videoId != videoId }
+                .distinctBy { "${RecommendationManager.normalizeTitle(it.title)}|${normalizeQueueArtist(it.author)}" }
+                .map { it to RecommendationManager.getCachedOrInferredMetadata(db, it, context) }
+                .filter { (_, meta) -> meta.isOfficial && (queueLanguage == null || sameQueueLanguage(meta.language, queueLanguage)) }
+                .sortedWith(compareByDescending<Pair<VideoItem, SongMetadata>> {
+                    RecommendationManager.calculateTasteSimilarity(it.second, profile.tasteDNA)
+                }.thenBy { RecommendationManager.normalizeTitle(it.first.title) })
+                .map { it.first }
             sequenced.addAll(filtered.take(15))
         }
+
+        Log.d(
+            TAG,
+            "Smart Queue seed=$videoId language=${queueLanguage ?: "unknown"} " +
+                "raw=${pool.size} unique=${dedupedPool.size} candidates=${candidatePairs.size} " +
+                "removedLanguage=$languageRemoved removedDuplicates=$duplicateRemoved " +
+                "removedRecent=$recentlyPlayedRemoved removedArtistCap=$artistCapRemoved " +
+                "final=${sequenced.size}"
+        )
+        Log.d(
+            TAG,
+            "Smart Queue selected=" + sequenced.joinToString(" | ") {
+                "${it.title} — ${it.author}"
+            }
+        )
 
         if (sequenced.isNotEmpty()) {
             saveVideoItems(cacheKey, sequenced)
         }
-        sequenced
+        return sequenced
     }
 
     /**

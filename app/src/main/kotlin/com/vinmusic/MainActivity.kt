@@ -125,6 +125,13 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
+            // Restore the appearance choice before the first composition.  The
+            // settings screen persists Monet, but the theme state is process
+            // local; without this initialization it silently reset after every
+            // app restart.
+            com.vinmusic.ui.theme.MonetState.enabled.value =
+                getSharedPreferences("vin_music_prefs", MODE_PRIVATE)
+                    .getBoolean("monet_enabled", false)
             VinMusicTheme {
                 VinMusicApp(playerVm, authVm)
             }
@@ -154,8 +161,8 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
     val currentUser = authVm.currentUser
     var isLoggedIn by remember { mutableStateOf(prefs.getBoolean("is_logged_in", false) || currentUser != null) }
 
-    LaunchedEffect(currentUser) {
-        if (currentUser != null) {
+    LaunchedEffect(currentUser, authVm.authState) {
+        if (currentUser != null || authVm.authState is AuthViewModel.AuthState.Authenticated) {
             isLoggedIn = true
         } else {
             isLoggedIn = prefs.getBoolean("is_logged_in", false)
@@ -182,6 +189,8 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
     }
 
     var selectedSongForOptions by remember { mutableStateOf<VideoItem?>(null) }
+    var selectedSongIsCached by remember { mutableStateOf(false) }
+    var cachedListRefreshToken by remember { mutableIntStateOf(0) }
     var selectedPlaylistForOptions by remember { mutableStateOf<com.vinmusic.data.db.PlaylistEntity?>(null) }
     var showAddPlaylistGlobal by remember { mutableStateOf<VideoItem?>(null) }
 
@@ -317,7 +326,11 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                 composable("home") {
                     HomeScreen(
                         vm = vm,
-                        onSongClick = { song, songs ->
+                        onSongClick = { song, _ ->
+                            vm.playSongWithRadio(song)
+                            showFullPlayer = true
+                        },
+                        onPlayQueue = { song, songs ->
                             vm.setQueue(songs, songs.indexOf(song))
                             showFullPlayer = true
                         },
@@ -335,7 +348,7 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                                 restoreState    = true
                             }
                         },
-                        onSongMore = { selectedSongForOptions = it },
+                        onSongMore = { selectedSongForOptions = it; selectedSongIsCached = false },
                         onAlbumClick = { selectedAlbumForDetail = it },
                         onDiscoverClick = {
                             navController.navigate("discover") {
@@ -353,7 +366,7 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                             vm.playSongWithRadio(song)
                             showFullPlayer = true
                         },
-                        onSongMore = { selectedSongForOptions = it },
+                        onSongMore = { selectedSongForOptions = it; selectedSongIsCached = false },
                         onAlbumClick = { selectedAlbumForDetail = it },
                         isPlayerOpen = showFullPlayer
                     )
@@ -365,7 +378,7 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                             vm.setQueue(songs, songs.indexOf(song))
                             showFullPlayer = true
                         },
-                        onSongMore = { selectedSongForOptions = it },
+                        onSongMore = { selectedSongForOptions = it; selectedSongIsCached = false },
                         onPlaylistMore = { selectedPlaylistForOptions = it },
                         onPlaylistClick = { playlistId ->
                             navController.navigate("playlist_detail/$playlistId") {
@@ -387,7 +400,9 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                             vm.setQueue(songs, songs.indexOf(song))
                             showFullPlayer = true
                         },
-                        onSongMore = { selectedSongForOptions = it }
+                        onSongMore = { selectedSongForOptions = it; selectedSongIsCached = false },
+                        onCachedSongMore = { selectedSongForOptions = it; selectedSongIsCached = true },
+                        cacheRefreshToken = cachedListRefreshToken
                     )
                 }
                 composable("settings") {
@@ -411,8 +426,8 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                     DiscoverScreen(
                         vm = vm,
                         onBack = { navController.popBackStack() },
-                        onSongClick = { song, songs ->
-                            vm.setQueue(songs, songs.indexOf(song))
+                        onSongClick = { song, _ ->
+                            vm.playSongWithRadio(song)
                             showFullPlayer = true
                         }
                     )
@@ -424,7 +439,7 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                             playlistId = playlistId,
                             vm = vm,
                             onBack = { navController.popBackStack() },
-                            onSongMore = { selectedSongForOptions = it }
+                            onSongMore = { selectedSongForOptions = it; selectedSongIsCached = false }
                         )
                     }
                 }
@@ -489,8 +504,8 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                     artist = artist,
                     vm = vm,
                     onBack = { selectedArtistForProfile = null },
-                    onSongClick = { song, songs ->
-                        vm.setQueue(songs, songs.indexOf(song))
+                    onSongClick = { song, _ ->
+                        vm.playSongWithRadio(song)
                         showFullPlayer = true
                     },
                     onAlbumClick = { selectedAlbumForDetail = it }
@@ -513,7 +528,7 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                         vm.setQueue(songs, songs.indexOf(song))
                         showFullPlayer = true
                     },
-                    onSongMore = { selectedSongForOptions = it }
+                    onSongMore = { selectedSongForOptions = it; selectedSongIsCached = false }
                 )
             }
         }
@@ -562,7 +577,7 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
         // ── Global Song Options Sheet ──────────────────────────────────────────
         selectedSongForOptions?.let { song ->
             val isLiked = song.videoId in vm.likedSongs
-            val isDownloaded = downloadsGlobal.any { it.videoId == song.videoId && it.status == "completed" }
+            val isDownloaded = !selectedSongIsCached && downloadsGlobal.any { it.videoId == song.videoId && it.status == "completed" }
 
             com.vinmusic.ui.components.SongOptionsSheet(
                 song = song,
@@ -572,6 +587,20 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                 onAddToPlaylist = { showAddPlaylistGlobal = song },
                 onPlayNext = { vm.playNextInQueue(song) },
                 onAddToQueue = { vm.addToEndOfQueue(song) },
+                onRemoveCache = if (selectedSongIsCached) {
+                    {
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                com.vinmusic.player.PlayerSingleton.getCache(context)?.removeResource(song.videoId)
+                            } finally {
+                                withContext(Dispatchers.Main) {
+                                    cachedListRefreshToken++
+                                    android.widget.Toast.makeText(context, "Cache removed", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    }
+                } else null,
                 onDownloadToggle = {
                     if (isDownloaded) {
                         scope.launch(Dispatchers.IO) {
@@ -620,7 +649,10 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                     }
                     context.startActivity(android.content.Intent.createChooser(shareIntent, "Share Song"))
                 },
-                onDismiss = { selectedSongForOptions = null }
+                onDismiss = {
+                    selectedSongForOptions = null
+                    selectedSongIsCached = false
+                }
             )
         }
 

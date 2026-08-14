@@ -42,7 +42,9 @@ import com.vinmusic.player.PlayerSingleton
 fun DownloadsScreen(
     vm: PlayerViewModel,
     onSongClick: (VideoItem, List<VideoItem>) -> Unit,
-    onSongMore: (VideoItem) -> Unit
+    onSongMore: (VideoItem) -> Unit,
+    onCachedSongMore: (VideoItem) -> Unit = onSongMore,
+    cacheRefreshToken: Int = 0
 ) {
     val ctx   = LocalContext.current
     val db    = VinDatabase.getInstance(ctx)
@@ -58,9 +60,10 @@ fun DownloadsScreen(
     }
 
     // Load cached songs from player cache + interaction signals
-    LaunchedEffect(Unit) {
-        scope.launch(Dispatchers.IO) {
-            try {
+    LaunchedEffect(cacheRefreshToken, selectedTab, downloads) {
+        isLoadingCached = true
+        try {
+            withContext(Dispatchers.IO) {
                 val downloadedIds = downloads.map { it.videoId }.toSet()
                 val cached = mutableListOf<VideoItem>()
                 val seenIds = mutableSetOf<String>()
@@ -83,24 +86,23 @@ fun DownloadsScreen(
                     }
                 }
 
-                // 2. Get songs from interaction signals (songs that have been played)
+                // 2. Resolve only signals that still have bytes in the player
+                // cache. History alone must not make a song look cached; this
+                // keeps the per-song Remove Cache action truthful.
                 val signals = db.interactionSignalDao().getAll()
                 for (signal in signals) {
-                    if (signal.videoId !in downloadedIds && signal.videoId !in seenIds) {
+                    val cachedBytes = playerCache?.getCachedBytes(signal.videoId, 0, -1) ?: 0L
+                    if (cachedBytes > 0L && signal.videoId !in downloadedIds && signal.videoId !in seenIds) {
                         cached.add(VideoItem(signal.videoId, signal.title, signal.author, signal.durationText))
                         seenIds.add(signal.videoId)
                     }
                 }
 
-                withContext(Dispatchers.Main) {
-                    cachedSongs = cached
-                    isLoadingCached = false
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    isLoadingCached = false
-                }
+                withContext(Dispatchers.Main) { cachedSongs = cached }
             }
+            isLoadingCached = false
+        } catch (_: Exception) {
+            isLoadingCached = false
         }
     }
 
@@ -473,7 +475,7 @@ fun DownloadsScreen(
 
                             // More options
                             IconButton(
-                                onClick = { onSongMore(song) },
+                                onClick = { onCachedSongMore(song) },
                                 modifier = Modifier.size(48.dp)
                             ) {
                                 Icon(

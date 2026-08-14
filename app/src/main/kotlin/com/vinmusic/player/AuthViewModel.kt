@@ -28,6 +28,11 @@ class AuthViewModel @Inject constructor(
     private val TAG = "AuthViewModel"
 
     private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
+
+    // Firebase updates its auth listener asynchronously.  Use the SDK's
+    // source of truth for one-shot sync actions so a freshly completed Google
+    // sign-in cannot race the listener and report "User not signed in".
+    private fun authenticatedUser() = auth.currentUser ?: currentUser
     
     // ── Observable states for Jetpack Compose ──────────────────────────────────
     var currentUser by mutableStateOf(auth.currentUser)
@@ -79,6 +84,7 @@ class AuthViewModel @Inject constructor(
      */
     fun getGoogleSignInClient(context: Context): GoogleSignInClient {
         val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+        Log.d(TAG, "getGoogleSignInClient: default_web_client_id resId=$resId")
         val defaultWebClientId = if (resId != 0) {
             try {
                 context.getString(resId)
@@ -88,6 +94,7 @@ class AuthViewModel @Inject constructor(
         } else {
             ""
         }
+        Log.d(TAG, "getGoogleSignInClient: webClientId=${if (defaultWebClientId.isNotEmpty()) "present(${defaultWebClientId.length} chars)" else "EMPTY"}")
         
         val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN).apply {
             if (defaultWebClientId.isNotEmpty()) {
@@ -100,6 +107,7 @@ class AuthViewModel @Inject constructor(
 
     fun isGoogleConfigured(context: Context): Boolean {
         val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+        Log.d(TAG, "isGoogleConfigured: resId=$resId")
         if (resId == 0) return false
         return try {
             context.getString(resId).isNotEmpty()
@@ -112,8 +120,17 @@ class AuthViewModel @Inject constructor(
      * Sign in to Firebase with Google credentials.
      */
     fun signInWithGoogle(account: GoogleSignInAccount) {
+        Log.d(TAG, "signInWithGoogle: email=${account.email}, hasIdToken=${!account.idToken.isNullOrBlank()}, hasServerAuthCode=${!account.serverAuthCode.isNullOrBlank()}")
         authState = AuthState.Authenticating
-        val credential = GoogleAuthProvider.getCredential(account.idToken, null)
+        val idToken = account.idToken
+        if (idToken.isNullOrBlank()) {
+            val message = "Google sign-in did not return an ID token. Check the Firebase web client ID and SHA-1 configuration."
+            Log.e(TAG, message)
+            authState = AuthState.Error(message)
+            com.vinmusic.analytics.AnalyticsHelper.logSignInFailed(getApplication(), "google", message)
+            return
+        }
+        val credential = GoogleAuthProvider.getCredential(idToken, null)
         
         viewModelScope.launch {
             try {
@@ -121,6 +138,17 @@ class AuthViewModel @Inject constructor(
                 if (result.user != null) {
                     Log.d(TAG, "Successfully authenticated with Firebase: ${result.user?.email}")
                     authState = AuthState.Authenticated
+                    // Persist the gate immediately as a second, deterministic
+                    // signal for the Compose login overlay. The Firebase auth
+                    // listener remains the source of truth for currentUser.
+                    val user = result.user!!
+                    getApplication<Application>()
+                        .getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean("is_logged_in", true)
+                        .putString("user_name", user.displayName ?: user.email?.substringBefore("@") ?: "Google User")
+                        .putString("user_email", user.email)
+                        .apply()
                     com.vinmusic.analytics.AnalyticsHelper.logSignInSuccess(getApplication(), "google")
                     // Automatically trigger a restore (pull down data) on new login
                     restoreCloudData()
@@ -136,11 +164,19 @@ class AuthViewModel @Inject constructor(
         }
     }
 
+    /** Surface activity-result failures instead of silently returning to the login screen. */
+    fun reportGoogleSignInError(message: String) {
+        val safeMessage = message.ifBlank { "Google sign-in was cancelled or failed." }
+        Log.e(TAG, safeMessage)
+        authState = AuthState.Error(safeMessage)
+        com.vinmusic.analytics.AnalyticsHelper.logSignInFailed(getApplication(), "google", safeMessage)
+    }
+
     /**
      * Trigger manual cloud backup.
      */
     fun backupDataToCloud() {
-        if (currentUser == null) {
+        if (authenticatedUser() == null) {
             syncState = SyncState.Error("User not signed in")
             return
         }
@@ -167,7 +203,7 @@ class AuthViewModel @Inject constructor(
      * Trigger manual cloud restore.
      */
     fun restoreCloudData() {
-        if (currentUser == null) {
+        if (authenticatedUser() == null) {
             syncState = SyncState.Error("User not signed in")
             return
         }

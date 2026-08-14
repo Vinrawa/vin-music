@@ -62,9 +62,10 @@ fun ArtistProfileScreen(
 
     // ── Data fetching ─────────────────────────────────────────────────────────
 
-    // Top songs = official releases only. Rare/unreleased/demo/leak tracks go
-    // into the separate "More from Artist" section below Top Songs (previously
-    // they were dropped entirely and only reachable via explicit search).
+    // Top Songs comes from the artist's real YouTube channel Videos tab and is
+    // ranked by YouTube's view-count metadata. Search remains a fallback for
+    // channels that do not expose a readable Videos tab. Rare/unreleased/demo/
+    // leak tracks still go into the separate "More from Artist" section.
     LaunchedEffect(artist.name) {
         songsLoading = true
         rareLoading = true
@@ -81,6 +82,9 @@ fun ArtistProfileScreen(
                     return leakTerms.any { t.contains(it) }
                 }
 
+                val channelVideos = runCatching {
+                    InnerTube.getArtistChannelVideos(artist.channelId, artist.name)
+                }.getOrDefault(emptyList())
                 val q1 = InnerTube.search("${artist.name} songs")
                 val q2 = InnerTube.search("${artist.name} best hits")
                 fun score(item: VideoItem): Int {
@@ -94,10 +98,9 @@ fun ArtistProfileScreen(
                     if (listOf("audio", "song", "track", "lyrics", "lyric").any { title.contains(it) }) rank += 8
                     return rank
                 }
-                // Split the YTM search hits: official -> Top Songs, leaked ->
-                // "More from Artist". Then enrich the rare bucket with a broader
-                // YouTube uploads scan (covers unofficial uploads not indexed on
-                // YTM, e.g. Kendrick "prayer", J Cole "4 Your Eyez" leaks).
+                // Split the search hits for the fallback/rare bucket. Channel
+                // videos are preferred for Top Songs so unrelated search matches
+                // cannot displace the artist's own uploads.
                 val (officialSongs, leakedFromYtm) = (q1 + q2)
                     .distinctBy { it.videoId }
                     .partition { !isLeak(it) }
@@ -106,17 +109,28 @@ fun ArtistProfileScreen(
                     .sortedByDescending { score(it) }
                     .take(50)
 
+                val nonMusicVideoTerms = listOf(
+                    "interview", "reaction", "podcast", "behind the scenes",
+                    "documentary", "trailer", "teaser", "vlog", "shorts"
+                )
+                val channelTopSongs = channelVideos.filter { item ->
+                    !isLeak(item) && nonMusicVideoTerms.none { term ->
+                        item.title.contains(term, ignoreCase = true)
+                    }
+                }
+                val preferredTopSongs = channelTopSongs.ifEmpty { officialRanked }
+
                 val rareFromUploads = runCatching { InnerTube.getArtistRareUploads(artist.name) }
                     .getOrDefault(emptyList())
 
                 val rareBucket = (leakedFromYtm + rareFromUploads)
                     .distinctBy { it.videoId }
-                    .filter { rareItem -> officialRanked.none { it.videoId == rareItem.videoId } }
+                    .filter { rareItem -> preferredTopSongs.none { it.videoId == rareItem.videoId } }
                     .sortedByDescending { score(it) }
                     .take(20)
 
                 withContext(Dispatchers.Main) {
-                    topSongs = officialRanked
+                    topSongs = preferredTopSongs
                     songsLoading = false
                     rareSongs = rareBucket
                     rareLoading = false
@@ -198,6 +212,25 @@ fun ArtistProfileScreen(
         }
     }
 
+    fun toggleFollowArtist() {
+        val next = !isFollowed
+        isFollowed = next
+        followScope.launch(Dispatchers.IO) {
+            if (next) {
+                db.followedArtistDao().insert(
+                    FollowedArtist(
+                        channelId = artist.channelId,
+                        name = artist.name,
+                        thumbnail = avatar.ifEmpty { artist.thumbnail },
+                        subscriberCount = subs
+                    )
+                )
+            } else {
+                db.followedArtistDao().delete(artist.channelId)
+            }
+        }
+    }
+
     // ── UI ────────────────────────────────────────────────────────────────────
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(VinColors.BgColor),
@@ -269,23 +302,7 @@ fun ArtistProfileScreen(
                         )
                         
                         Button(
-                            onClick = {
-                                isFollowed = !isFollowed
-                                followScope.launch(Dispatchers.IO) {
-                                    if (isFollowed) {
-                                        db.followedArtistDao().insert(
-                                            FollowedArtist(
-                                                channelId = artist.channelId,
-                                                name = artist.name,
-                                                thumbnail = avatar.ifEmpty { artist.thumbnail },
-                                                subscriberCount = subs
-                                            )
-                                        )
-                                    } else {
-                                        db.followedArtistDao().delete(artist.channelId)
-                                    }
-                                }
-                            },
+                            onClick = { toggleFollowArtist() },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (isFollowed) Color.White.copy(0.08f) else Color.White,
                                 contentColor = if (isFollowed) Color.White else Color.Black
@@ -384,24 +401,34 @@ fun ArtistProfileScreen(
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Public,
-                                contentDescription = "Facebook",
-                                tint = Color.White.copy(0.6f),
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Icon(
-                                imageVector = Icons.Default.Star,
-                                contentDescription = "Instagram",
-                                tint = Color.White.copy(0.6f),
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Icon(
-                                imageVector = Icons.Default.Share,
-                                contentDescription = "X",
-                                tint = Color.White.copy(0.6f),
-                                modifier = Modifier.size(20.dp)
-                            )
+                            IconButton(
+                                onClick = {
+                                    val url = if (artist.channelId.isNotBlank()) {
+                                        "https://www.youtube.com/channel/${artist.channelId}"
+                                    } else {
+                                        "https://www.youtube.com/results?search_query=${android.net.Uri.encode(artist.name)}"
+                                    }
+                                    runCatching {
+                                        context.startActivity(
+                                            android.content.Intent(
+                                                android.content.Intent.ACTION_VIEW,
+                                                android.net.Uri.parse(url)
+                                            )
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Default.Public, contentDescription = "Open YouTube channel", tint = Color.White.copy(0.7f), modifier = Modifier.size(20.dp))
+                            }
+                            IconButton(onClick = { toggleFollowArtist() }, modifier = Modifier.size(32.dp)) {
+                                Icon(
+                                    imageVector = if (isFollowed) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                    contentDescription = if (isFollowed) "Unfollow artist" else "Follow artist",
+                                    tint = if (isFollowed) VinColors.AccentLight else Color.White.copy(0.7f),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -520,7 +547,7 @@ fun ArtistProfileScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("Top Songs", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
-                if (topSongs.size > 10) {
+                if (topSongs.size > 6) {
                     TextButton(onClick = { showAllSongs = !showAllSongs }) {
                         Text(
                             if (showAllSongs) "Show less" else "See all",
@@ -541,13 +568,18 @@ fun ArtistProfileScreen(
                 )
             }
         } else {
-            val shown = if (showAllSongs) topSongs else topSongs.take(10)
-            itemsIndexed(shown, key = { index, s -> "ts_${s.videoId}_$index" }) { i, song ->
-                ArtSongRow(
-                    index = i + 1,
-                    song = song,
-                    isPlaying = vm.currentSong?.videoId == song.videoId
-                ) { onSongClick(song, topSongs) }
+            val shown = if (showAllSongs) topSongs else topSongs.take(6)
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(shown, key = { "ts_${it.videoId}" }) { song ->
+                        ArtistSongCard(song, vm.currentSong?.videoId == song.videoId) {
+                            onSongClick(song, topSongs)
+                        }
+                    }
+                }
             }
         }
 
@@ -570,7 +602,7 @@ fun ArtistProfileScreen(
                             fontSize = 12.sp, color = Color.White.copy(0.4f), fontWeight = FontWeight.Medium
                         )
                     }
-                    if (rareSongs.size > 5) {
+                    if (rareSongs.size > 6) {
                         TextButton(onClick = { showAllRare = !showAllRare }) {
                             Text(
                                 if (showAllRare) "Show less" else "See all",
@@ -580,13 +612,18 @@ fun ArtistProfileScreen(
                     }
                 }
             }
-            val shownRare = if (showAllRare) rareSongs else rareSongs.take(5)
-            itemsIndexed(shownRare, key = { index, s -> "rare_${s.videoId}_$index" }) { i, song ->
-                ArtSongRow(
-                    index = i + 1,
-                    song = song,
-                    isPlaying = vm.currentSong?.videoId == song.videoId
-                ) { onSongClick(song, rareSongs) }
+            val shownRare = if (showAllRare) rareSongs else rareSongs.take(6)
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(shownRare, key = { "rare_${it.videoId}" }) { song ->
+                        ArtistSongCard(song, vm.currentSong?.videoId == song.videoId) {
+                            onSongClick(song, rareSongs)
+                        }
+                    }
+                }
             }
         }
 
@@ -690,6 +727,64 @@ private fun ArtLoadingRow() {
             color = VinColors.Accent,
             modifier = Modifier.size(26.dp),
             strokeWidth = 2.dp
+        )
+    }
+}
+
+@Composable
+private fun ArtistSongCard(song: VideoItem, isPlaying: Boolean, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val bgColor by animateColorAsState(
+        targetValue = when {
+            isPlaying -> VinColors.Accent.copy(alpha = 0.16f)
+            isPressed -> Color.White.copy(alpha = 0.08f)
+            else -> VinColors.Surface.copy(alpha = 0.72f)
+        },
+        label = "artist_song_card_bg"
+    )
+
+    Column(
+        modifier = Modifier
+            .width(142.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(bgColor)
+            .clickable(interactionSource = interactionSource, indication = LocalIndication.current, onClick = onClick)
+            .padding(8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(9.dp))
+        ) {
+            AsyncImage(
+                model = song.thumbnailHd.ifEmpty { song.thumbnail },
+                contentDescription = song.title,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+            if (isPlaying) {
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)), contentAlignment = Alignment.Center) {
+                    Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Playing", tint = VinColors.AccentLight, modifier = Modifier.size(22.dp))
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            song.title,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (isPlaying) VinColors.AccentLight else Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            song.author,
+            fontSize = 11.sp,
+            color = Color.White.copy(alpha = 0.45f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

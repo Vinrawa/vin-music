@@ -535,6 +535,7 @@ fun SongOptionsSheet(
     onPlayNext: (() -> Unit)? = null,
     onAddToQueue: (() -> Unit)? = null,
     onRemoveFromPlaylist: (() -> Unit)? = null,
+    onRemoveCache: (() -> Unit)? = null,
     onDownloadToggle: () -> Unit,
     onShare: () -> Unit,
     onDismiss: () -> Unit
@@ -622,7 +623,6 @@ fun SongOptionsSheet(
                 if (onPlayNext != null) {
                     OptionRow(
                         icon = Icons.Default.QueuePlayNext,
-                        iconTint = VinColors.AccentLight,
                         text = "Play Next",
                         onClick = {
                             onPlayNext()
@@ -646,7 +646,6 @@ fun SongOptionsSheet(
                 if (onRemoveFromPlaylist != null) {
                     OptionRow(
                         icon = Icons.Default.DeleteOutline,
-                        iconTint = VinColors.Pink,
                         text = "Remove Song",
                         onClick = {
                             onRemoveFromPlaylist()
@@ -655,9 +654,19 @@ fun SongOptionsSheet(
                     )
                 }
 
+                if (onRemoveCache != null) {
+                    OptionRow(
+                        icon = Icons.Default.DeleteSweep,
+                        text = "Remove Cache",
+                        onClick = {
+                            onRemoveCache()
+                            onDismiss()
+                        }
+                    )
+                }
+
                 OptionRow(
                     icon = if (isDownloaded) Icons.Default.Delete else Icons.Default.Download,
-                    iconTint = if (isDownloaded) VinColors.Pink else VinColors.Secondary,
                     text = if (isDownloaded) "Remove Download" else "Download Offline",
                     onClick = {
                         onDownloadToggle()

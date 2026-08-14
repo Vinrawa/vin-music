@@ -30,6 +30,7 @@ import com.vinmusic.recommendation.AudioFeatureProfile
 import com.vinmusic.ui.theme.VinColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -57,7 +58,13 @@ fun MusicDnaScreen(
         scope.launch(Dispatchers.IO) {
             try {
                 // 1. Fetch the exact mathematical TasteDNA Profile!
-                val fetchedProfile = vm.tasteProfileManager.calculateTasteProfile()
+                // A large history can make the feature-enrichment pass slow
+                // (it may inspect the bundled Spotify catalogue per signal).
+                // Never leave the DNA screen in an endless spinner: use the
+                // neutral profile while the rest of the local stats load.
+                val fetchedProfile = withTimeoutOrNull(8_000L) {
+                    vm.tasteProfileManager.calculateTasteProfile()
+                } ?: AudioFeatureProfile(60, 50, 60, 20, 120)
                 
                 // 2. Fetch history and stats
                 val allHistory = db.historyDao().getAllHistory()
@@ -74,7 +81,7 @@ fun MusicDnaScreen(
                     val genreMap = HashMap<String, Int>()
                     val topForGenres = songGroups.map { it.value.first() to it.value.size }
                         .sortedByDescending { it.second }
-                        .take(100)
+                        .take(40)
                     topForGenres.forEach { (song, playCount) ->
                         try {
                             val genre = com.vinmusic.recommendation.RecommendationManager.inferMetadata(

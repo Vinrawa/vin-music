@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VinMusic — Every track. Every artist. Zero ads.</title>
+<meta name="description" content="VinMusic streams straight from YouTube's catalog — ad-free, downloadable, and built around what you actually listen to.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@400;600;700;800&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --bg: #0B0B0D;
+    --surface: #16141A;
+    --surface-2: #1E1B24;
+    --text: #F3EFE7;
+    --text-muted: #99939F;
+    --accent: #E8A33D;
+    --accent-2: #C1432E;
+    --line: rgba(243,239,231,0.09);
+
+    --font-display: 'Unbounded', sans-serif;
+    --font-body: 'Manrope', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+
+    --wrap: 1120px;
+  }
+
+  *{ box-sizing: border-box; margin: 0; padding: 0; }
+
+  html{ background: var(--bg); }
+
+  body{
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+    overflow-x: hidden;
+  }
+
+  /* subtle analog grain overlay */
+  body::before{
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 999;
+    pointer-events: none;
+    opacity: 0.05;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  a{ color: inherit; text-decoration: none; }
+
+  :focus-visible{
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  .wrap{
+    max-width: var(--wrap);
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  .eyebrow{
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  /* ---------- header ---------- */
+  header{
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(11,11,13,0.82);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .nav{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 24px;
+  }
+
+  .wordmark{
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 20px;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .wordmark .dot{
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    display: inline-block;
+  }
+
+  .btn{
+    font-family: var(--font-body);
+    font-weight: 700;
+    font-size: 14px;
+    border: none;
+    border-radius: 10px;
+    padding: 12px 20px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .btn-primary{
+    background: var(--accent);
+    color: #16110A;
+  }
+  .btn-primary:hover{
+    transform: translateY(-1px);
+    box-shadow: 0 8px 20px rgba(232,163,61,0.25);
+  }
+
+  .btn-nav{
+    padding: 10px 16px;
+    font-size: 13px;
+  }
+
+  /* ---------- hero ---------- */
+  .hero{
+    padding: 72px 0 96px;
+    position: relative;
+  }
+
+  .hero-grid{
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 56px;
+    align-items: center;
+  }
+
+  @media (min-width: 900px){
+    .hero-grid{ grid-template-columns: 1.1fr 0.9fr; }
+  }
+
+  h1{
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(38px, 6vw, 62px);
+    line-height: 1.04;
+    letter-spacing: -0.015em;
+    margin: 18px 0 22px;
+  }
+
+  h1 em{
+    font-style: normal;
+    color: var(--accent);
+  }
+
+  .hero-sub{
+    font-size: 17px;
+    color: var(--text-muted);
+    max-width: 46ch;
+    margin-bottom: 34px;
+  }
+
+  .hero-cta{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 18px;
+  }
+
+  .btn-lg{
+    font-size: 15px;
+    padding: 16px 26px;
+    border-radius: 12px;
+  }
+
+  .cta-meta{
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  /* ---------- vinyl visual ---------- */
+  .vinyl-stage{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+
+  .vinyl{
+    width: min(360px, 78vw);
+    height: min(360px, 78vw);
+    cursor: pointer;
+  }
+
+  .vinyl-spin{
+    transform-origin: 50% 50%;
+    animation: spin 9s linear infinite;
+  }
+
+  .vinyl:hover .vinyl-spin,
+  .vinyl:focus .vinyl-spin{
+    animation-play-state: paused;
+  }
+
+  @keyframes spin{
+    from{ transform: rotate(0deg); }
+    to{ transform: rotate(360deg); }
+  }
+
+  .now-playing{
+    position: absolute;
+    bottom: -12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 8px 14px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 0 10px 24px rgba(0,0,0,0.4);
+  }
+
+  .eq{
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+  }
+  .eq span{
+    width: 2px;
+    background: var(--accent);
+    border-radius: 1px;
+    animation: eq 1s ease-in-out infinite alternate;
+  }
+  .eq span:nth-child(1){ height: 40%; animation-delay: 0.1s; }
+  .eq span:nth-child(2){ height: 90%; animation-delay: 0.3s; }
+  .eq span:nth-child(3){ height: 60%; animation-delay: 0.15s; }
+  .eq span:nth-child(4){ height: 100%; animation-delay: 0.4s; }
+
+  @keyframes eq{
+    0%{ height: 20%; }
+    100%{ height: 100%; }
+  }
+
+  /* ---------- features ---------- */
+  .features{
+    padding: 80px 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .section-head{
+    margin-bottom: 48px;
+    max-width: 54ch;
+  }
+
+  h2{
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(26px, 4vw, 36px);
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    margin-top: 12px;
+  }
+
+  .feature-grid{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
+  }
+
+  .feature{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 28px;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+  }
+  .feature:hover{
+    border-color: rgba(232,163,61,0.3);
+    transform: translateY(-2px);
+  }
+
+  .feature svg{
+    width: 28px;
+    height: 28px;
+    stroke: var(--accent);
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    margin-bottom: 18px;
+  }
+
+  .feature h3{
+    font-family: var(--font-display);
+    font-size: 17px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    letter-spacing: -0.01em;
+  }
+
+  .feature p{
+    font-size: 14.5px;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+
+  /* ---------- install steps ---------- */
+  .install{
+    padding: 80px 0 100px;
+    border-top: 1px solid var(--line);
+  }
+
+  .steps{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 20px;
+  }
+
+  .step{
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 28px;
+    position: relative;
+  }
+
+  .step-num{
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 16px;
+  }
+
+  .step h3{
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  .step p{
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+
+  /* ---------- footer ---------- */
+  footer{
+    border-top: 1px solid var(--line);
+    padding: 36px 0 48px;
+  }
+
+  .foot-row{
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: center;
+  }
+
+  .foot-note{
+    font-size: 13px;
+    color: var(--text-muted);
+    max-width: 52ch;
+  }
+
+  .foot-links{
+    display: flex;
+    gap: 20px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+
+  .foot-links a:hover{ color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <div class="wordmark"><span class="dot"></span>VinMusic</div>
+    <a class="btn btn-primary btn-nav" href="https://github.com/Vinrawa/Vin-music-v2/releases/download/v2.1.9/app-release.apk">Download APK</a>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <span class="eyebrow">Sideload · Android 8.0+</span>
+        <h1>Every track.<br>Every artist.<br><em>Zero ads.</em></h1>
+        <p class="hero-sub">VinMusic streams straight from a catalog built for the way you actually listen — full songs, no pre-rolls, with downloads for the subway and mixes shaped by your own history.</p>
+        <div class="hero-cta">
+          <a id="download" class="btn btn-primary btn-lg" href="https://github.com/Vinrawa/Vin-music-v2/releases/download/v2.1.9/app-release.apk">
+            Download APK
+          </a>
+          <div class="cta-meta">
+            <span>v2.1.9 · direct install</span>
+            <span>not on the Play Store</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="vinyl-stage">
+        <svg class="vinyl" viewBox="0 0 200 200" tabindex="0" role="img" aria-label="Spinning vinyl record, VinMusic">
+          <g class="vinyl-spin">
+            <circle cx="100" cy="100" r="98" fill="var(--surface-2)"/>
+            <circle cx="100" cy="100" r="86" fill="none" stroke="var(--line)" stroke-width="1"/>
+            <circle cx="100" cy="100" r="72" fill="none" stroke="var(--line)" stroke-width="1"/>
+            <circle cx="100" cy="100" r="58" fill="none" stroke="var(--line)" stroke-width="1"/>
+            <circle cx="100" cy="100" r="44" fill="none" stroke="var(--line)" stroke-width="1"/>
+            <circle cx="100" cy="100" r="40" fill="var(--accent-2)"/>
+            <circle cx="100" cy="100" r="38" fill="var(--accent)"/>
+            <text x="100" y="105" text-anchor="middle" font-family="Unbounded, sans-serif" font-weight="700" font-size="17" fill="#16110A">VIN</text>
+            <circle cx="100" cy="100" r="4" fill="var(--bg)"/>
+          </g>
+        </svg>
+        <div class="now-playing">
+          <div class="eq"><span></span><span></span><span></span><span></span></div>
+          now playing
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">What's inside</span>
+        <h2>Built around listening, not scrolling.</h2>
+      </div>
+      <div class="feature-grid">
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><path d="M3 3l18 18M9 6h9l3 3v6M6 9v6a3 3 0 003 3h1"/></svg>
+          <h3>Ad-free streaming</h3>
+          <p>Every track plays straight through — no pre-rolls, no mid-song cuts.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 19h16"/></svg>
+          <h3>Offline downloads</h3>
+          <p>Save any song to the device and it's yours without a connection.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><path d="M4 6h10M4 12h6M4 18h13M16 6l4 3-4 3M14 18l4-3-4-3"/></svg>
+          <h3>Smart mixes</h3>
+          <p>Recommendations built from what you actually play — by artist, by genre, by mood.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><path d="M6 4l12 8-12 8V4z" fill="var(--accent)" stroke="none"/><circle cx="19" cy="6" r="1.4" fill="var(--accent)" stroke="none"/></svg>
+          <h3>Background playback</h3>
+          <p>Lock the screen, switch apps, keep the music running underneath.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><path d="M15 5a12 12 0 000 14M9 5a12 12 0 000 14"/></svg>
+          <h3>Real artist pages</h3>
+          <p>Jump from any track straight to its artist — official or independent.</p>
+        </div>
+        <div class="feature">
+          <svg viewBox="0 0 24 24"><path d="M16 4L8 12l8 8" /></svg>
+          <h3>Modern Android, done right</h3>
+          <p>Predictive back gestures and the rest of the Android 13+ playbook.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="install">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">Get it running</span>
+        <h2>Three steps, no store required.</h2>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <h3>Allow unknown sources</h3>
+          <p>In Settings → Apps, let your browser or Files app install unknown apps. Android will ask again on first install — that's expected.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <h3>Download the APK</h3>
+          <p>Grab the latest build from the button above. It's a single file, no installer wizard.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <h3>Install & open</h3>
+          <p>Tap the downloaded file, confirm the install, and launch VinMusic.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot-row">
+    <p class="foot-note">VinMusic is an independent project, distributed directly rather than through the Play Store. Not affiliated with YouTube or Google.</p>
+    <div class="foot-links">
+      <a href="https://github.com/Vinrawa/Vin-music-v2" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/Vinrawa/Vin-music-v2/releases/download/v2.1.9/app-release.apk">Download</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

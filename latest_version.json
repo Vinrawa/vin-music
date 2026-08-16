@@ -1,7 +1,7 @@
 {
-  "latestVersionCode": 15,
-  "latestVersionName": "2.1.9",
-  "apkUrl": "https://github.com/Vinrawa/Vin-music-v2/releases/download/v2.1.9/app-release.apk",
+  "latestVersionCode": 16,
+  "latestVersionName": "2.2.0",
+  "apkUrl": "https://github.com/Vinrawa/Vin-music-v2/releases/download/v2.2.0/vinmusic.apk",
   "forceUpdate": false,
-  "releaseNotes": "Background playback & stability fixes, Play Next, Add to Queue, Queue Reordering (long-press), Save Queue as Playlist, TasteDNA fixes, and Profile Listening Stats."
+  "releaseNotes": "New Brand Logo, Verified Artist Badges, Taste DNA 5-D Engine fixes, Infinite Auto-Queue, and UI bottom clearance optimizations."
 }

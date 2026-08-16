@@ -36,7 +36,7 @@ class TasteProfileManager @Inject constructor(
      * Weights: Likes (+3), Completions (+1), Skips (-2 if < 20s).
      */
     suspend fun calculateTasteProfile(): AudioFeatureProfile = withContext(Dispatchers.IO) {
-        val signals = signalDao.getAll()
+        val signals = signalDao.getAll().take(30)
         
         var totalWeight = 0.0
         var wEnergy = 0.0
@@ -55,82 +55,70 @@ class TasteProfileManager @Inject constructor(
                 val songKey = RecommendationManager.generateSongKey(sig.author, sig.title)
                 val realCache = try { featureCacheDao.get(songKey) } catch (_: Exception) { null }
 
-                if (realCache != null) {
-                    sig.energy = (realCache.energyReal * 100).toInt().coerceIn(0, 100)
-                    if (realCache.bpmReal in 40f..250f) {
-                        sig.tempo = realCache.bpmReal.toInt().coerceIn(0, 255)
+                var needsUpdate = false
+
+                // 1. Fetch accurate ground-truth features from Spotify database if available
+                val spotifyTrack = try { RecommendationManager.findSpotifyTrackFuzzy(spotifyDao, sig.title, sig.author) } catch (_: Exception) { null }
+                if (spotifyTrack != null) {
+                    sig.energy = spotifyTrack.energy.coerceIn(10, 98)
+                    sig.valence = spotifyTrack.valence.coerceIn(10, 98)
+                    sig.danceability = spotifyTrack.dance.coerceIn(10, 98)
+                    sig.acousticness = spotifyTrack.acoustic.coerceIn(5, 95)
+                    sig.tempo = spotifyTrack.tempo.coerceIn(40, 220)
+                    needsUpdate = true
+                } else {
+                    // 2. High-precision inference from title, artist, genre, mood
+                    val fakeItem = com.vinmusic.innertube.VideoItem(sig.videoId, sig.title, sig.author, sig.durationText)
+                    val inferred = RecommendationManager.inferMetadata(fakeItem)
+                    
+                    sig.energy = (inferred.energy * 100).toInt().coerceIn(15, 95)
+                    sig.valence = when (inferred.mood) {
+                        "Sad" -> 25
+                        "Chill/Relaxed" -> 45
+                        "Romantic" -> 58
+                        "Happy" -> 82
+                        "Energetic" -> 75
+                        "Dark" -> 28
+                        else -> 52
                     }
+                    sig.danceability = when (inferred.genre) {
+                        "Rap/Hip-Hop" -> 82
+                        "Punjabi Folk" -> 86
+                        "Pop" -> 78
+                        "Lofi" -> 35
+                        "Sad", "Indie" -> 42
+                        "Bollywood" -> if (inferred.mood == "Energetic") 78 else 55
+                        else -> 58
+                    }
+                    sig.acousticness = when (inferred.genre) {
+                        "Lofi" -> 72
+                        "Indie" -> 66
+                        "Sad" -> 58
+                        "Bollywood" -> if (inferred.mood == "Romantic") 52 else 32
+                        "Rap/Hip-Hop", "Rock" -> 14
+                        else -> 32
+                    }
+                    sig.tempo = inferred.tempo.coerceIn(40, 220)
+                    needsUpdate = true
                 }
 
-                // Fetch audio features from the local Spotify database if missing in InteractionSignal
-                var features = sig
-                var needsUpdate = false
-                if (sig.energy == -1) {
-                    // Using fuzzy DB search
-                    val spotifyTrack = try { RecommendationManager.findSpotifyTrackFuzzy(spotifyDao, sig.title, sig.author) } catch (_: Exception) { null }
-                    if (spotifyTrack != null) {
-                        sig.energy = spotifyTrack.energy
-                        sig.valence = spotifyTrack.valence
-                        sig.danceability = spotifyTrack.dance
-                        sig.acousticness = spotifyTrack.acoustic
-                        sig.tempo = spotifyTrack.tempo
-                        needsUpdate = true
-                        features = sig
-                    } else {
-                        // Feature inference fallback!
-                        val fakeItem = com.vinmusic.innertube.VideoItem(sig.videoId, sig.title, sig.author, sig.durationText)
-                        val inferred = RecommendationManager.inferMetadata(fakeItem)
-                        
-                        sig.energy = (inferred.energy * 100).toInt().coerceIn(0, 100)
-                        sig.valence = when (inferred.mood) {
-                            "Sad" -> 20
-                            "Chill/Relaxed" -> 45
-                            "Romantic" -> 55
-                            "Happy" -> 80
-                            "Energetic" -> 70
-                            "Dark" -> 25
-                            else -> 50
-                        }
-                        sig.danceability = when (inferred.genre) {
-                            "Rap/Hip-Hop" -> 80
-                            "Punjabi Folk" -> 85
-                            "Pop" -> 75
-                            "Lofi" -> 30
-                            "Sad", "Indie" -> 40
-                            "Bollywood" -> if (inferred.mood == "Energetic") 75 else 50
-                            else -> 50
-                        }
-                        sig.acousticness = when (inferred.genre) {
-                            "Lofi" -> 70
-                            "Indie" -> 65
-                            "Sad" -> 55
-                            "Bollywood" -> if (inferred.mood == "Romantic") 50 else 30
-                            "Rap/Hip-Hop", "Rock" -> 10
-                            else -> 30
-                        }
-                        sig.tempo = inferred.tempo.coerceIn(0, 255)
-                        
-                        needsUpdate = true
-                        features = sig
+                // 3. If real analyzed audio cache exists, overlay exact measured energy & BPM
+                if (realCache != null) {
+                    if (realCache.energyReal > 0f) {
+                        sig.energy = (realCache.energyReal * 100).toInt().coerceIn(15, 95)
                     }
-                } else if (realCache != null) {
-                    val originalEnergy = sig.energy
-                    val originalTempo = sig.tempo
-                    sig.energy = (realCache.energyReal * 100).toInt().coerceIn(0, 100)
                     if (realCache.bpmReal in 40f..250f) {
-                        sig.tempo = realCache.bpmReal.toInt().coerceIn(0, 255)
+                        sig.tempo = realCache.bpmReal.toInt().coerceIn(40, 220)
                     }
-                    if (originalEnergy != sig.energy || originalTempo != sig.tempo) {
-                        needsUpdate = true
-                    }
-                    features = sig
+                    needsUpdate = true
                 }
-                
+
+                val features = sig
                 if (needsUpdate) {
                     updatedSignals.add(sig)
                 }
-                
-                if (features.energy == -1) continue // Skip if we couldn't match the song
+
+                if (features.energy <= 0) continue
 
                 // Calculate weight based on interactions
                 var weight = (features.playCount * 0.5) + features.completeCount
@@ -147,7 +135,7 @@ class TasteProfileManager @Inject constructor(
                     wTempo += features.tempo * weight
                 }
             } catch (e: Exception) {
-                // Skip this signal and continue with others
+                android.util.Log.e("TasteDNA", "Signal processing error for ${sig.title}: ${e.message}", e)
                 continue
             }
         }

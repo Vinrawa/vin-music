@@ -4,6 +4,9 @@ import android.app.Application
 import com.vinmusic.innertube.NewPipeInit
 import com.vinmusic.innertube.YTMusicApi
 import dagger.hilt.android.HiltAndroidApp
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.disk.DiskCache
@@ -26,9 +29,20 @@ class VinMusicApp : Application(), SingletonImageLoader.Factory {
         }
 
         NewPipeInit.init()
+        com.vinmusic.innertube.InnerTube.init(this)
         YTMusicApi.attachContext(this)
         com.vinmusic.config.RemoteConfigHelper.init()
         ReliabilityDiagnostics.init(this)
+
+        // Warm up ExoPlayer caches and Recommendation DB asynchronously on Dispatchers.IO to eliminate Main thread disk scans
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            com.vinmusic.player.PlayerSingleton.getCache(applicationContext)
+            com.vinmusic.player.PlayerSingleton.getDownloadCache(applicationContext)
+            try {
+                com.vinmusic.recommendation.RecommendationDatabase.getInstance(applicationContext).openHelper.writableDatabase
+                com.vinmusic.recommendation.RecommendationManager.loadGenreGraph(applicationContext)
+            } catch (_: Exception) {}
+        }
     }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {

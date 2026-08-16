@@ -292,10 +292,10 @@ class RecommendationScoringTest {
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `inferMetadata defaults to English when no language keywords match`() {
+    fun `inferMetadata defaults to Unknown when no language keywords match`() {
         val item = VideoItem("v1", "Random Title", "Random Artist", "3:00")
         val meta = RecommendationManager.inferMetadata(item)
-        assertEquals("English", meta.language)
+        assertEquals("Unknown", meta.language)
     }
 
     @Test

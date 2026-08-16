@@ -204,6 +204,10 @@ fun SettingsScreen(
     var lyricsExpanded    by remember { mutableStateOf(false) }
     var aboutExpanded     by remember { mutableStateOf(false) }
 
+    var isCheckingUpdate by remember { mutableStateOf(false) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<com.vinmusic.update.UpdateInfo?>(null) }
+
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
@@ -1047,12 +1051,55 @@ fun SettingsScreen(
         ) {
             SettingsInfo(title = "Version", value = com.vinmusic.BuildConfig.VERSION_NAME)
             HorizontalDivider(color = VinColors.GlassBorder, modifier = Modifier.padding(vertical = 4.dp))
+            // Check for Updates
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !isCheckingUpdate) {
+                        isCheckingUpdate = true
+                        scope.launch {
+                            try {
+                                val info = com.vinmusic.update.UpdateManager.checkUpdate()
+                                if (info != null && info.latestVersionCode > com.vinmusic.BuildConfig.VERSION_CODE) {
+                                    updateInfo = info
+                                    showUpdateDialog = true
+                                } else {
+                                    Toast.makeText(ctx, "You're on the latest version ✓", Toast.LENGTH_SHORT).show()
+                                }
+                            } catch (e: Exception) {
+                                Toast.makeText(ctx, "Couldn't check for updates. Try again later.", Toast.LENGTH_SHORT).show()
+                            } finally {
+                                isCheckingUpdate = false
+                            }
+                        }
+                    }
+                    .padding(vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Check for Updates", fontSize = 15.sp, color = VinColors.Primary)
+                if (isCheckingUpdate) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = VinColors.Accent
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = "Check for updates",
+                        tint = VinColors.Secondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+            HorizontalDivider(color = VinColors.GlassBorder, modifier = Modifier.padding(vertical = 4.dp))
             SettingsInfo(title = "Streaming", value = "Multi-client InnerTube (6 fallbacks)")
             HorizontalDivider(color = VinColors.GlassBorder, modifier = Modifier.padding(vertical = 4.dp))
             SettingsInfo(title = "Built with", value = "Kotlin • Jetpack Compose • ExoPlayer")
         }
 
-        Spacer(Modifier.height(48.dp))
+        Spacer(Modifier.height(220.dp))
     }
 
     // ── Edit Profile Name Dialog ──────────────────────────────────────────────
@@ -1458,6 +1505,53 @@ fun SettingsScreen(
                     Text("Close", color = VinColors.Secondary)
                 }
             }
+        )
+    }
+
+    // ── Update Available Dialog ──────────────────────────────────────────────────
+    if (showUpdateDialog && updateInfo != null) {
+        AlertDialog(
+            onDismissRequest = { showUpdateDialog = false },
+            title = {
+                Text(
+                    "Update Available",
+                    color = VinColors.Primary,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "v${updateInfo!!.latestVersionName}",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = VinColors.Accent
+                    )
+                    if (updateInfo!!.releaseNotes.isNotBlank()) {
+                        Text(
+                            updateInfo!!.releaseNotes,
+                            fontSize = 13.sp,
+                            color = VinColors.Secondary,
+                            lineHeight = 18.sp
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showUpdateDialog = false
+                    com.vinmusic.update.UpdateManager.downloadAndInstall(ctx, updateInfo!!)
+                }) {
+                    Text("Download", color = VinColors.Accent, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUpdateDialog = false }) {
+                    Text("Later", color = VinColors.Secondary)
+                }
+            },
+            containerColor = VinColors.Surface2,
+            shape = RoundedCornerShape(20.dp)
         )
     }
 }

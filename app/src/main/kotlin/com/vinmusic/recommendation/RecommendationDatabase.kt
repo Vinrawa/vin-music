@@ -1,6 +1,7 @@
 package com.vinmusic.recommendation
 
 import android.content.Context
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -20,8 +21,8 @@ import androidx.room.Index
     ]
 )
 data class SpotifyTrack(
-    @PrimaryKey(autoGenerate = true)
-    val id: Int = 0,
+    @PrimaryKey
+    val id: Int? = null,
     val title: String,
     val artist: String,
     val dance: Int,
@@ -30,6 +31,7 @@ data class SpotifyTrack(
     val tempo: Int,
     val acoustic: Int,
     val cluster_id: Int,
+    @ColumnInfo(defaultValue = "")
     val genre: String = ""
 )
 
@@ -103,11 +105,23 @@ interface SpotifyTrackDao {
     """)
     suspend fun getSimilarTracks(targetEnergy: Int, targetValence: Int, targetDance: Int, targetAcoustic: Int, targetTempo: Int, limit: Int = 20): List<SpotifyTrack>
 
-    // Find all tracks by an artist (for feature estimation)
+    // Find tracks by artist (uses B-Tree index on artist column)
+    @Query("SELECT * FROM tracks WHERE artist = :artist COLLATE NOCASE LIMIT 50")
+    suspend fun findTracksByArtistExact(artist: String): List<SpotifyTrack>
+
+    @Query("SELECT * FROM tracks WHERE artist LIKE :artistPrefix || '%' LIMIT 50")
+    suspend fun findTracksByArtistPrefix(artistPrefix: String): List<SpotifyTrack>
+
     @Query("SELECT * FROM tracks WHERE artist LIKE '%' || :artist || '%' LIMIT 50")
     suspend fun findTracksByArtist(artist: String): List<SpotifyTrack>
 
-    // Find tracks by genre (for feature estimation)
+    // Find tracks by genre (uses B-Tree index on genre column)
+    @Query("SELECT * FROM tracks WHERE genre = :genre COLLATE NOCASE LIMIT 50")
+    suspend fun findTracksByGenreExact(genre: String): List<SpotifyTrack>
+
+    @Query("SELECT * FROM tracks WHERE genre LIKE :genrePrefix || '%' LIMIT 50")
+    suspend fun findTracksByGenrePrefix(genrePrefix: String): List<SpotifyTrack>
+
     @Query("SELECT * FROM tracks WHERE genre LIKE '%' || :genre || '%' LIMIT 50")
     suspend fun findTracksByGenre(genre: String): List<SpotifyTrack>
 }
@@ -116,7 +130,7 @@ interface SpotifyTrackDao {
 // User data (history, likes, skips, playlists) lives in VinDatabase — NOT here.
 // fallbackToDestructiveMigration() is safe: it only replaces the bundled track catalog
 // when the version changes. No user data is lost.
-@Database(entities = [SpotifyTrack::class], version = 6, exportSchema = false)
+@Database(entities = [SpotifyTrack::class], version = 7, exportSchema = false)
 abstract class RecommendationDatabase : RoomDatabase() {
     abstract fun trackDao(): SpotifyTrackDao
 

@@ -38,7 +38,8 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.VinMusicV2"
         android:largeHeap="true"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="true">
 
         <!-- Sentry configuration -->
         <meta-data android:name="io.sentry.dsn" android:value="https://placeholderPublicKey@o000000.ingest.sentry.io/0000000" />

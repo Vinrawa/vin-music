@@ -402,7 +402,12 @@ class PlayerViewModel @Inject constructor(
         PlayerSingleton.moveQueueItem(from, to)
     }
 
+    private var radioJob: Job? = null
+
     fun playSongWithRadio(song: VideoItem) {
+        // Cancel any previous radio fetch so it doesn't pollute our queue
+        radioJob?.cancel()
+
         lyricsSuppressedForVideoId = null
         resetLyricsState(song)
         progress          = 0f
@@ -412,26 +417,104 @@ class PlayerViewModel @Inject constructor(
         PlayerSingleton.setQueue(listOf(song), 0)
         PlayerSingleton.isAutoplayLoading = true
         
-        viewModelScope.launch(Dispatchers.IO) {
+        radioJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                val recommended = recommendationRepository.getSongRadio(song.videoId, song.title, song.author)
-                if (!recommended.isNullOrEmpty()) {
+                // FAST PATH: Direct radio playlist (~2 seconds)
+                Log.d(TAG, "playSongWithRadio: fetching instant radio for ${song.videoId}")
+                val radioTracks = InnerTube.getWatchNextRadio(song.videoId)
+                Log.d(TAG, "playSongWithRadio: instant radio returned ${radioTracks.size} tracks")
+
+                // Check if user already moved to another song
+                if (!isActive) return@launch
+
+                val fastRecs = radioTracks.filter { it.videoId != song.videoId }.take(19)
+
+                if (fastRecs.isNotEmpty()) {
                     withContext(Dispatchers.Main) {
-                        val currentQueue = PlayerSingleton.queue.toMutableList()
-                        val existingIds = currentQueue.map { it.videoId }.toSet()
-                        val uniqueRecs = recommended.filter { it.videoId !in existingIds }
-                        if (uniqueRecs.isNotEmpty()) {
-                            currentQueue.addAll(uniqueRecs)
-                            PlayerSingleton.queue = currentQueue
+                        // Only append if the current queue still starts with our song
+                        if (PlayerSingleton.queue.firstOrNull()?.videoId == song.videoId) {
+                            val currentQueue = PlayerSingleton.queue.toMutableList()
+                            val existingIds = currentQueue.map { it.videoId }.toSet()
+                            val unique = fastRecs.filter { it.videoId !in existingIds }
+                            if (unique.isNotEmpty()) {
+                                currentQueue.addAll(unique)
+                                PlayerSingleton.queue = currentQueue
+                                Log.d(TAG, "playSongWithRadio: appended ${unique.size} initial radio tracks, total=${currentQueue.size}")
+                            }
+                        }
+                        PlayerSingleton.isAutoplayLoading = false
+                    }
+                } else {
+                    // Radio returned nothing — try direct search fallback
+                    Log.w(TAG, "playSongWithRadio: radio empty, trying search fallback")
+                    val searchResults = mutableListOf<VideoItem>()
+                    if (song.author.isNotBlank()) {
+                        val results = InnerTube.search("${song.author} songs official").take(15)
+                        for (item in results) {
+                            if (item.videoId != song.videoId && searchResults.none { it.videoId == item.videoId }) {
+                                searchResults.add(item)
+                            }
                         }
                     }
+                    if (searchResults.size < 5 && song.title.isNotBlank()) {
+                        val results = InnerTube.search("${song.title} ${song.author} mix").take(10)
+                        for (item in results) {
+                            if (item.videoId != song.videoId && searchResults.none { it.videoId == item.videoId }) {
+                                searchResults.add(item)
+                            }
+                        }
+                    }
+
+                    if (!isActive) return@launch
+
+                    if (searchResults.isNotEmpty()) {
+                        withContext(Dispatchers.Main) {
+                            if (PlayerSingleton.queue.firstOrNull()?.videoId == song.videoId) {
+                                val currentQueue = PlayerSingleton.queue.toMutableList()
+                                val existingIds = currentQueue.map { it.videoId }.toSet()
+                                val unique = searchResults.filter { it.videoId !in existingIds }
+                                if (unique.isNotEmpty()) {
+                                    currentQueue.addAll(unique)
+                                    PlayerSingleton.queue = currentQueue
+                                    Log.d(TAG, "playSongWithRadio: appended ${unique.size} search fallback tracks")
+                                }
+                            }
+                            PlayerSingleton.isAutoplayLoading = false
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) { PlayerSingleton.isAutoplayLoading = false }
+                    }
                 }
+
+                // SLOW PATH (background enhance): Run full Smart Queue to improve/replace recommendations
+                if (!isActive) return@launch
+                try {
+                    val smartRecs = recommendationRepository.getSongRadio(song.videoId, song.title, song.author)
+                    if (!isActive) return@launch
+                    if (!smartRecs.isNullOrEmpty()) {
+                        withContext(Dispatchers.Main) {
+                            if (PlayerSingleton.queue.firstOrNull()?.videoId == song.videoId) {
+                                val currentQueue = PlayerSingleton.queue.toMutableList()
+                                val existingIds = currentQueue.map { it.videoId }.toSet()
+                                val unique = smartRecs.filter { it.videoId !in existingIds }
+                                if (unique.isNotEmpty()) {
+                                    currentQueue.addAll(unique)
+                                    PlayerSingleton.queue = currentQueue
+                                    Log.d(TAG, "playSongWithRadio: Smart Queue enhanced with ${unique.size} more tracks, total=${currentQueue.size}")
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.e(TAG, "playSongWithRadio: Smart Queue enhance failed: ${e.message}")
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "playSongWithRadio: cancelled for ${song.videoId}")
+                throw e
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to load radio suggestions: ${e.message}")
-            } finally {
-                withContext(Dispatchers.Main) {
-                    PlayerSingleton.isAutoplayLoading = false
-                }
+                Log.e(TAG, "playSongWithRadio: EXCEPTION: ${e.javaClass.simpleName}: ${e.message}", e)
+                withContext(Dispatchers.Main) { PlayerSingleton.isAutoplayLoading = false }
             }
         }
     }

@@ -17,6 +17,8 @@ import kotlinx.coroutines.withContext
 object FeatureEstimator {
     private const val TAG = "FeatureEstimator"
 
+    private val estimatedFeatureCache = java.util.concurrent.ConcurrentHashMap<String, AudioFeatures>()
+
     data class AudioFeatures(
         val energy: Float,
         val valence: Float,
@@ -26,7 +28,7 @@ object FeatureEstimator {
     )
 
     /**
-     * Estimate audio features for a track. Uses the 500K DB to find similar tracks.
+     * Estimate audio features for a track. Uses memory cache first, then fast indexed B-Tree search in 500K DB.
      */
     suspend fun estimateFeatures(
         recDb: RecommendationDatabase,
@@ -35,43 +37,65 @@ object FeatureEstimator {
         genre: String,
         mood: String
     ): AudioFeatures? = withContext(Dispatchers.IO) {
-        try {
-            // Strategy 1: Find artist's other tracks in the 500K DB
-            val artistTracks = recDb.trackDao().findTracksByArtist(artist)
-            if (artistTracks.isNotEmpty()) {
-                val avgEnergy = artistTracks.map { it.energy }.average().toFloat()
-                val avgValence = artistTracks.map { it.valence }.average().toFloat()
-                val avgDance = artistTracks.map { it.dance }.average().toFloat()
-                val avgAcoustic = artistTracks.map { it.acoustic }.average().toFloat()
-                val avgTempo = artistTracks.map { it.tempo }.average().toFloat()
+        val cacheKey = "${artist.lowercase()}|${title.lowercase()}|${genre.lowercase()}|${mood.lowercase()}"
+        estimatedFeatureCache[cacheKey]?.let { return@withContext it }
 
-                Log.d(TAG, "Found ${artistTracks.size} tracks by '$artist' in DB, using average features")
-                return@withContext refineByMood(
-                    AudioFeatures(avgEnergy / 100f, avgValence / 100f, avgDance / 100f, avgAcoustic / 100f, avgTempo),
-                    title, mood
-                )
+        try {
+            // Strategy 1: Fast indexed artist lookup (Exact match first, then Prefix match)
+            val cleanArtist = artist.trim()
+            if (cleanArtist.isNotBlank()) {
+                var artistTracks = recDb.trackDao().findTracksByArtistExact(cleanArtist)
+                if (artistTracks.isEmpty() && cleanArtist.length >= 3) {
+                    artistTracks = recDb.trackDao().findTracksByArtistPrefix(cleanArtist)
+                }
+                if (artistTracks.isNotEmpty()) {
+                    val avgEnergy = artistTracks.map { it.energy }.average().toFloat()
+                    val avgValence = artistTracks.map { it.valence }.average().toFloat()
+                    val avgDance = artistTracks.map { it.dance }.average().toFloat()
+                    val avgAcoustic = artistTracks.map { it.acoustic }.average().toFloat()
+                    val avgTempo = artistTracks.map { it.tempo }.average().toFloat()
+
+                    Log.d(TAG, "Indexed match: found ${artistTracks.size} tracks by '$artist' in DB")
+                    val result = refineByMood(
+                        AudioFeatures(avgEnergy / 100f, avgValence / 100f, avgDance / 100f, avgAcoustic / 100f, avgTempo),
+                        title, mood
+                    )
+                    estimatedFeatureCache[cacheKey] = result
+                    return@withContext result
+                }
             }
 
-            // Strategy 2: Find tracks by genre in the 500K DB
-            val genreLower = genre.lowercase()
-            val genreTracks = recDb.trackDao().findTracksByGenre(genreLower)
-            if (genreTracks.isNotEmpty()) {
-                val avgEnergy = genreTracks.map { it.energy }.average().toFloat()
-                val avgValence = genreTracks.map { it.valence }.average().toFloat()
-                val avgDance = genreTracks.map { it.dance }.average().toFloat()
-                val avgAcoustic = genreTracks.map { it.acoustic }.average().toFloat()
-                val avgTempo = genreTracks.map { it.tempo }.average().toFloat()
+            // Strategy 2: Fast indexed genre lookup (Exact match first, then Prefix match)
+            val cleanGenre = genre.trim().lowercase()
+            if (cleanGenre.isNotBlank()) {
+                var genreTracks = recDb.trackDao().findTracksByGenreExact(cleanGenre)
+                if (genreTracks.isEmpty() && cleanGenre.length >= 3) {
+                    genreTracks = recDb.trackDao().findTracksByGenrePrefix(cleanGenre)
+                }
+                if (genreTracks.isNotEmpty()) {
+                    val avgEnergy = genreTracks.map { it.energy }.average().toFloat()
+                    val avgValence = genreTracks.map { it.valence }.average().toFloat()
+                    val avgDance = genreTracks.map { it.dance }.average().toFloat()
+                    val avgAcoustic = genreTracks.map { it.acoustic }.average().toFloat()
+                    val avgTempo = genreTracks.map { it.tempo }.average().toFloat()
 
-                Log.d(TAG, "Found ${genreTracks.size} tracks in genre '$genre' in DB, using average features")
-                return@withContext refineByMood(
-                    AudioFeatures(avgEnergy / 100f, avgValence / 100f, avgDance / 100f, avgAcoustic / 100f, avgTempo),
-                    title, mood
-                )
+                    Log.d(TAG, "Indexed match: found ${genreTracks.size} tracks in genre '$genre' in DB")
+                    val result = refineByMood(
+                        AudioFeatures(avgEnergy / 100f, avgValence / 100f, avgDance / 100f, avgAcoustic / 100f, avgTempo),
+                        title, mood
+                    )
+                    estimatedFeatureCache[cacheKey] = result
+                    return@withContext result
+                }
             }
 
             // Strategy 3: Use genre-based defaults
-            Log.d(TAG, "No tracks found for artist '$artist' or genre '$genre', using genre defaults")
-            return@withContext getGenreDefaults(genre, mood)
+            Log.d(TAG, "No indexed tracks found for artist '$artist' or genre '$genre', using genre defaults")
+            val fallback = getGenreDefaults(genre, mood)
+            if (fallback != null) {
+                estimatedFeatureCache[cacheKey] = fallback
+            }
+            return@withContext fallback
         } catch (e: Exception) {
             Log.w(TAG, "Feature estimation failed: ${e.message}")
             null

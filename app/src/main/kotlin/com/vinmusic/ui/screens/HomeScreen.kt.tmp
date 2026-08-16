@@ -91,40 +91,6 @@ fun normalizeArtistName(name: String): String {
     return clean
 }
 
-private suspend fun fetchSimilarArtistsLocally(artist: String): List<String> {
-    val apiKey = com.vinmusic.config.RemoteConfigHelper.getLastFmApiKey()
-    if (apiKey.isBlank()) return emptyList()
-    val urlString = "https://ws.audioscrobbler.com/2.0/?method=artist.getsimilar" +
-            "&artist=${java.net.URLEncoder.encode(artist, "UTF-8")}" +
-            "&api_key=$apiKey" +
-            "&format=json"
-    
-    return try {
-        val url = java.net.URL(urlString)
-        val connection = url.openConnection() as java.net.HttpURLConnection
-        connection.requestMethod = "GET"
-        connection.connectTimeout = 5000
-        connection.readTimeout = 5000
-        
-        if (connection.responseCode == 200) {
-            val responseText = connection.inputStream.bufferedReader().use { it.readText() }
-            val responseJson = com.google.gson.JsonParser.parseString(responseText).asJsonObject
-            val similarartists = responseJson.getAsJsonObject("similarartists")
-            if (similarartists != null) {
-                val artistArray = similarartists.getAsJsonArray("artist")
-                if (artistArray != null) {
-                    return artistArray.map { it.asJsonObject.get("name").asString }
-                }
-            }
-        }
-        emptyList()
-    } catch (e: Exception) {
-        emptyList()
-    }
-}
-
-
-
 data class QuickPlaylist(
     val name: String,
     val query: String,
@@ -1071,13 +1037,13 @@ fun HomeScreen(
 
                 val cleanListened = listenedArtists.map { normalizeArtistName(it) }.filter { it.isNotEmpty() }.toSet()
                 val artistNames = ArrayList<String>()
-                
+                val firestoreRecManager = com.vinmusic.recommendation.FirestoreRecommendationManager()
 
                 if (cleanListened.size < 5) {
-                    // Cold-start/Variety Phase: Use Last.fm similar artists (local)
+                    // Cold-start/Variety Phase: Use Last.fm similar artists
                     for (artName in listenedArtists.take(5)) {
                         try {
-                            val lastFmSimilar = fetchSimilarArtistsLocally(artName)
+                            val lastFmSimilar = firestoreRecManager.fetchSimilarArtists(artName)
                             for (simArt in lastFmSimilar) {
                                 if (artistNames.size >= 16) break
                                 val normSim = normalizeArtistName(simArt)
@@ -1119,11 +1085,11 @@ fun HomeScreen(
                         }
                     }
                 } else {
-                    // Warm-start Discovery Phase: Use Last.fm similar artists (local)
+                    // Warm-start Discovery Phase: Use Last.fm similar artists
                     val topListened = listenedArtists.take(16)
                     for (artName in topListened) {
                         try {
-                            val lastFmSimilar = fetchSimilarArtistsLocally(artName)
+                            val lastFmSimilar = firestoreRecManager.fetchSimilarArtists(artName)
                             for (simArt in lastFmSimilar) {
                                 if (artistNames.size >= 16) break
                                 val normSim = normalizeArtistName(simArt)
@@ -4382,3 +4348,4 @@ fun RecommendedPlaylistCard(playlist: com.vinmusic.innertube.AlbumItem, modifier
         )
     }
 }
+

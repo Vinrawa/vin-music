@@ -23,7 +23,28 @@ object InnerTube {
     /** Visitor data token, refreshed periodically for long-running sessions. */
     @Volatile private var visitorData = ""
     @Volatile private var visitorFetchedAt = 0L
-    private const val VISITOR_TTL_MS = 30 * 60 * 1000L
+    private const val VISITOR_TTL_MS = 60 * 60 * 1000L // 1 hour TTL
+    @Volatile private var appContext: android.content.Context? = null
+
+    val verifiedArtistCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    fun init(context: android.content.Context) {
+        val ctx = context.applicationContext
+        appContext = ctx
+        val prefs = ctx.getSharedPreferences("innertube_prefs", android.content.Context.MODE_PRIVATE)
+        val savedToken = prefs.getString("visitor_data", null)
+        val savedTime = prefs.getLong("visitor_fetched_at", 0L)
+        if (!savedToken.isNullOrBlank() && System.currentTimeMillis() - savedTime < 24 * 60 * 60 * 1000L) {
+            visitorData = savedToken
+            visitorFetchedAt = savedTime
+            android.util.Log.d("DEBUG_TOKEN", "Loaded persisted visitorData from disk (len=${savedToken.length})")
+        } else {
+            // Warm up in background asynchronously on launch
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                ensureVisitorData()
+            }
+        }
+    }
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -32,17 +53,12 @@ object InnerTube {
         .build()
 
     // Timeouts must stay above YouTube's realistic /player response latency.
-    // 2.5s caused all 4 racing clients to time out together whenever YouTube
-    // was slightly slow, cascading into the slow NewPipe/Resolver fallbacks.
     private val racingHttp = http.newBuilder()
         .connectTimeout(8_000, TimeUnit.MILLISECONDS)
         .readTimeout(12_000, TimeUnit.MILLISECONDS)
         .build()
 
     // ── Client definitions ────────────────────────────────────────────────────
-    // Confirmed from PC tests: ANDROID_VR (id=28) returns OK + direct audio URL
-    // ANDROID (id=3) and IOS (id=5) return 400 from our network
-
     private data class YTClient(
         val name: String,
         val version: String,
@@ -59,19 +75,21 @@ object InnerTube {
         // TV embed — no cipher decryption needed
         YTClient("TVHTML5_SIMPLY_EMBEDDED_PLAYER", "2.0", "85",
             "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/538.1 TV Safari/538.1"),
-        // ANDROID + IOS fallbacks (may work on device even if blocked from PC)
-        YTClient("ANDROID", "17.31.35", "3",
-            "com.google.android.youtube/17.31.35(Linux; U; Android 11) gzip",
-            mapOf("androidSdkVersion" to 30)),
-        YTClient("IOS", "19.09.3", "5",
-            "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_4 like Mac OS X) AppleWebKit/605.1.15",
+        // Modern IOS Client
+        YTClient("IOS", "19.29.1", "5",
+            "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X) AppleWebKit/605.1.15",
             mapOf("deviceMake" to "Apple", "deviceModel" to "iPhone16,2",
-                  "osName" to "iPhone",    "osVersion"   to "17.4.0.21E217")),
+                  "osName" to "iPhone",    "osVersion"   to "17.5.1.21F90")),
+        // Android TestSuite fallback
+        YTClient("ANDROID_TESTSUITE", "1.9", "89",
+            "com.google.android.youtube.testsuite/1.9 (Linux; U; Android 12; en_US)",
+            mapOf("androidSdkVersion" to 32)),
     )
 
     // ── Visitor data ──────────────────────────────────────────────────────────
     /** Fetches a fresh YouTube visitor data token (helps bypass LOGIN_REQUIRED) */
-    private fun ensureVisitorData(force: Boolean = false) {
+    fun ensureVisitorData(force: Boolean = false) {
+        android.util.Log.d("DEBUG_TOKEN", "ensureVisitorData called: force=$force, currentToken='${visitorData.take(15)}', elapsedMs=${System.currentTimeMillis() - visitorFetchedAt}")
         if (!force && visitorData.isNotEmpty() && System.currentTimeMillis() - visitorFetchedAt < VISITOR_TTL_MS) return
         try {
             val html = http.newCall(Request.Builder()
@@ -83,10 +101,19 @@ object InnerTube {
             val vd = html?.let {
                 Regex("\"VISITOR_DATA\":\"([^\"]+)\"").find(it)?.groupValues?.get(1)
             }
-            visitorData = vd ?: ""
-            visitorFetchedAt = System.currentTimeMillis()
+            if (!vd.isNullOrBlank()) {
+                visitorData = vd
+                visitorFetchedAt = System.currentTimeMillis()
+                appContext?.getSharedPreferences("innertube_prefs", android.content.Context.MODE_PRIVATE)?.edit()?.apply {
+                    putString("visitor_data", visitorData)
+                    putLong("visitor_fetched_at", visitorFetchedAt)
+                    apply()
+                }
+                android.util.Log.d("DEBUG_TOKEN", "ensureVisitorData PERSISTED: token='${visitorData.take(20)}...'")
+            }
             log("visitorData: ${if (vd != null) "${vd.take(20)}... [OK]" else "not found"}")
         } catch (e: Exception) {
+            android.util.Log.e("DEBUG_TOKEN", "ensureVisitorData ERROR: ${e.message}")
             log("visitorData fetch err: ${e.message?.take(60)}")
         }
     }
@@ -95,8 +122,8 @@ object InnerTube {
     fun getUserAgentForUrl(url: String): String {
         return when {
             url.contains("c=ANDROID_VR") -> "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12; GB) gzip"
-            url.contains("c=ANDROID") -> "com.google.android.youtube/17.31.35(Linux; U; Android 11) gzip"
-            url.contains("c=IOS") -> "com.google.ios.youtube/21.03.1 (iPhone16,2; U; CPU iOS 18_2 like Mac OS X;)"
+            url.contains("c=IOS") -> "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X) AppleWebKit/605.1.15"
+            url.contains("c=ANDROID_TESTSUITE") -> "com.google.android.youtube.testsuite/1.9 (Linux; U; Android 12; en_US)"
             url.contains("c=TVHTML5") -> "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/538.1 TV Safari/538.1"
             else -> "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
@@ -209,6 +236,7 @@ object InnerTube {
 
     // ── Main entry ────────────────────────────────────────────────────────────
     fun getStreamUrl(videoId: String, quality: String? = null): String? {
+        android.util.Log.d("DEBUG_TOKEN", "getStreamUrl START videoId=$videoId visitorData='$visitorData'")
         log("getStreamUrl videoId=$videoId quality=$quality")
         if (videoId.isBlank()) { log("ERROR: blank videoId!"); return null }
 
@@ -257,6 +285,45 @@ object InnerTube {
             return url
         }
 
+        // Auto-recovery: If parallel race failed (likely due to token challenge), force a fresh token and retry once immediately
+        log("Initial parallel race returned no URL. Refreshing visitor token and retrying race...")
+        ensureVisitorData(force = true)
+        val refreshedUrl = runBlocking {
+            val channel = Channel<String>(Channel.UNLIMITED)
+            val remaining = java.util.concurrent.atomic.AtomicInteger(CLIENTS.size)
+
+            CLIENTS.forEach { client ->
+                launch(Dispatchers.IO) {
+                    try {
+                        val res = fetchViaClient(videoId, client, quality, racingHttp)
+                        if (!res.isNullOrEmpty()) {
+                            channel.trySend(res)
+                        }
+                    } catch (_: Throwable) {
+                    } finally {
+                        if (remaining.decrementAndGet() == 0) {
+                            channel.close()
+                        }
+                    }
+                }
+            }
+
+            var successfulRetryUrl: String? = null
+            try {
+                for (res in channel) {
+                    successfulRetryUrl = res
+                    coroutineContext.cancelChildren()
+                    break
+                }
+            } catch (_: Exception) {}
+            successfulRetryUrl
+        }
+
+        if (!refreshedUrl.isNullOrEmpty()) {
+            log("SUCCESS via refreshed token race Host: ${android.net.Uri.parse(refreshedUrl).host}")
+            return refreshedUrl
+        }
+
         // 3. Fallback to NewPipeExtractor
         log("Trying NewPipeExtractor as fallback...")
         try {
@@ -303,7 +370,14 @@ object InnerTube {
     }
 
     // ── InnerTube player request ──────────────────────────────────────────────
-    private fun fetchViaClient(videoId: String, client: YTClient, quality: String? = null, clientOverride: OkHttpClient = http): String? {
+    private fun fetchViaClient(
+        videoId: String,
+        client: YTClient,
+        quality: String? = null,
+        clientOverride: OkHttpClient = http,
+        allowRetry: Boolean = true
+    ): String? {
+        android.util.Log.d("DEBUG_TOKEN", "fetchViaClient: client=${client.name} sending visitorData='$visitorData' allowRetry=$allowRetry")
         val endpoint = "$BASE/player?prettyPrint=false"
         log("--- DIAGNOSTIC: Testing ${client.name} / ${client.version} ---")
         log("Endpoint: $endpoint")
@@ -363,6 +437,13 @@ object InnerTube {
             val reason = (root["playabilityStatus"] as? Map<*, *>)?.get("reason") as? String
             log("playabilityStatus: $status")
             log("reason: $reason")
+
+            if (status == "LOGIN_REQUIRED" && allowRetry) {
+                log("${client.name}: LOGIN_REQUIRED — forcing visitor token refresh + retry")
+                android.util.Log.w("DEBUG_TOKEN", "${client.name}: LOGIN_REQUIRED — forcing visitor token refresh + immediate retry")
+                ensureVisitorData(force = true)
+                return fetchViaClient(videoId, client, quality, clientOverride, allowRetry = false)
+            }
 
             val sd = root["streamingData"] as? Map<*, *>
             val hasFormats = sd?.containsKey("formats") == true
@@ -1943,7 +2024,16 @@ object InnerTube {
                                 if (url.startsWith("http://")) url = url.replace("http://", "https://")
                                 url
                             } ?: ""
-                        artists.add(ArtistItem(id, name, thumb, subs))
+                        
+                        val ownerBadges = cr["ownerBadges"] as? List<*>
+                        val isVerified = ownerBadges?.any { b ->
+                            val mbr = (b as? Map<*, *>)?.get("metadataBadgeRenderer") as? Map<*, *>
+                            val style = mbr?.get("style") as? String ?: ""
+                            style == "BADGE_STYLE_TYPE_VERIFIED_ARTIST" || style == "BADGE_STYLE_TYPE_VERIFIED"
+                        } == true || subs.contains("M", ignoreCase = true)
+                        
+                        if (isVerified) verifiedArtistCache[id] = true
+                        artists.add(ArtistItem(id, name, thumb, subs, isVerified))
                     }
 
                     // Album/Playlist
@@ -1975,7 +2065,8 @@ object InnerTube {
                 if (ytmArtistId.isNotBlank() && artists.none { it.channelId == ytmArtistId }) {
                     val cd = fetchChannelData(ytmArtistId, query)
                     val artThumb = cd.avatarUrl.ifEmpty { cd.bannerUrl }
-                    artists.add(0, ArtistItem(ytmArtistId, cd.title.ifEmpty { query }, artThumb, cd.subscriberCount))
+                    val isVer: Boolean = (verifiedArtistCache[ytmArtistId] == true) || cd.subscriberCount.contains("M", ignoreCase = true) || cd.subscriberCount.contains("K", ignoreCase = true)
+                    artists.add(0, ArtistItem(ytmArtistId, cd.title.ifEmpty { query }, artThumb, cd.subscriberCount, isVer))
                 }
             }
 
@@ -2822,7 +2913,8 @@ data class ArtistItem(
     val channelId: String,
     val name: String,
     val thumbnail: String,
-    val subscriberCount: String = ""
+    val subscriberCount: String = "",
+    val isVerified: Boolean = false
 )
 
 class AlbumItem(

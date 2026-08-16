@@ -68,6 +68,7 @@ object PlayerSingleton {
     val smartShuffle get() = _smartShuffle
     var smartAutoplayEnabled by mutableStateOf(true)
     var isAutoplayLoading by mutableStateOf(false)
+    private var isExtendingQueue = false
 
     // Stored playback parameters — survive across song transitions
     var storedSpeed by mutableFloatStateOf(1.0f)
@@ -75,7 +76,6 @@ object PlayerSingleton {
 
     val eightDAudioProcessor = EightDAudioProcessor()
     val audioFeatureProcessor = AudioFeatureProcessor()
-    val firestoreRecommendationManager = com.vinmusic.recommendation.FirestoreRecommendationManager()
     var is8dEnabled by mutableStateOf(false)
         private set
 
@@ -134,7 +134,7 @@ object PlayerSingleton {
                 val databaseInstance = VinDatabase.getInstance(ctx)
                 db = databaseInstance
                 val recDb = com.vinmusic.recommendation.RecommendationDatabase.getInstance(ctx)
-                recommendationRepository = RecommendationRepository(ctx, databaseInstance, recDb, firestoreRecommendationManager)
+                recommendationRepository = RecommendationRepository(ctx, databaseInstance, recDb)
                 prefs = ctx.getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
                 smartAutoplayEnabled = prefs?.getBoolean("smart_autoplay", true) ?: true
                 _smartShuffle = prefs?.getBoolean("smart_shuffle", false) ?: false
@@ -253,23 +253,28 @@ object PlayerSingleton {
                 if (nextIndex !in queue.indices) return@launch
                 var nextSong = queue[nextIndex]
                 
-                // If it's the last song in the queue and smart autoplay is enabled, prefetch recommendations
-                if (queueIndex == queue.size - 1 && !repeat && smartAutoplayEnabled) {
+                // Lazy Queue Extension: When user is within 5 songs of queue end, dynamically fetch and append 10 more recommendations
+                if (queue.size - queueIndex <= 5 && !repeat && smartAutoplayEnabled && !isExtendingQueue) {
+                    isExtendingQueue = true
                     val seedSong = currentSong ?: queue[queueIndex]
-                    Log.d(TAG, "Prefetching autoplay recommendations for seed=${seedSong.videoId}")
+                    Log.d(TAG, "Lazy queue expansion triggered (queue size=${queue.size}, index=$queueIndex) for seed=${seedSong.videoId}")
                     val currentQueueCopy = queue.toList()
                     val recommended = withContext(Dispatchers.IO) {
-                        recommendationRepository?.getSongRadio(seedSong.videoId, seedSong.title, seedSong.author, currentQueueCopy)
+                        try {
+                            recommendationRepository?.getSongRadio(seedSong.videoId, seedSong.title, seedSong.author, currentQueueCopy)
+                        } catch (e: Exception) {
+                            null
+                        }
                     }
                     if (!recommended.isNullOrEmpty()) {
                         withContext(Dispatchers.Main) {
                             val newQueue = queue.toMutableList()
                             val existingIds = newQueue.map { it.videoId }.toSet()
-                            val uniqueRecs = recommended.filter { it.videoId !in existingIds }
+                            val uniqueRecs = recommended.filter { it.videoId !in existingIds }.take(10)
                             if (uniqueRecs.isNotEmpty()) {
                                 newQueue.addAll(uniqueRecs)
                                 queue = newQueue
-                                Log.d(TAG, "Autoplay recommendations appended to queue during prefetch")
+                                Log.d(TAG, "SmartQueue lazily extended: appended ${uniqueRecs.size} tracks, new total=${queue.size}")
                                 
                                 // Re-evaluate next song with newly appended items
                                 val newNextIndex = if (shuffle) {
@@ -283,6 +288,7 @@ object PlayerSingleton {
                             }
                         }
                     }
+                    isExtendingQueue = false
                 }
                 
                 // If we already have a prefetch running or completed for this next song, skip
@@ -394,18 +400,18 @@ object PlayerSingleton {
                 private var currentDataSource: androidx.media3.datasource.DataSource? = null
                 override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {}
                 override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
-                    // The resolver's `c=IOS`/`c=ANDROID_VR` query parameter
-                    // does not mean the signed googlevideo request should use
-                    // that app's UA. Match the working download request.
-                    val resolvedUa = STREAM_USER_AGENT
-                    val requestProps = mapOf(
-                        "Origin" to "https://www.youtube.com",
-                        "Referer" to "https://www.youtube.com/",
-                        "Accept-Encoding" to "identity",
-                        // Some googlevideo responses reject an un-ranged initial GET.
-                        // Media3 overwrites this for seek/chunk DataSpecs.
-                        "Range" to "bytes=0-"
+                    // Match the User-Agent to the client that generated the stream URL.
+                    // YouTube CDN validates the UA against the `c=` param in the URL.
+                    val urlStr = dataSpec.uri.toString()
+                    val resolvedUa = com.vinmusic.innertube.InnerTube.getUserAgentForUrl(urlStr)
+                    val isNativeClient = urlStr.contains("c=IOS") || urlStr.contains("c=ANDROID")
+                    val requestProps = mutableMapOf(
+                        "Accept-Encoding" to "identity"
                     )
+                    if (!isNativeClient) {
+                        requestProps["Origin"] = "https://www.youtube.com"
+                        requestProps["Referer"] = "https://www.youtube.com/"
+                    }
                     val source = androidx.media3.datasource.DefaultHttpDataSource.Factory()
                         .setUserAgent(resolvedUa)
                         .setConnectTimeoutMs(30_000)
@@ -736,6 +742,16 @@ object PlayerSingleton {
                     url = fetchedUrl
                 }
 
+                // Resolve SimpleCache on Dispatchers.IO to prevent synchronous disk scan blocking Main UI thread
+                val resolvedCache = if (isCachedComplete) {
+                    withContext(Dispatchers.IO) {
+                        val c = context
+                        if (c != null) {
+                            if (isDownloadCacheValid) getDownloadCache(c) else getCache(c)
+                        } else null
+                    }
+                } else null
+
                 withContext(Dispatchers.Main) {
                     val ctx = context ?: return@withContext
                     // Ensure service is running
@@ -749,79 +765,84 @@ object PlayerSingleton {
                     val mediaItem = buildMediaItem(song, url, artBytes)
                     notificationMediaItem = mediaItem
 
-                    Log.d(TAG, "Setting media item: ${url.take(80)}")
+                    Log.d(TAG, "Setting media source: ${url.take(80)}")
                     ReliabilityDiagnostics.record("playback", "prepare", song.videoId, status = "started", details = if (onlineAndCached) "online_cached" else "network_or_download")
                     player.playWhenReady = true
                     
-                    if (isCachedComplete) {
-                        val cache = if (isDownloadCacheValid) getDownloadCache(ctx) else getCache(ctx)
-                        if (cache != null) {
-                            if (onlineAndCached) {
-                                Log.d(TAG, "Online Cached playback: prioritizing local cache with network fallback for videoId=${song.videoId}")
-                                val cacheFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
-                                    .setCache(cache)
-                                    .setUpstreamDataSourceFactory(createDynamicHttpDataSourceFactory()) // Stream if there's any gap!
-                                    .setCacheKeyFactory { dataSpec ->
-                                        dataSpec.key ?: song.videoId
-                                    }
-                                    .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-                                val mediaSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(cacheFactory)
-                                    .createMediaSource(mediaItem)
-                                player.setMediaSource(mediaSource, safeStartPositionMs)
-                            } else {
-                                Log.d(TAG, "Offline playback: using cache=${if (isDownloadCacheValid) "download" else "player"}, totalCachedBytes=$totalCachedBytes for videoId=${song.videoId}")
-                                val cacheFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
-                                    .setCache(cache)
-                                    .setCacheKeyFactory { dataSpec ->
-                                        dataSpec.key ?: song.videoId
-                                    }
-                                    .setUpstreamDataSourceFactory {
-                                        // Fixed upstream that reports bytesRemaining correctly relative to requested position
-                                        object : androidx.media3.datasource.DataSource {
-                                            private var uri: android.net.Uri? = null
-                                            private var bytesRemaining = 0L
-
-                                            override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {}
-                                            
-                                            override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
-                                                uri = dataSpec.uri
-                                                val position = dataSpec.position
-                                                bytesRemaining = if (totalCachedBytes > position) {
-                                                    totalCachedBytes - position
-                                                } else {
-                                                    0L
-                                                }
-                                                Log.d(TAG, "Offline upstream open: position=$position, totalCachedBytes=$totalCachedBytes, bytesRemaining=$bytesRemaining")
-                                                return bytesRemaining
-                                            }
-                                            
-                                            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-                                                if (bytesRemaining <= 0) {
-                                                    return androidx.media3.common.C.RESULT_END_OF_INPUT
-                                                }
-                                                Log.w(TAG, "Offline cache miss at remaining=$bytesRemaining, requesting length=$length")
-                                                return androidx.media3.common.C.RESULT_END_OF_INPUT
-                                            }
-                                            
-                                            override fun getUri(): android.net.Uri? = uri
-                                            override fun close() {}
-                                        }
-                                    }
-                                val mediaSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(cacheFactory)
-                                    .createMediaSource(mediaItem)
-                                player.setMediaSource(mediaSource, safeStartPositionMs)
-                            }
-                        } else {
-                            player.setMediaItem(mediaItem, safeStartPositionMs)
+                    // ALWAYS use custom MediaSource with dynamic UA factory to match the client that generated the stream URL
+        val dynamicHttpFactory = createDynamicHttpDataSourceFactory()
+        val mediaSource: androidx.media3.exoplayer.source.MediaSource = if (isCachedComplete) {
+            val cache = resolvedCache
+            if (cache != null) {
+                if (onlineAndCached) {
+                    Log.d(TAG, "Online Cached playback: prioritizing local cache with network fallback for videoId=${song.videoId}")
+                    val cacheFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
+                        .setCache(cache)
+                        .setUpstreamDataSourceFactory(dynamicHttpFactory) // Dynamic UA for network fallback!
+                        .setCacheKeyFactory { dataSpec ->
+                            dataSpec.key ?: song.videoId
                         }
-                    } else {
-                        player.setMediaItem(mediaItem, safeStartPositionMs)
-                    }
-                    
-                    player.prepare()
-                    player.playWhenReady = true
-                    errorMessage = null
-                    prefetchNextSongs()
+                        .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+                    androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(cacheFactory)
+                        .createMediaSource(mediaItem)
+                } else {
+                    Log.d(TAG, "Offline playback: using cache=${if (isDownloadCacheValid) "download" else "player"}, totalCachedBytes=$totalCachedBytes for videoId=${song.videoId}")
+                    val cacheFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
+                        .setCache(cache)
+                        .setCacheKeyFactory { dataSpec ->
+                            dataSpec.key ?: song.videoId
+                        }
+                        .setUpstreamDataSourceFactory {
+                            // Fixed upstream that reports bytesRemaining correctly relative to requested position
+                            object : androidx.media3.datasource.DataSource {
+                                private var uri: android.net.Uri? = null
+                                private var bytesRemaining = 0L
+
+                                override fun addTransferListener(transferListener: androidx.media3.datasource.TransferListener) {}
+                                
+                                override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
+                                    uri = dataSpec.uri
+                                    val position = dataSpec.position
+                                    bytesRemaining = if (totalCachedBytes > position) {
+                                        totalCachedBytes - position
+                                    } else {
+                                        0L
+                                    }
+                                    Log.d(TAG, "Offline upstream open: position=$position, totalCachedBytes=$totalCachedBytes, bytesRemaining=$bytesRemaining")
+                                    return bytesRemaining
+                                }
+                                
+                                override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                                    if (bytesRemaining <= 0) {
+                                        return androidx.media3.common.C.RESULT_END_OF_INPUT
+                                    }
+                                    Log.w(TAG, "Offline cache miss at remaining=$bytesRemaining, requesting length=$length")
+                                    return androidx.media3.common.C.RESULT_END_OF_INPUT
+                                }
+                                
+                                override fun getUri(): android.net.Uri? = uri
+                                override fun close() {}
+                            }
+                        }
+                    androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(cacheFactory)
+                        .createMediaSource(mediaItem)
+                }
+            } else {
+                // No cache available - use dynamic HTTP factory directly
+                androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(dynamicHttpFactory)
+                    .createMediaSource(mediaItem)
+            }
+        } else {
+            // Fresh network playback - use dynamic HTTP factory to match stream URL client UA
+            androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(dynamicHttpFactory)
+                .createMediaSource(mediaItem)
+        }
+        
+        player.setMediaSource(mediaSource, safeStartPositionMs)
+        player.prepare()
+        player.playWhenReady = true
+        errorMessage = null
+        prefetchNextSongs()
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -914,10 +935,42 @@ object PlayerSingleton {
                             playSong(queue[queueIndex])
                         }
                     } else {
-                        if (!repeat && queueIndex == queue.size - 1) {
+                        // Online recommendations empty — try local fallback
+                        val localFallback = getLocalQueueFallback()
+                        if (localFallback.isNotEmpty()) {
+                            val newQueue = queue.toMutableList()
+                            newQueue.addAll(localFallback)
+                            queue = newQueue
+                            Log.d(TAG, "Queue auto-filled with ${localFallback.size} songs from local history")
+                            queueIndex++
+                            withContext(Dispatchers.Main) { playSong(queue[queueIndex]) }
+                        } else if (!repeat && queueIndex == queue.size - 1) {
                             withContext(Dispatchers.Main) { _player?.pause() }
                             return@launch
+                        } else {
+                            val next = if (shuffle) {
+                                if (smartShuffle) getSmartShuffleNextIndex() else queue.indices.random()
+                            } else 0
+                            if (next < 0 || next >= queue.size) return@launch
+                            queueIndex = next
+                            withContext(Dispatchers.Main) { playSong(queue[next]) }
                         }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to fetch autoplay recommendations: ${e.message}")
+                    // Fallback to local history when online fails
+                    val localFallback = getLocalQueueFallback()
+                    if (localFallback.isNotEmpty()) {
+                        val newQueue = queue.toMutableList()
+                        newQueue.addAll(localFallback)
+                        queue = newQueue
+                        Log.d(TAG, "Queue auto-filled with ${localFallback.size} songs from local history (after error)")
+                        queueIndex++
+                        withContext(Dispatchers.Main) { playSong(queue[queueIndex]) }
+                    } else if (!repeat && queueIndex == queue.size - 1) {
+                        withContext(Dispatchers.Main) { _player?.pause() }
+                        return@launch
+                    } else {
                         val next = if (shuffle) {
                             if (smartShuffle) getSmartShuffleNextIndex() else queue.indices.random()
                         } else 0
@@ -925,18 +978,6 @@ object PlayerSingleton {
                         queueIndex = next
                         withContext(Dispatchers.Main) { playSong(queue[next]) }
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to fetch autoplay recommendations: ${e.message}")
-                    if (!repeat && queueIndex == queue.size - 1) {
-                        withContext(Dispatchers.Main) { _player?.pause() }
-                        return@launch
-                    }
-                    val next = if (shuffle) {
-                        if (smartShuffle) getSmartShuffleNextIndex() else queue.indices.random()
-                    } else 0
-                    if (next < 0 || next >= queue.size) return@launch
-                    queueIndex = next
-                    withContext(Dispatchers.Main) { playSong(queue[next]) }
                 } finally {
                     isAutoplayLoading = false
                 }
@@ -1073,6 +1114,44 @@ object PlayerSingleton {
     }
 
 
+
+    private suspend fun getLocalQueueFallback(): List<VideoItem> = withContext(Dispatchers.IO) {
+        val database = db ?: return@withContext emptyList()
+        val existingIds = queue.map { it.videoId }.toSet()
+        val fallback = mutableListOf<VideoItem>()
+
+        // 1. Most played songs from interaction signals
+        try {
+            val signals = database.interactionSignalDao().getAll()
+                .sortedByDescending { it.playCount }
+            for (sig in signals) {
+                if (sig.videoId !in existingIds && fallback.none { it.videoId == sig.videoId }) {
+                    fallback.add(VideoItem(sig.videoId, sig.title, sig.author, sig.durationText))
+                    if (fallback.size >= 20) break
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Local fallback interactionSignals failed: ${e.message}")
+        }
+
+        // 2. Fill remaining from recent history
+        if (fallback.size < 20) {
+            try {
+                val seenIds = existingIds + fallback.map { it.videoId }.toSet()
+                val history = database.historyDao().getAllHistory()
+                for (entry in history) {
+                    if (entry.videoId !in seenIds && fallback.none { it.videoId == entry.videoId }) {
+                        fallback.add(VideoItem(entry.videoId, entry.title, entry.author, entry.durationText))
+                        if (fallback.size >= 20) break
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Local fallback history failed: ${e.message}")
+            }
+        }
+
+        fallback.shuffled()
+    }
 
     private fun onSongEnded() {
         if (onSongEndedCallback?.invoke() == true) {
@@ -1231,7 +1310,6 @@ object PlayerSingleton {
         hasRealTags: Boolean
     ) {
         val database = db ?: return
-        val ctx = context ?: return
         
         scope.launch(Dispatchers.IO) {
             try {
@@ -1251,23 +1329,6 @@ object PlayerSingleton {
                 )
                 database.songFeatureCacheDao().insert(cacheEntry)
                 Log.d(TAG, "Saved features locally to Room for $songKey (hasRealTags=$hasRealTags)")
-                
-                val isAuthenticated = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser != null
-                if (hasRealTags && PlayerCacheManager.isOnline(ctx) && isAuthenticated) {
-                    firestoreRecommendationManager.completeAnalysis(
-                        songKey = songKey,
-                        bpm = bpm,
-                        energy = energy,
-                        genreTags = genreTags,
-                        moodTags = moodTags,
-                        title = title,
-                        artist = artist
-                    )
-                    database.songFeatureCacheDao().markSynced(songKey)
-                    Log.d(TAG, "Synced features to Firestore and marked synced locally for $songKey")
-                } else {
-                    Log.d(TAG, "Local features saved (synced=false) for $songKey. Sync skipped (hasRealTags=$hasRealTags)")
-                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to complete analysis write for $songKey", e)
             }
@@ -1295,7 +1356,7 @@ object PlayerSingleton {
                     
                     // Re-fetch real tags from Last.fm since we are online now
                     try {
-                        val realTags = firestoreRecommendationManager.fetchLastFmTags(item.artist, item.title)
+                        val realTags = fetchLastFmTagsLocally(item.artist, item.title)
                         if (realTags != null) {
                             val realGenres = realTags["genres"] ?: emptyList()
                             val realMoods = realTags["moods"] ?: emptyList()
@@ -1316,15 +1377,6 @@ object PlayerSingleton {
                     }
                     
                     if (hasRealTags) {
-                        firestoreRecommendationManager.completeAnalysis(
-                            songKey = item.songKey,
-                            bpm = if (item.bpmReal in 40f..250f) item.bpmReal else null,
-                            energy = item.energyReal,
-                            genreTags = genres,
-                            moodTags = moods,
-                            title = item.title,
-                            artist = item.artist
-                        )
                         database.songFeatureCacheDao().markSynced(item.songKey)
                         Log.d(TAG, "Synced offline feature cache entry for ${item.songKey}")
                     } else {
@@ -1337,11 +1389,88 @@ object PlayerSingleton {
         }
     }
 
+    /** Local Last.fm tag fetch (no Firestore) */
+    internal suspend fun fetchLastFmTagsLocally(artist: String, title: String): Map<String, List<String>>? {
+        val apiKey = com.vinmusic.config.RemoteConfigHelper.getLastFmApiKey()
+        if (apiKey.isBlank()) return null
+        val urlString = "https://ws.audioscrobbler.com/2.0/?method=track.gettoptags" +
+                "&artist=${java.net.URLEncoder.encode(artist, "UTF-8")}" +
+                "&track=${java.net.URLEncoder.encode(title, "UTF-8")}" +
+                "&api_key=$apiKey" +
+                "&format=json"
+        
+        return try {
+            val url = java.net.URL(urlString)
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+            
+            if (connection.responseCode == 200) {
+                val responseText = connection.inputStream.bufferedReader().use { it.readText() }
+                val responseJson = com.google.gson.JsonParser.parseString(responseText).asJsonObject
+                val toptags = responseJson.getAsJsonObject("toptags")
+                if (toptags != null) {
+                    val tagArray = toptags.getAsJsonArray("tag")
+                    if (tagArray != null) {
+                        val rawTags = tagArray.map { it.asJsonObject.get("name").asString }
+                        val result = normalizeTagsLocally(rawTags)
+                        if (result["genres"]?.isNotEmpty() == true || result["moods"]?.isNotEmpty() == true) {
+                            return result
+                        }
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to fetch tags from Last.fm locally: ${e.message}")
+            null
+        }
+    }
+
+    internal fun normalizeTagsLocally(rawTags: List<String>): Map<String, List<String>> {
+        val genres = mutableSetOf<String>()
+        val moods = mutableSetOf<String>()
+        
+        val genreMappings = mapOf(
+            "lofi" to "Lofi", "lo-fi" to "Lofi",
+            "rap" to "Rap/Hip-Hop", "hip hop" to "Rap/Hip-Hop", "hip-hop" to "Rap/Hip-Hop", "hiphop" to "Rap/Hip-Hop", "trap" to "Rap/Hip-Hop",
+            "bollywood" to "Bollywood", "hindi" to "Bollywood",
+            "punjabi" to "Punjabi Folk", "bhangra" to "Punjabi Folk",
+            "pop" to "Pop", "dance" to "Pop",
+            "indie" to "Indie", "acoustic" to "Indie", "singer-songwriter" to "Indie",
+            "rock" to "Rock", "metal" to "Rock", "grunge" to "Rock", "alternative rock" to "Rock"
+        )
+        
+        val moodMappings = mapOf(
+            "chill" to "Chill/Relaxed", "relaxed" to "Chill/Relaxed", "relaxing" to "Chill/Relaxed", "mellow" to "Chill/Relaxed", "calm" to "Chill/Relaxed",
+            "romantic" to "Romantic", "love" to "Romantic",
+            "sad" to "Sad", "melancholy" to "Sad", "depression" to "Sad", "emotional" to "Sad",
+            "energetic" to "Energetic", "energy" to "Energetic", "party" to "Energetic", "workout" to "Energetic", "gym" to "Energetic", "hype" to "Energetic",
+            "happy" to "Happy", "cheerful" to "Happy", "fun" to "Happy", "upbeat" to "Happy",
+            "dark" to "Dark", "heavy" to "Dark", "gothic" to "Dark"
+        )
+        
+        for (tag in rawTags) {
+            val cleanTag = tag.lowercase().trim()
+            genreMappings.entries.forEach { (keyword, target) ->
+                if (cleanTag.contains(keyword)) genres.add(target)
+            }
+            moodMappings.entries.forEach { (keyword, target) ->
+                if (cleanTag.contains(keyword)) moods.add(target)
+            }
+        }
+        
+        return mapOf(
+            "genres" to genres.take(10).toList(),
+            "moods" to moods.take(10).toList()
+        )
+    }
+
     private fun checkAndClaimFeatures(song: VideoItem) {
         val database = db ?: return
         val songKey = com.vinmusic.recommendation.RecommendationManager.generateSongKey(song.author, song.title)
         val durationMs = parseDurationText(song.durationText)
-        val ctx = context ?: return
 
         scope.launch(Dispatchers.IO) {
             try {
@@ -1358,57 +1487,11 @@ object PlayerSingleton {
                     return@launch
                 }
 
-                // 2. Check remote Firestore
-                val isAuthenticated = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser != null
-                if (PlayerCacheManager.isOnline(ctx) && isAuthenticated) {
-                    val remote = firestoreRecommendationManager.getSongMetadata(songKey)
-                    if (remote != null) {
-                        Log.d(TAG, "Song features found in remote Firestore for key: $songKey")
-                        val bpm = (remote["bpmReal"] as? Number)?.toFloat() ?: 0f
-                        val energy = (remote["energyReal"] as? Number)?.toFloat() ?: 0f
-                        val title = remote["title"] as? String ?: ""
-                        val artist = remote["artist"] as? String ?: ""
-                        val genres = remote["genreTags"] as? List<*> ?: emptyList<Any>()
-                        val moods = remote["moodTags"] as? List<*> ?: emptyList<Any>()
-                        val likedByCount = (remote["likedByCount"] as? Number)?.toInt() ?: 0
-                        
-                        val gson = com.google.gson.Gson()
-                        val genreTagsJson = gson.toJson(genres)
-                        val moodTagsJson = gson.toJson(moods)
-                        
-                        val cacheEntry = com.vinmusic.data.db.SongFeatureCache(
-                            songKey = songKey,
-                            bpmReal = bpm,
-                            energyReal = energy,
-                            genreTags = genreTagsJson,
-                            moodTags = moodTagsJson,
-                            title = title,
-                            artist = artist,
-                            synced = true,
-                            likedByCount = likedByCount
-                        )
-                        database.songFeatureCacheDao().insert(cacheEntry)
-                        
-                        withContext(Dispatchers.Main) {
-                            if (currentSong?.videoId == song.videoId) {
-                                audioFeatureProcessor.resetForSong(songKey, song.title, song.author, durationMs, shouldAnalyze = false)
-                            }
-                        }
-                        return@launch
-                    }
-                }
-
-                // 3. Cache Miss: Try to claim for analysis
-                val shouldAnalyze = if (PlayerCacheManager.isOnline(ctx) && isAuthenticated) {
-                    firestoreRecommendationManager.tryClaimForAnalysis(songKey)
-                } else {
-                    true
-                }
-                
-                Log.d(TAG, "Cache miss for key: $songKey, tryClaimForAnalysis returned: $shouldAnalyze")
+                // 2. No remote Firestore - just trigger local analysis
+                Log.d(TAG, "Cache miss for key: $songKey, triggering local analysis")
                 withContext(Dispatchers.Main) {
                     if (currentSong?.videoId == song.videoId) {
-                        audioFeatureProcessor.resetForSong(songKey, song.title, song.author, durationMs, shouldAnalyze = shouldAnalyze)
+                        audioFeatureProcessor.resetForSong(songKey, song.title, song.author, durationMs, shouldAnalyze = true)
                     }
                 }
             } catch (e: Exception) {

@@ -12,6 +12,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import java.util.Locale
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -265,10 +268,7 @@ object RecommendationManager {
         text = text.replace(Regex("[^a-zA-Z0-9\\s]"), "")
         
         val stopWords = listOf(
-            "official", "audio", "video", "lyrics", "lyric", "explained", "meaning", 
-            "reaction", "remix", "cover", "instrumental", "karaoke", "slowed", 
-            "reverb", "nightcore", "live", "interview", "story", "documentary",
-            "hd", "4k", "genius", "unplugged", "acoustic"
+            "official", "audio", "video", "lyrics", "lyric", "hd", "4k", "hq", "visualizer"
         )
         for (word in stopWords) {
             text = text.replace(Regex("\\b$word\\b"), "")
@@ -355,48 +355,76 @@ object RecommendationManager {
         val n1 = normalizeTitle(title1)
         val n2 = normalizeTitle(title2)
         if (n1 == n2) return true
-        if (n1.contains(n2) || n2.contains(n1)) return true
-        
+        if (n1.isEmpty() || n2.isEmpty()) return false
+
+        val tokens1 = n1.split(" ").filter { it.isNotBlank() }
+        val tokens2 = n2.split(" ").filter { it.isNotBlank() }
+        val set1 = tokens1.toSet()
+        val set2 = tokens2.toSet()
+
+        if (set1 == set2) return true
+
+        val versionWords = setOf(
+            "full", "song", "audio", "video", "official", "version", "remastered",
+            "edit", "reprise", "extended", "clean", "explicit", "hd", "hq", "4k",
+            "visualizer", "lyric", "lyrics", "original", "bonus", "track", "instrumental"
+        )
+
+        // If n1 contains n2 as a prefix/suffix
+        if (n1.startsWith("$n2 ") || n1.endsWith(" $n2")) {
+            if (tokens2.size >= 2) return true
+            val diff = set1 - set2
+            if (diff.all { it in versionWords }) return true
+        }
+
+        // If n2 contains n1 as a prefix/suffix
+        if (n2.startsWith("$n1 ") || n2.endsWith(" $n1")) {
+            if (tokens1.size >= 2) return true
+            val diff = set2 - set1
+            if (diff.all { it in versionWords }) return true
+        }
+
         val maxLen = maxOf(n1.length, n2.length)
-        if (maxLen == 0) return true
         val dist = getLevenshteinDistance(n1, n2)
         val similarity = 1.0 - (dist.toDouble() / maxLen.toDouble())
-        return similarity > 0.70
+        return if (maxLen < 5) similarity >= 0.85 else similarity > 0.80
     }
 
     fun isNonMusicVideo(title: String, author: String): Boolean {
         val titleLow = title.lowercase(Locale.ROOT)
         val authorLow = author.lowercase(Locale.ROOT)
-        
-        val blacklistTerms = listOf(
-            "explained", "meaning", "reaction", "review", "breakdown", "story", "stories",
-            "genius", "interview", "podcast", "documentary", "behind the scenes", "tutorial",
-            "lesson", "news", "hidden meaning", "analysis", "funny", "parody", "reaction video",
-            "reviewing", "lyrics", "lyric", "lyric video", "behind the song", "teaser", "promo",
-            "leak", "shorts", "be like", "when you", "pov", "tiktok", "tiktoks", "meme", "memes",
-            "comedy", "comedian", "prank", "vlog", "vlogs", "gaming", "gameplay", "roast", "standup",
-            "rant", "compilation", "fails", "challenge", "unboxing", "how to play", "tutorial",
-            "guitar cover lesson", "piano lesson", "behind the track", "1 hour", "1hour", "loop",
-            "looped", "deep dive", "important song", "best song", "worst song", "top song",
-            "irl", "dropped", "unofficial", "timeline", "beef", "drama", "funny moments", "fails"
+
+        // Exact phrases indicating non-music video content
+        val nonMusicPhrases = listOf(
+            "reaction video", "behind the scenes", "behind the song", "behind the track",
+            "hidden meaning", "song meaning", "deep dive", "how to play", "guitar lesson",
+            "piano lesson", "guitar cover lesson", "funny moments", "funny clips",
+            "1 hour loop", "10 hour loop", "1hour loop", "10 hours", "10hours",
+            "status video", "lyric video"
         )
-        
-        for (term in blacklistTerms) {
-            if (titleLow.contains(term) || authorLow.contains(term)) {
-                return true
-            }
-        }
-        
-        val blacklistedChannelKeywords = listOf(
-            "news", "tv", "comedy", "vlog", "gaming", "cricket", "tech", "review",
-            "fitness", "food", "travel", "lifestyle", "kids", "cartoon", "meme",
-            "unboxing", "essay", "analysis", "genius", "vlogger", "react", "reaction",
-            "podcast", "podcasts", "interview", "interviews", "talks", "show", "entertainment",
-            "media", "gamer", "games", "prank", "pranks", "roast", "roasts", "clips", "fails"
-        )
-        if (blacklistedChannelKeywords.any { authorLow.contains(it) }) {
+        if (nonMusicPhrases.any { titleLow.contains(it) || authorLow.contains(it) }) {
             return true
         }
+
+        // Single-word terms checked with word boundaries to avoid false positives like "girl" matching "irl"
+        val blacklistWordRegex = Regex(
+            "\\b(explained|meaning|reaction|react|review|reviewing|breakdown|genius|interview|interviews|" +
+            "podcast|podcasts|documentary|documentaries|tutorial|tutorials|lesson|lessons|parody|parodies|" +
+            "gameplay|gaming|vlog|vlogs|vlogger|standup|roast|roasts|unboxing|shorts|tiktoks|comedian|meme|memes)\\b"
+        )
+        if (blacklistWordRegex.containsMatchIn(titleLow) || blacklistWordRegex.containsMatchIn(authorLow)) {
+            return true
+        }
+
+        // Blacklisted channel keywords with word boundaries
+        val blacklistedChannelRegex = Regex(
+            "\\b(news|comedy|vlog|vlogs|gaming|cricket|tech|review|fitness|food|travel|lifestyle|" +
+            "kids|cartoon|unboxing|essay|analysis|podcast|podcasts|interview|interviews|prank|pranks|clips|fails)\\b"
+        )
+        if (!isCorporateOrDistributorChannel(authorLow) && blacklistedChannelRegex.containsMatchIn(authorLow)) {
+            return true
+        }
+
         return false
     }
 
@@ -440,13 +468,13 @@ object RecommendationManager {
             "vyrl", "hombale", "think music", "single track studios", "mufasa music",
             "shemaroo", "venus", "dharma", "reliance entertainment", "eros", "speed records",
             "speedrecords", "t-series regional", "tseries regional", "lts music", "ltsmusic",
-            "times music", "timesmusic", "t-series regional", "tseries regional", "t-series apna punjab",
-            "tseries apna punjab", "t-series haryanvi", "wave music", "t-series bhakti sagar", "hmv",
+            "times music", "timesmusic", "t-series apna punjab", "tseries apna punjab",
+            "t-series haryanvi", "wave music", "t-series bhakti sagar", "hmv",
             "ultra regional", "ultra bollywood", "ultra music", "saregama hum bhojpuri", "saregama ghazal",
             "saregama punjabi", "zee music south", "zee music classic", "desi melodies", "speed records punjabi",
             "goldmines", "b4u", "vintage", "venus movies", "mars", "dhruvan", "madura audio", "anand audio",
             "haripa music", "muzik 247", "manorama music", "satyam auditions", "millennium audits", "speed audio",
-            "paattu"
+            "paattu", "universal music", "warner music"
         )
         return corporateLabels.any { authorLow.contains(it) }
     }
@@ -458,40 +486,62 @@ object RecommendationManager {
         val authorLow = author.lowercase(Locale.ROOT)
         val fullText = "$titleLow $authorLow"
         
-        val unofficialKeywords = listOf(
-            "remix", "slowed", "reverb", "live", "cover", "reaction", "meme", 
-            "fan-made", "fanmade", "mashup", "instrumental", "karaoke", 
-            "nightcore", "sped up", "speed up", "tribute", "parody", 
-            "roast", "gaming", "unboxing", "1 hour", "1hour", "loop", "looped",
-            "fan edit", "status video", "shorts", "reels", "tutorial", "bts",
-            "behind the scenes", "leak", "unplugged", "reaction video",
-            "lofi", "lo-fi", "type beat", "typebeat", "type-beat", "study music",
-            "sleep music", "10 hours", "8d audio", "vaporwave", "bass boosted",
-            "slowed reverb", "slowed + reverb"
+        val unofficialPhrases = listOf(
+            "slowed reverb", "slowed + reverb", "slowed and reverb", "slowed & reverb",
+            "sped up", "speed up", "fan made", "fan-made", "fanmade", "fan edit",
+            "type beat", "typebeat", "type-beat", "study music", "sleep music",
+            "sleep beats", "lofi beats", "lofi mix", "lofi sleep", "aesthetic beats",
+            "bass boosted", "8d audio", "10 hours", "10hours", "1 hour loop", "10 hour loop"
         )
-        return unofficialKeywords.any { fullText.contains(it) }
+        if (unofficialPhrases.any { fullText.contains(it) }) return true
+
+        val unofficialWordRegex = Regex(
+            "\\b(nightcore|vaporwave|karaoke|instrumental|tribute|remix|slowed|reverb|mashup|parody|lofi|typebeat)\\b"
+        )
+        if (unofficialWordRegex.containsMatchIn(titleLow)) return true
+
+        val leakCoverRegex = Regex("\\b(cover|leak|leaked|fanmade|fanedit)\\b")
+        if (leakCoverRegex.containsMatchIn(titleLow)) return true
+
+        return false
     }
 
     fun isOfficialArtistChannel(title: String, author: String): Boolean {
         val authorLow = author.lowercase(Locale.ROOT)
         if (isCorporateOrDistributorChannel(author)) return true
         if (authorLow.contains("- topic") || authorLow.contains("vevo")) return true
-        
-        // Stricter check: if the channel contains keywords associated with user uploaders/curators,
-        // it cannot be an official artist channel unless it matched the Topic/Vevo/Corporate checks above.
-        val uploaderKeywords = listOf(
-            "lyrics", "lyric", "vibe", "vibes", "chill", "chilled", "chillout",
-            "nation", "beats", "beat", "prod", "producer",
-            "lofi", "lo-fi", "slowed", "reverb", "reverbed", "sped", "speed",
-            "mix", "mashup", "cover", "remix", "tv", "fm", "radio", "edits", "edit",
-            "fan", "fanz", "tribute", "karaoke", "sub", "subs", "subbed",
-            "translation", "translations", "uploader", "uploads", "upload", "channel",
-            "songweed", "mr. scrub", "lix", "grow music", "ridhi sound", "vdj royal",
-            "biffin", "uproxx", "webworthy", "rdcworld", "longbeachgriffy"
+
+        val uploaderPhrases = listOf(
+            "chill nation", "beats nation", "slowed reverb", "sped up",
+            "fan edit", "fan club", "bollywood edits", "lofi girl", "songweed",
+            "mr. scrub", "ridhi sound", "vdj royal", "biffin", "uproxx",
+            "webworthy", "rdcworld", "longbeachgriffy", "grow music"
         )
-        if (uploaderKeywords.any { authorLow.contains(it) }) return false
-        
+        if (uploaderPhrases.any { authorLow.contains(it) }) return false
+
+        val uploaderWordRegex = Regex(
+            "\\b(lyrics|lyric|karaoke|nightcore|tribute|fanmade|fanpage|uploader|uploads)\\b"
+        )
+        if (uploaderWordRegex.containsMatchIn(authorLow)) return false
+
         return true
+    }
+
+    fun isCompatibleQueueLanguage(
+        candidateLanguage: String,
+        targetLanguage: String,
+        allowUnknown: Boolean = true
+    ): Boolean {
+        if (targetLanguage.isBlank() || targetLanguage.equals("Unknown", ignoreCase = true)) {
+            return true
+        }
+        if (candidateLanguage.equals(targetLanguage, ignoreCase = true)) {
+            return true
+        }
+        if (allowUnknown && candidateLanguage.equals("Unknown", ignoreCase = true)) {
+            return true
+        }
+        return false
     }
 
     suspend fun getCachedOrInferredMetadata(db: VinDatabase, item: VideoItem): SongMetadata {
@@ -510,6 +560,8 @@ object RecommendationManager {
      * Enhanced version that uses FeatureEstimator for accurate audio features.
      * Call this when you have a Context available (from ViewModel, Activity, etc.)
      */
+    private val cacheWriteScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+
     suspend fun getCachedOrInferredMetadata(
         db: VinDatabase,
         item: VideoItem,
@@ -531,22 +583,23 @@ object RecommendationManager {
                 recDb, item.title, item.author, inferredMeta.genre, inferredMeta.mood
             )
             if (estimated != null) {
-                // Cache the estimated features
-                try {
-                    val cacheEntry = SongFeatureCache(
-                        songKey = songKey,
-                        energyReal = estimated.energy,
-                        bpmReal = estimated.tempo,
-                        genreTags = "[]",
-                        moodTags = "[]",
-                        title = item.title,
-                        artist = item.author,
-                        synced = false,
-                        likedByCount = 0
-                    )
-                    db.songFeatureCacheDao().insert(cacheEntry)
-                    Log.d(TAG, "Cached estimated features for '${item.title}' by '${item.author}'")
-                } catch (_: Exception) {}
+                // Non-blocking, managed background write — doesn't block the caller
+                cacheWriteScope.launch {
+                    try {
+                        val cacheEntry = SongFeatureCache(
+                            songKey = songKey,
+                            energyReal = estimated.energy,
+                            bpmReal = estimated.tempo,
+                            genreTags = "[]",
+                            moodTags = "[]",
+                            title = item.title,
+                            artist = item.author,
+                            synced = false,
+                            likedByCount = 0
+                        )
+                        db.songFeatureCacheDao().insert(cacheEntry)
+                    } catch (_: Exception) {}
+                }
                 
                 return inferredMeta.copy(
                     energy = estimated.energy.toDouble(),
@@ -589,12 +642,14 @@ object RecommendationManager {
         val fullText = "$title $author"
 
         // 1. Language Detection
-        var language = "English"
+        var language = "Unknown"
         val punjabiKeywords = listOf(
             "punjabi", "jatt", "jatta", "munde", "munda", "kudi", "kudia", "patiala", 
             "punjab", "sidhu", "moose", "moosewala", "moose wala", "dhillon", "ap dhillon", 
             "aujla", "karan aujla", "dosanjh", "diljit", "shubh", "garry", "bhangra", 
-            "kaur", "gaddi", "gabru", "nach", "suit", "daaru", "peg", "kahlon", "ammy", "virk"
+            "kaur", "gaddi", "gabru", "nach", "suit", "daaru", "peg", "kahlon", "ammy", "virk",
+            "yaari", "soch", "pind", "majha", "malwa", "doaba", "boliyan", "gidha", "tappe",
+            "jatti", "kurti", "surma", "challa", "dhol", "pagh", "turban", "sardaar", "sardar"
         )
         val hindiKeywords = listOf(
             "hindi", "bollywood", "arijit", "singh", "kakkar", "nautiyal", "jubin", 
@@ -604,23 +659,70 @@ object RecommendationManager {
             "mohabbat", "kiya", "meri", "mera", "channa", "mereya", "raataan", 
             "lambiyan", "sajna", "sajan", "duniya", "zindagi", "sanam", "jaan", 
             "jaana", "naina", "ankhein", "saans", "humsafar", "dua", "khuda", 
-            "seedhe maut", "krsna", "kr\$na", "divine", "emiway", "mc stan", "raftaar", "badshah"
+            "seedhe maut", "krsna", "kr\$na", "divine", "emiway", "mc stan", "raftaar", "badshah",
+            "tum hi ho", "kesariya", "tum", "hum", "aankhon", "kahani", "deewana", "muskurane",
+            "jeena", "rabba", "khairiyat", "shayari", "ghazal", "qawwali", "sufi"
         )
-        val tamilKeywords = listOf("tamil", "anirudh", "arrahman", "ilayaraja", "kadhal", "kadhala", "kollywood", "yuvan", "srinivas", "vijay", "ajith", "kamal", "rajini")
-        val koreanKeywords = listOf("k-pop", "bts", "blackpink", "twice", "korean", "newjeans", "stray kids", "exo", "jungkook", "jimin", "seventeen")
+        val tamilKeywords = listOf("tamil", "anirudh", "arrahman", "ilayaraja", "kadhal", "kadhala", "kollywood", "yuvan", "srinivas", "vijay", "ajith", "kamal", "rajini", "sid sriram", "dhanush")
+        val koreanKeywords = listOf("k-pop", "kpop", "bts", "blackpink", "twice", "korean", "newjeans", "stray kids", "exo", "jungkook", "jimin", "seventeen")
 
-        // Known Hindi artists for more reliable detection
         val knownHindiArtists = listOf(
             "arijit singh", "atif aslam", "jubin nautiyal", "shreya ghoshal", "pritam",
             "sonu nigam", "alka yagnik", "udit narayan", "kumar sanu", "kishore kumar",
-            "lata mangeshkar", "mohit chauhan", "shaan", "sunidhi chauh", "neha kakkar",
-            "honey singh", "badshah", "raftaar", "divine", "emiway", "mc stan", "seedhe maut",
-            "kr\$na", "king", "darshan raval", "stebin ben", "vaibhav gupta"
+            "lata mangeshkar", "mohit chauhan", "shaan", "sunidhi chauhan", "sunidhi chauh",
+            "neha kakkar", "tony kakkar", "sonu kakkar", "honey singh", "yo yo honey singh",
+            "badshah", "raftaar", "divine", "emiway", "emiway bantai", "mc stan",
+            "seedhe maut", "krsna", "kr\$na", "king", "darshan raval", "stebin ben",
+            "vaibhav gupta", "amit trivedi", "vishal mishra", "vishal-shekhar", "sachin-jigar",
+            "armaan malik", "amaal mallik", "anuv jain", "prateek kuhad", "aditya rikhari",
+            "mitraz", "zaeden", "jasleen royal", "shilpa rao", "monali thakur", "neeti mohan",
+            "palak muchhal", "tulsi kumar", "dhvani bhanushali", "kk", "lucky ali", "papon"
         )
         val knownPunjabiArtists = listOf(
             "sidhu moose wala", "diljit dosanjh", "ap dhillon", "karan aujla", "shubh",
             "gurinder gill", "ammy virk", "garry sandhu", "prem dhillon", "amrit maan",
-            "karan aujla", "bohemia", "lehmber hussainpuri", "sukshinder shinda"
+            "bohemia", "lehmber hussainpuri", "sukshinder shinda", "b praak", "jaani",
+            "jass manak", "guri", "singga", "kaka", "arjan dhillon", "tarsem jassar",
+            "kulwinder billa", "gurnam bhullar", "hustinder", "navaan sandhu", "tegi pannu",
+            "wazir patar", "jordan sandhu", "jerry", "cheetah", "sikander kahlon", "riar saab",
+            "talwiinder", "raf-saperra", "simar doraha", "karan randhawa", "mankirt aulakh",
+            "sunanda sharma", "nimrat khaira", "jasmine sandlas", "gurlez akhtar", "shipra goyal",
+            "afsana khan", "jenny johal", "shinda kahlon", "avvy sra", "korala maan", "parmish verma"
+        )
+        val knownEnglishArtists = listOf(
+            "taylor swift", "the weeknd", "drake", "ed sheeran", "justin bieber", "post malone",
+            "billie eilish", "dua lipa", "ariana grande", "bruno mars", "adele", "coldplay",
+            "imagine dragons", "eminem", "kendrick lamar", "j. cole", "j cole", "travis scott",
+            "21 savage", "metro boomin", "future", "lil baby", "gunna", "don toliver",
+            "kid cudi", "a\$ap rocky", "asap rocky", "kanye west", "sza", "frank ocean",
+            "khalid", "brent faiyaz", "olivia rodrigo", "sabrina carpenter", "harry styles",
+            "one direction", "shawn mendes", "charlie puth", "sam smith", "lewis capaldi",
+            "maroon 5", "lady gaga", "katy perry", "rihanna", "beyonce", "beyoncé",
+            "cardi b", "doja cat", "megan thee stallion", "nicki minaj", "lana del rey",
+            "lorde", "halsey", "conan gray", "lauv", "jeremy zucker", "benson boone",
+            "teddy swims", "stephen sanchez", "hozier", "noah kahan", "zach bryan",
+            "morgan wallen", "luke combs", "david guetta", "calvin harris", "avicii",
+            "kygo", "alan walker", "marshmello", "chainsmokers", "the chainsmokers",
+            "martin garrix", "dj snake", "tiesto", "tiësto", "zedd", "skrillex",
+            "queen", "the beatles", "pink floyd", "led zeppelin", "linkin park",
+            "nirvana", "green day", "red hot chili peppers", "radiohead", "arctic monkeys",
+            "the neighbourhood", "chase atlantic", "cigarettes after sex", "sleepy head",
+            "lupe fiasco", "isaiah rashad", "zacari", "schoolboy q", "ab-soul", "jay rock",
+            "mac miller", "denzel curry", "tyler, the creator", "tyler the creator", "earl sweatshirt",
+            "childish gambino", "joey bada\$\$", "cordae", "jid", "playboi carti", "lil uzi vert",
+            "trippie redd", "juice wrld", "xxxtentacion", "lil yachty", "young thug",
+            "pusha t", "freddie gibbs", "nas", "jay-z", "jay z", "50 cent", "snoop dogg",
+            "dr dre", "dr. dre", "ice cube", "outkast", "andre 3000", "biggie", "tupac", "2pac",
+            "chance the rapper", "roddy ricch", "dababy", "polo g", "lil tjay", "jack harlow",
+            "central cee", "dave", "stormzy", "skepta", "kali uchis", "steve lacy", "dominic fike"
+        )
+
+        val englishKeywords = listOf(
+            "feat", "ft", "wrong", "love", "night", "world", "you", "me", "girl", "boy",
+            "heart", "time", "life", "baby", "never", "forever", "good", "bad", "stay",
+            "away", "home", "eyes", "dream", "light", "dark", "fire", "rain", "sun",
+            "mind", "hold", "free", "feel", "fall", "run", "stop", "without", "broken",
+            "dance", "party", "summer", "winter", "shadow", "memory", "memories", "crazy"
         )
 
         // Check artist name against known artists first (most reliable)
@@ -629,6 +731,8 @@ object RecommendationManager {
             language = "Punjabi"
         } else if (knownHindiArtists.any { authorLower.contains(it) }) {
             language = "Hindi"
+        } else if (knownEnglishArtists.any { authorLower.contains(it) }) {
+            language = "English"
         } else if (punjabiKeywords.any { fullText.contains(it) }) {
             language = "Punjabi"
         } else if (hindiKeywords.any { fullText.contains(it) }) {
@@ -637,13 +741,15 @@ object RecommendationManager {
             language = "Tamil"
         } else if (koreanKeywords.any { fullText.contains(it) }) {
             language = "Korean"
+        } else if (englishKeywords.any { Regex("\\b$it\\b").containsMatchIn(fullText) }) {
+            language = "English"
         }
 
         // 2. Genre Detection
         var genre = "Pop"
         val lofiKeywords = listOf("lofi", "lo-fi", "chill", "slowed", "reverb", "aesthetic", "bedtime", "relax", "meditate", "sleep", "study", "ambient", "peaceful", "calm")
         val rapKeywords = listOf("rap", "hip hop", "hiphop", "hip-hop", "cypher", "freestyle", "beat", "diss", "badshah", "raftaar", "kr\$na", "emiway", "mc stan", "divine", "drake", "eminem", "shubh", "kendrick", "lamar", "durk", "cole", "travis", "future", "lil baby", "savage", "boomin", "playboi", "carti", "kanye", "thug", "young stunners")
-        val indieKeywords = listOf("indie", "prateek kuhad", "anuv jain", "local train", "yellow diary", "independent", "mitraz", "aditya rikhari", "darshan raval", "taba chake", "kuhad", "anuv", "local train", "chai met toast", "osho jain")
+        val indieKeywords = listOf("indie", "prateek kuhad", "anuv jain", "local train", "yellow diary", "independent", "mitraz", "aditya rikhari", "darshan raval", "taba chake", "kuhad", "anuv", "chai met toast", "osho jain")
         val rockKeywords = listOf("rock", "metal", "grunge", "nirvana", "linkin park", "metallica", "guitar solo", "hard rock", "heavy metal", "punk")
         val bollywoodKeywords = listOf("bollywood", "t-series", "zee music", "yrf", "soundtrack", "ost", "arijit", "pritam", "saregama", "shreya", "kakkar", "nautiyal", "atif", "aslam", "sonu", "nigam", "udit", "rahman")
 
@@ -2194,29 +2300,38 @@ object RecommendationManager {
     }
 
     suspend fun findSpotifyTrackFuzzy(dao: SpotifyTrackDao, title: String, artist: String): SpotifyTrack? {
+        val cleanArtist = cleanArtistForMatching(artist)
+        if (cleanArtist.isBlank()) return null
+        
+        // Fast B-Tree indexed artist search (0ms)
+        var candidates = try {
+            dao.findTracksByArtistExact(cleanArtist)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        if (candidates.isEmpty() && cleanArtist.length >= 3) {
+            candidates = try {
+                dao.findTracksByArtistPrefix(cleanArtist)
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+        
+        if (candidates.isEmpty()) return null
+
         val cleanTitle = title.lowercase(Locale.ROOT)
             .replace(Regex("\\([^)]*\\)"), "")
             .replace(Regex("\\[[^]]*\\]"), "")
             .replace(Regex("\\b(feat\\.|ft\\.|with|prod\\.|produced by)\\b.*", RegexOption.IGNORE_CASE), "")
             .trim()
-        
-        if (cleanTitle.isEmpty()) return null
-        
-        val candidates = try {
-            dao.findTracksByTitlePrefix(cleanTitle)
-        } catch (_: Exception) {
-            emptyList()
-        }
-        
-        val normQueryArtist = cleanArtistForMatching(artist)
-        for (cand in candidates) {
-            val normCandArtist = cleanArtistForMatching(cand.artist)
-            if (normQueryArtist.isNotEmpty() && normCandArtist.isNotEmpty() &&
-                (normQueryArtist.contains(normCandArtist) || normCandArtist.contains(normQueryArtist))) {
-                return cand
-            }
-        }
-        return null
+
+        if (cleanTitle.isEmpty()) return candidates.firstOrNull()
+
+        // Match title in memory across the artist's candidate tracks
+        return candidates.firstOrNull { cand ->
+            val candTitle = cand.title.lowercase(Locale.ROOT)
+            candTitle.contains(cleanTitle) || cleanTitle.contains(candTitle)
+        } ?: candidates.firstOrNull()
     }
 
     /**
@@ -2311,12 +2426,7 @@ object RecommendationManager {
         if (cleanTitle.isEmpty()) return@withContext emptyList()
 
         val seedTrack = try {
-            recDb.trackDao().findTracksByTitlePrefix(cleanTitle).firstOrNull { cand ->
-                val normCand = cleanArtistForMatching(cand.artist)
-                val normSeed = cleanArtistForMatching(seedArtist)
-                normCand.isNotEmpty() && normSeed.isNotEmpty() &&
-                    (normCand.contains(normSeed) || normSeed.contains(normCand))
-            }
+            findSpotifyTrackFuzzy(recDb.trackDao(), cleanTitle, seedArtist)
         } catch (_: Exception) { null } ?: return@withContext emptyList()
 
         val normalizedExclusions = excludeArtists.map { cleanArtistForMatching(it) }.toSet()

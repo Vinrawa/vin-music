@@ -52,10 +52,9 @@ object AppModule {
     fun provideRecommendationRepository(
         @ApplicationContext ctx: Context,
         db: VinDatabase,
-        recDb: com.vinmusic.recommendation.RecommendationDatabase,
-        firestoreRecommendationManager: com.vinmusic.recommendation.FirestoreRecommendationManager
+        recDb: com.vinmusic.recommendation.RecommendationDatabase
     ): com.vinmusic.recommendation.RecommendationRepository {
         com.vinmusic.innertube.YTMusicApi.attachContext(ctx)
-        return com.vinmusic.recommendation.RecommendationRepository(ctx, db, recDb, firestoreRecommendationManager)
+        return com.vinmusic.recommendation.RecommendationRepository(ctx, db, recDb)
     }
 }

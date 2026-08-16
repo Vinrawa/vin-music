@@ -58,14 +58,12 @@ object ArtistBannerCache {
                 .header("User-Agent", "VinMusic/2.0")
                 .build()
 
-            val body = http.newCall(request).execute().use { response ->
+            http.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@use null
-                response.body?.byteStream()
-            } ?: return@withContext null
-
-            body.use { input ->
+                val body = response.body ?: return@use null
+                val file = File(dir(context), "${normalizedName(artistName)}.jpg")
                 file.outputStream().use { output ->
-                    input.copyTo(output)
+                    body.byteStream().copyTo(output)
                 }
             }
 

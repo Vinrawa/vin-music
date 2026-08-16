@@ -26,11 +26,11 @@ object ExperimentalResolver {
         
         val ctx = mapOf(
             "clientName" to "IOS",
-            "clientVersion" to "21.03.1",
+            "clientVersion" to "21.46.1",
             "hl" to "en",
             "gl" to "IN",
             "osName" to "iPhone",
-            "osVersion" to "18.2.22C152",
+            "osVersion" to "18.4.22E142",
             "deviceMake" to "Apple",
             "deviceModel" to "iPhone16,2"
         )
@@ -46,9 +46,9 @@ object ExperimentalResolver {
             .url("$BASE/player?prettyPrint=false")
             .post(gson.toJson(body).toRequestBody(JSON))
             .header("Content-Type", "application/json")
-            .header("User-Agent", "com.google.ios.youtube/21.03.1 (iPhone16,2; U; CPU iOS 18_2 like Mac OS X;)")
+            .header("User-Agent", "com.google.ios.youtube/21.46.1 (iPhone16,2; U; CPU iOS 18_4 like Mac OS X;)")
             .header("X-YouTube-Client-Name", "5")
-            .header("X-YouTube-Client-Version", "21.03.1")
+            .header("X-YouTube-Client-Version", "21.46.1")
             .header("Origin", "https://www.youtube.com")
 
         try {

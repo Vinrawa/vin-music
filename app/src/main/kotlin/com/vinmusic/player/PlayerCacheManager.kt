@@ -161,17 +161,21 @@ object PlayerCacheManager {
                         if (streamUrl.isNullOrBlank()) continue
 
                         try {
+                            val resolvedUa = com.vinmusic.innertube.InnerTube.getUserAgentForUrl(streamUrl)
+                            val isNativeClient = streamUrl.contains("c=IOS") || streamUrl.contains("c=ANDROID")
+                            val requestProps = mutableMapOf(
+                                "Accept-Encoding" to "identity"
+                            )
+                            if (!isNativeClient) {
+                                requestProps["Origin"] = "https://www.youtube.com"
+                                requestProps["Referer"] = "https://www.youtube.com/"
+                            }
                             val httpFactory = DefaultHttpDataSource.Factory()
-                                .setUserAgent(PlayerSingleton.STREAM_USER_AGENT)
+                                .setUserAgent(resolvedUa)
                                 .setConnectTimeoutMs(30_000)
                                 .setReadTimeoutMs(30_000)
                                 .setAllowCrossProtocolRedirects(true)
-                                .setDefaultRequestProperties(mapOf(
-                                    "Origin" to "https://www.youtube.com",
-                                    "Referer" to "https://www.youtube.com/",
-                                    "Accept-Encoding" to "identity",
-                                    "Range" to "bytes=0-"
-                                ))
+                                .setDefaultRequestProperties(requestProps)
                             val cacheDataSource = androidx.media3.datasource.cache.CacheDataSource.Factory()
                                 .setCache(cache)
                                 .setUpstreamDataSourceFactory(httpFactory)
@@ -186,6 +190,22 @@ object PlayerCacheManager {
                             androidx.media3.datasource.cache.CacheWriter(cacheDataSource, dataSpec, null, null).cache()
                             cached = true
                             ReliabilityDiagnostics.record("prefetch", "cache", nextSong.videoId, attempt = attempt, status = "ok")
+                            // Ensure cached song has metadata in DB so it appears in Cached list
+                            try {
+                                val existing = db?.interactionSignalDao()?.get(nextSong.videoId)
+                                if (existing == null) {
+                                    db?.interactionSignalDao()?.insert(
+                                        com.vinmusic.data.db.InteractionSignal(
+                                            videoId = nextSong.videoId,
+                                            title = nextSong.title,
+                                            author = nextSong.author,
+                                            durationText = nextSong.durationText
+                                        )
+                                    )
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to upsert InteractionSignal for prefetch: ${e.message}")
+                            }
                             Log.d(TAG, "prefetchNextSongs: Successfully completed prefetch of 2.5MB for ${nextSong.title} (offset $offset)")
                             break
                         } catch (e: Exception) {

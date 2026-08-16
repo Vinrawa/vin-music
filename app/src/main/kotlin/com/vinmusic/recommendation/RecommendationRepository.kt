@@ -30,30 +30,28 @@ import javax.inject.Singleton
 class RecommendationRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val db: VinDatabase,
-    private val recDb: RecommendationDatabase,
-    private val firestoreRecommendationManager: FirestoreRecommendationManager
+    private val recDb: RecommendationDatabase
 ) {
     private val TAG = "VIN_REC_REP"
 
+    companion object {
+        private val smartQueueMutex = Mutex()
+    }
+
     private fun isOnline(): Boolean {
         return try {
-            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val network = connectivityManager.activeNetwork ?: return false
-            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            if (connectivityManager == null) return true
+            val network = connectivityManager.activeNetwork ?: return true
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return true
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         } catch (e: Exception) {
-            false
+            true
         }
     }
     private val prefs = context.getSharedPreferences("vin_music_repository_cache", Context.MODE_PRIVATE)
     private val gson = Gson()
     private val CACHE_EXPIRY_MS = 15 * 60 * 1000L // 15 minutes
-    /**
-     * Smart Queue requests can be triggered by both the player and the UI at the
-     * same time.  A single lock makes the second caller reuse the cache written by
-     * the first caller instead of starting another set of network searches.
-     */
-    private val smartQueueMutex = Mutex()
 
     private fun normalizeQueueArtist(artist: String): String =
         RecommendationManager.normalizeArtistName(artist).trim().lowercase(Locale.ROOT)
@@ -549,7 +547,7 @@ class RecommendationRepository @Inject constructor(
     private suspend fun getSongRadioInternal(videoId: String, fallbackTitle: String, fallbackAuthor: String, currentQueue: List<VideoItem>): List<VideoItem> {
         // v3 invalidates the old random/stale queue and enforces the repository's
         // 15-minute TTL for Smart Queue only. Home recommendation caches are untouched.
-        val cacheKey = "song_radio_v3_$videoId"
+        val cacheKey = "song_radio_v5_$videoId"
         val cached = loadVideoItems(cacheKey, allowStale = false)
         if (cached != null && cached.isNotEmpty()) {
             Log.d(TAG, "Smart Queue cache hit for seed=$videoId size=${cached.size}")
@@ -568,110 +566,71 @@ class RecommendationRepository @Inject constructor(
         val seedAuthor = historyEntry?.author ?: likedEntry?.author ?: signalEntry?.author ?: fallbackAuthor
 
         val profile = RecommendationManager.buildTasteProfile(db)
-        val seedMeta = if (seedTitle.isNotEmpty()) {
-            // Use real cached/estimated audio features whenever available. The
-            // title-based estimator remains the fallback for unknown tracks.
-            RecommendationManager.getCachedOrInferredMetadata(
-                db,
-                VideoItem(videoId, seedTitle, seedAuthor),
-                context
-            )
-        } else null
-        val profileLanguage = profile.topLanguages.firstOrNull()?.first?.takeIf { it.isNotBlank() }
+        val seedMeta = RecommendationManager.getCachedOrInferredMetadata(
+            db,
+            VideoItem(videoId, seedTitle.ifBlank { "Track" }, seedAuthor.ifBlank { "Artist" }),
+            context
+        )
+        val profileLanguage = profile.topLanguages.firstOrNull()?.first?.takeIf { it.isNotBlank() && it != "Unknown" }
 
         val online = isOnline()
+        var rawYtmRelatedCount = 0
+        var rawYtmRadioCount = 0
+        var lastFmAdditions = 0
+        var searchFallbackAdditions = 0
 
         if (online) {
             Log.d(TAG, "Device is ONLINE. Using YTM Related → YTM Radio → Search fallback.")
 
-            // 1. PRIMARY: YouTube Music Related (fresh, algorithm-curated) - SAME LANGUAGE ONLY
+            // 1. PRIMARY: YouTube Music Related (fresh, algorithm-curated)
             val ytRelated = fetchYtRelatedForSeed(videoId).orEmpty()
+            rawYtmRelatedCount = ytRelated.size
             if (ytRelated.isNotEmpty()) {
                 Log.d(TAG, "YTM Related returned ${ytRelated.size} tracks")
-                for (track in ytRelated) {
-                    val trackMeta = RecommendationManager.inferMetadata(track)
-                    // Only add if same language as seed
-                    if (seedMeta == null || trackMeta.language == seedMeta.language) {
-                        pool.add(track)
-                    }
-                }
+                pool.addAll(ytRelated)
             }
 
-            // 2. SECONDARY: YouTube Music Radio (RDAMVM radio playlist) - SAME LANGUAGE ONLY
+            // 2. SECONDARY: YouTube Music Radio (RDAMVM radio playlist)
             if (pool.size < 15) {
                 val radioTracks = InnerTube.getWatchNextRadio(videoId)
+                rawYtmRadioCount = radioTracks.size
                 if (radioTracks.isNotEmpty()) {
                     Log.d(TAG, "YTM Radio returned ${radioTracks.size} tracks")
                     for (track in radioTracks) {
                         if (pool.none { it.videoId == track.videoId }) {
-                            val trackMeta = RecommendationManager.inferMetadata(track)
-                            // Only add if same language as seed
-                            if (seedMeta == null || trackMeta.language == seedMeta.language) {
-                                pool.add(track)
-                            }
+                            pool.add(track)
                         }
                     }
                 }
             }
 
-            // 2.5 TERTIARY: Last.fm Similar Tracks (genre/mood matched) - SAME LANGUAGE ONLY
-            if (pool.size < 15 && seedAuthor.isNotEmpty() && seedTitle.isNotEmpty()) {
-                try {
-                    val lastFmSimilar = firestoreRecommendationManager.fetchSimilarTracks(seedAuthor, seedTitle)
-                    if (lastFmSimilar.isNotEmpty()) {
-                        Log.d(TAG, "Last.fm Similar returned ${lastFmSimilar.size} tracks")
-                        for ((artist, title) in lastFmSimilar) {
-                            if (pool.none { it.title.lowercase(Locale.ROOT) == title.lowercase(Locale.ROOT) &&
-                                            it.author.lowercase(Locale.ROOT) == artist.lowercase(Locale.ROOT) }) {
-                                // Search YTM for this track to get videoId
-                                try {
-                                    val results = InnerTube.search("$artist $title").take(3)
-                                    val match = results.firstOrNull { result ->
-                                        result.author.lowercase(Locale.ROOT).contains(artist.lowercase(Locale.ROOT)) &&
-                                        result.title.lowercase(Locale.ROOT).contains(title.lowercase(Locale.ROOT).take(8))
-                                    }
-                                    if (match != null) {
-                                        val matchMeta = RecommendationManager.inferMetadata(match)
-                                        if (seedMeta == null || matchMeta.language == seedMeta.language) {
-                                            pool.add(match)
-                                        }
-                                    }
-                                } catch (_: Exception) {}
-                            }
-                            if (pool.size >= 20) break
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Last.fm similar tracks failed: ${e.message}")
-                }
-            }
+            // 2.5 TERTIARY: Last.fm Similar Tracks (genre/mood matched) - REMOVED (FirestoreRecommendationManager deleted)
 
-            // 3. Cross-genre search to diversify artist pool (SAME LANGUAGE ONLY)
-            val poolArtists = pool.map { it.author.lowercase(Locale.ROOT) }.toSet()
-            if (poolArtists.size < 10 && seedMeta != null) {
-                Log.d(TAG, "Pool has only ${poolArtists.size} unique artists, adding cross-genre search...")
-                val genreLower = seedMeta.genre.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop")
-                val langLower = seedMeta.language.lowercase(Locale.ROOT)
+            // 3. Artist and genre search fallback to ensure candidate pool is always full
+            if (pool.size < 15) {
+                val searchQueries = mutableListOf<String>()
                 val yr = java.time.LocalDate.now().year
+                val genreLower = seedMeta.genre.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop")
 
-                // Only search in the same language as the seed track
+                if (seedAuthor.isNotBlank()) {
+                    searchQueries.add("$seedAuthor official songs")
+                    searchQueries.add("$seedAuthor popular tracks")
+                    searchQueries.add("$seedAuthor radio")
+                }
+
                 val langPrefix = when (seedMeta.language) {
                     "Hindi" -> "hindi"
                     "Punjabi" -> "punjabi"
                     "Tamil" -> "tamil"
                     "Korean" -> "korean"
-                    else -> "" // English - no prefix needed
+                    else -> ""
                 }
 
-                // Keep query order deterministic. Exploration is controlled by
-                // the later ranking stage instead of randomising the candidate pool.
                 val crossGenres = listOf("rap hip hop", "pop", "r&b", "indie", "electronic", "rock", "lofi")
                     .filter { !genreLower.contains(it.take(3)) }
                     .sortedBy { it }
                     .take(3)
 
-                val searchQueries = mutableListOf<String>()
-                // Same language + genre queries
                 if (langPrefix.isNotEmpty()) {
                     searchQueries.add("$langPrefix $genreLower official hits $yr")
                     searchQueries.add("$langPrefix ${seedMeta.mood.lowercase()} songs")
@@ -686,24 +645,20 @@ class RecommendationRepository @Inject constructor(
                         searchQueries.add("$cg official $yr")
                     }
                 }
+
                 for (query in searchQueries) {
                     try {
-                        val results = InnerTube.search(query).take(5)
+                        val results = InnerTube.search(query).take(6)
                         for (item in results) {
-                            val itemMeta = RecommendationManager.inferMetadata(item)
-                            // Only add if same language and not already in pool
-                            if (pool.none { it.videoId == item.videoId } &&
-                                itemMeta.language == seedMeta.language &&
-                                !RecommendationManager.isCompilationTrack(item.title, item.durationText) &&
-                                !RecommendationManager.isNonMusicVideo(item.title, item.author) &&
-                                !RecommendationManager.isUnofficialContent(item.title, item.author)) {
+                            if (pool.none { it.videoId == item.videoId }) {
                                 pool.add(item)
+                                searchFallbackAdditions++
                             }
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "Search fallback failed for '$query': ${e.message}")
                     }
-                    if (pool.size >= 20) break
+                    if (pool.size >= 25) break
                 }
             }
         } else {
@@ -731,18 +686,45 @@ class RecommendationRepository @Inject constructor(
         }
         val duplicateRemoved = pool.size - dedupedPool.size
 
+        // Step-by-step filtering with diagnostics
+        // Stage 1: isCompilationTrack
+        val nonCompilation = dedupedPool.filter { item ->
+            !RecommendationManager.isCompilationTrack(item.title, item.durationText)
+        }
+        val afterCompilationCount = nonCompilation.size
+
+        // Stage 2: isNonMusicVideo
+        val musicVideos = nonCompilation.filter { item ->
+            !RecommendationManager.isNonMusicVideo(item.title, item.author)
+        }
+        val afterNonMusicVideoCount = musicVideos.size
+
+        // Stage 3: isUnofficialContent
+        val officialContent = musicVideos.filter { item ->
+            !RecommendationManager.isUnofficialContent(item.title, item.author)
+        }
+        val afterUnofficialContentCount = officialContent.size
+
+        // Stage 4: isOfficial & metadata extraction (capped to 20 upfront to prevent CPU/IO spikes)
+        val initialCandidates = officialContent.take(20)
+        var officialMetaPairs = initialCandidates.map { item ->
+            val meta = RecommendationManager.getCachedOrInferredMetadata(db, item, context)
+            item to meta
+        }.filter { (_, meta) ->
+            meta.isOfficial
+        }
+        if (officialMetaPairs.size < 5 && initialCandidates.size >= 5) {
+            Log.d(TAG, "SmartQueue: Relaxing isOfficial filter (yielded ${officialMetaPairs.size}/${initialCandidates.size})")
+            officialMetaPairs = initialCandidates.map { it to RecommendationManager.getCachedOrInferredMetadata(db, it, context) }
+        }
+        val afterOfficialCount = officialMetaPairs.size
+
+        // Stage 5: skipped-track/artist & recently played filtering (with safety net)
         var recentlyPlayedRemoved = 0
-        val candidatePairs = dedupedPool.mapNotNull { item ->
-            if (item.videoId == videoId ||
-                RecommendationManager.isCompilationTrack(item.title, item.durationText) ||
-                RecommendationManager.isNonMusicVideo(item.title, item.author) ||
-                RecommendationManager.isUnofficialContent(item.title, item.author) ||
-                profile.skippedTracks.contains(item.videoId) ||
-                profile.skippedArtists.any { skipped -> normalizeQueueArtist(skipped) == normalizeQueueArtist(item.author) } ||
-                (seedTitle.isNotEmpty() && RecommendationManager.isTooSimilar(seedTitle, item.title))
-            ) {
-                return@mapNotNull null
-            }
+        var afterUserFilters = officialMetaPairs.filter { (item, _) ->
+            if (item.videoId == videoId) return@filter false
+            if (profile.skippedTracks.contains(item.videoId)) return@filter false
+            if (profile.skippedArtists.any { skipped -> normalizeQueueArtist(skipped) == normalizeQueueArtist(item.author) }) return@filter false
 
             val signal = signals[item.videoId]
             val recentlyPlayed = item.videoId in recentlyPlayedIds ||
@@ -752,25 +734,60 @@ class RecommendationRepository @Inject constructor(
                 (signal?.completeCount ?: 0) >= 2
             if (recentlyPlayed && !strongRepeatIntent) {
                 recentlyPlayedRemoved++
-                return@mapNotNull null
+                return@filter false
             }
-
-            val meta = RecommendationManager.getCachedOrInferredMetadata(db, item, context)
-            if (!meta.isOfficial) return@mapNotNull null
-            item to meta
+            true
         }
+        if (afterUserFilters.size < 5 && officialMetaPairs.size >= 5) {
+            Log.d(TAG, "SmartQueue: Relaxing recently-played filter (yielded ${afterUserFilters.size}/${officialMetaPairs.size})")
+            afterUserFilters = officialMetaPairs.filter { (item, _) -> item.videoId != videoId }
+        }
+        val afterUserFilterCount = afterUserFilters.size
 
-        // Language is a Smart Queue hard constraint. This is deliberately kept
-        // inside getSongRadio; Home's normal recommendation sections are not
-        // routed through this filter and remain mixed-language.
-        val queueLanguage = (seedMeta?.language?.takeIf { it.isNotBlank() } ?: profileLanguage)
-            ?: candidatePairs.groupingBy { it.second.language }.eachCount().maxByOrNull { it.value }?.key
-        val languageFilteredPairs = if (queueLanguage != null) {
-            candidatePairs.filter { sameQueueLanguage(it.second.language, queueLanguage) }
+        // Stage 6: isTooSimilar to seed
+        var afterSimilarity = afterUserFilters.filter { (item, _) ->
+            if (seedTitle.isNotEmpty() && RecommendationManager.isTooSimilar(seedTitle, item.title)) {
+                false
+            } else {
+                true
+            }
+        }
+        if (afterSimilarity.isEmpty() && afterUserFilters.isNotEmpty()) {
+            afterSimilarity = afterUserFilters
+        }
+        val afterTooSimilarCount = afterSimilarity.size
+
+        // Stage 7: Language filtering
+        // Priority for Smart Queue language:
+        // 1. Seed track's detected language (if known != "Unknown")
+        // 2. Candidate pool majority language (from YouTube Radio/Related recommendations for this song)
+        // 3. User's overall profile language (only if candidate pool doesn't indicate a language)
+        // 4. "Unknown"
+        val candidateMajorityLang = afterSimilarity.groupingBy { it.second.language }
+            .eachCount()
+            .filter { it.key.isNotBlank() && it.key != "Unknown" }
+            .maxByOrNull { it.value }?.key
+
+        val queueLanguage = seedMeta?.language?.takeIf { it.isNotBlank() && it != "Unknown" }
+            ?: candidateMajorityLang
+            ?: profileLanguage
+            ?: "Unknown"
+
+        var languageFilteredPairs = if (queueLanguage == "Unknown") {
+            afterSimilarity
         } else {
-            candidatePairs
+            afterSimilarity.filter { (_, meta) ->
+                RecommendationManager.isCompatibleQueueLanguage(meta.language, queueLanguage, allowUnknown = true)
+            }
         }
-        val languageRemoved = candidatePairs.size - languageFilteredPairs.size
+
+        // SAFETY NET: Never let language filtering collapse a healthy candidate pool to 0!
+        if (languageFilteredPairs.size < 5 && afterSimilarity.size >= 5) {
+            Log.d(TAG, "SmartQueue: Strict language filtering on '$queueLanguage' yielded only ${languageFilteredPairs.size}/${afterSimilarity.size} candidates. Relaxing language filter to maintain full Smart Queue.")
+            languageFilteredPairs = afterSimilarity
+        }
+        val afterLanguageCount = languageFilteredPairs.size
+        val languageRemoved = afterSimilarity.size - languageFilteredPairs.size
 
         val now = System.currentTimeMillis()
         val recentArtistCounts = history.take(20)
@@ -826,6 +843,7 @@ class RecommendationRepository @Inject constructor(
                 recentPenalty + currentQueuePenalty + officialBonus
             SmartQueueCandidate(item, meta, seedSimilarity, tasteScore, behavior, recentPenalty, baseScore)
         }
+        val finalScoredCandidatesCount = scoredCandidates.size
 
         val sequenced = ArrayList<VideoItem>()
         val remaining = ArrayList(scoredCandidates)
@@ -856,6 +874,7 @@ class RecommendationRepository @Inject constructor(
                 candidate.baseScore * 0.08 + discoveryBonus
         }
 
+        // Pass 1: Strict spacing and artist caps
         while (remaining.isNotEmpty() && sequenced.size < 20) {
             val position = sequenced.size
             val eligible = remaining.filter { candidate ->
@@ -869,7 +888,6 @@ class RecommendationRepository @Inject constructor(
                     sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.item.title) }
             }
             if (eligible.isEmpty()) {
-                artistCapRemoved += remaining.size
                 break
             }
 
@@ -899,8 +917,54 @@ class RecommendationRepository @Inject constructor(
             }
         }
 
-        // Fallback: if the online/offline pool is empty, use only history/liked
-        // songs that still satisfy the Smart Queue language constraint.
+        // Pass 2: Relaxed spacing if queue size is small (< 10) and candidates remain
+        if (sequenced.size < 10 && remaining.isNotEmpty()) {
+            while (remaining.isNotEmpty() && sequenced.size < 20) {
+                val position = sequenced.size
+                val eligible = remaining.filter { candidate ->
+                    val artist = normalizeQueueArtist(candidate.item.author)
+                    val count = artistCount[artist] ?: 0
+                    val cap = if (artist == seedAuthorLower) 2 else 4
+                    val lastIndex = sequenced.indexOfLast { normalizeQueueArtist(it.author) == artist }
+                    val gap = if (lastIndex < 0) Int.MAX_VALUE else sequenced.size - lastIndex
+                    count < cap &&
+                        gap >= 1 &&
+                        sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.item.title) }
+                }
+                if (eligible.isEmpty()) {
+                    artistCapRemoved += remaining.size
+                    break
+                }
+
+                val next = eligible.sortedWith(
+                    compareByDescending<SmartQueueCandidate> { positionScore(it, position) }
+                        .thenBy { RecommendationManager.normalizeTitle(it.item.title) }
+                        .thenBy { it.item.videoId }
+                ).first()
+
+                sequenced.add(next.item)
+                val artist = normalizeQueueArtist(next.item.author)
+                lastArtist = artist
+                artistCount[artist] = (artistCount[artist] ?: 0) + 1
+                remaining.remove(next)
+                remaining.removeAll {
+                    RecommendationManager.isTooSimilar(next.item.title, it.item.title)
+                }
+            }
+        }
+
+        // Pass 3: Fill remaining slots if queue is still small (< 10)
+        if (sequenced.size < 10 && remaining.isNotEmpty()) {
+            for (candidate in remaining.toList()) {
+                if (sequenced.none { RecommendationManager.isTooSimilar(it.title, candidate.item.title) }) {
+                    sequenced.add(candidate.item)
+                    remaining.remove(candidate)
+                }
+                if (sequenced.size >= 15) break
+            }
+        }
+
+        // Fallback 1: if the online/offline pool is empty, use history/liked songs
         if (sequenced.isEmpty()) {
             Log.d(TAG, "Pool empty, falling back to history/liked songs.")
             val fallback = mutableListOf<VideoItem>()
@@ -910,7 +974,7 @@ class RecommendationRepository @Inject constructor(
                 .filter { it.videoId != videoId }
                 .distinctBy { "${RecommendationManager.normalizeTitle(it.title)}|${normalizeQueueArtist(it.author)}" }
                 .map { it to RecommendationManager.getCachedOrInferredMetadata(db, it, context) }
-                .filter { (_, meta) -> meta.isOfficial && (queueLanguage == null || sameQueueLanguage(meta.language, queueLanguage)) }
+                .filter { (_, meta) -> meta.isOfficial && RecommendationManager.isCompatibleQueueLanguage(meta.language, queueLanguage, allowUnknown = true) }
                 .sortedWith(compareByDescending<Pair<VideoItem, SongMetadata>> {
                     RecommendationManager.calculateTasteSimilarity(it.second, profile.tasteDNA)
                 }.thenBy { RecommendationManager.normalizeTitle(it.first.title) })
@@ -918,13 +982,41 @@ class RecommendationRepository @Inject constructor(
             sequenced.addAll(filtered.take(15))
         }
 
+        // Fallback 2 (Emergency): Direct search for seed artist / title to ensure queue is NEVER empty
+        if (sequenced.isEmpty()) {
+            Log.d(TAG, "SmartQueue: Still empty, executing emergency direct search...")
+            try {
+                val query = if (seedAuthor.isNotBlank() && seedAuthor != "Artist") {
+                    "$seedAuthor official music"
+                } else if (seedTitle.isNotBlank() && seedTitle != "Track") {
+                    "$seedTitle songs"
+                } else {
+                    "trending music official"
+                }
+                val directResults = InnerTube.search(query).take(15)
+                for (item in directResults) {
+                    if (item.videoId != videoId && sequenced.none { it.videoId == item.videoId || RecommendationManager.isTooSimilar(it.title, item.title) }) {
+                        sequenced.add(item)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Emergency search failed: ${e.message}")
+            }
+        }
+
         Log.d(
             TAG,
-            "Smart Queue seed=$videoId language=${queueLanguage ?: "unknown"} " +
-                "raw=${pool.size} unique=${dedupedPool.size} candidates=${candidatePairs.size} " +
-                "removedLanguage=$languageRemoved removedDuplicates=$duplicateRemoved " +
-                "removedRecent=$recentlyPlayedRemoved removedArtistCap=$artistCapRemoved " +
-                "final=${sequenced.size}"
+            "SmartQueue: seed=$videoId title='$seedTitle' artist='$seedAuthor' language='$queueLanguage' " +
+                "rawYtmRelated=$rawYtmRelatedCount rawYtmRadio=$rawYtmRadioCount " +
+                "lastFmAdditions=$lastFmAdditions searchFallbackAdditions=$searchFallbackAdditions " +
+                "totalRaw=${pool.size} unique=${dedupedPool.size} " +
+                "afterCompilation=$afterCompilationCount afterNonMusicVideo=$afterNonMusicVideoCount " +
+                "afterUnofficialContent=$afterUnofficialContentCount afterOfficial=$afterOfficialCount " +
+                "afterUserFilter=$afterUserFilterCount afterTooSimilar=$afterTooSimilarCount " +
+                "afterLanguage=$afterLanguageCount " +
+                "removedDuplicates=$duplicateRemoved removedRecent=$recentlyPlayedRemoved " +
+                "removedLanguage=$languageRemoved removedArtistCap=$artistCapRemoved " +
+                "finalScored=$finalScoredCandidatesCount finalSelected=${sequenced.size}"
         )
         Log.d(
             TAG,

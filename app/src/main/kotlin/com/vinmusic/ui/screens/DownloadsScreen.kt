@@ -76,11 +76,25 @@ fun DownloadsScreen(
                     while (cacheSpanIterator.hasNext()) {
                         val key = cacheSpanIterator.next()
                         if (key !in downloadedIds && key !in seenIds) {
-                            // Try to find song info from interaction signals
+                            // Try to find song info from multiple metadata sources
                             val signal = db.interactionSignalDao().get(key)
                             if (signal != null) {
                                 cached.add(VideoItem(signal.videoId, signal.title, signal.author, signal.durationText))
                                 seenIds.add(key)
+                            } else {
+                                // Fallback: check history
+                                val hist = db.historyDao().getAllHistory().firstOrNull { it.videoId == key }
+                                if (hist != null) {
+                                    cached.add(VideoItem(hist.videoId, hist.title, hist.author, hist.durationText))
+                                    seenIds.add(key)
+                                } else {
+                                    // Fallback: check song cache meta
+                                    val meta = db.songCacheMetaDao().get(key)
+                                    if (meta != null) {
+                                        cached.add(VideoItem(meta.videoId, meta.title, meta.author, meta.durationText))
+                                        seenIds.add(key)
+                                    }
+                                }
                             }
                         }
                     }

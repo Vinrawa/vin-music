@@ -199,8 +199,7 @@ class AudioFeatureProcessor : BaseAudioProcessor() {
 
                 Log.d("AudioFeatureProcessor", "Calculated features: BPM=$bpm, Energy=$energy")
 
-                // 3. Fetch Last.fm Tags and complete analysis
-                val firestoreManager = PlayerSingleton.firestoreRecommendationManager
+                // 3. Fetch Last.fm Tags locally (no Firestore)
                 val ctx = PlayerSingleton.context
                 val isOnline = ctx != null && PlayerCacheManager.isOnline(ctx)
                 
@@ -209,8 +208,8 @@ class AudioFeatureProcessor : BaseAudioProcessor() {
                 var hasRealTags = false
 
                 if (isOnline) {
-                    Log.d("AudioFeatureProcessor", "Fetching Last.fm tags...")
-                    val tags = firestoreManager.fetchLastFmTags(artist, title)
+                    Log.d("AudioFeatureProcessor", "Fetching Last.fm tags locally...")
+                    val tags = PlayerSingleton.fetchLastFmTagsLocally(artist, title)
                     if (tags != null) {
                         genreTags = tags["genres"] ?: emptyList()
                         moodTags = tags["moods"] ?: emptyList()

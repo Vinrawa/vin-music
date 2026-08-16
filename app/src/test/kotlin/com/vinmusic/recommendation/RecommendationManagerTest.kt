@@ -344,4 +344,51 @@ class RecommendationManagerTest {
         val metaPunjabi = RecommendationManager.inferMetadata(itemPunjabi)
         assertEquals("Punjabi", metaPunjabi.language)
     }
+
+    @Test
+    fun `isNonMusicVideo does not reject titles containing girl or history`() {
+        assertFalse(RecommendationManager.isNonMusicVideo("Brown Rang", "Yo Yo Honey Singh"))
+        assertFalse(RecommendationManager.isNonMusicVideo("Barbie Girl", "Aqua"))
+        assertFalse(RecommendationManager.isNonMusicVideo("History", "One Direction"))
+        assertFalse(RecommendationManager.isNonMusicVideo("Love Story", "Taylor Swift"))
+        assertFalse(RecommendationManager.isNonMusicVideo("Good News", "Mac Miller"))
+    }
+
+    @Test
+    fun `isUnofficialContent allows legitimate artists and titles`() {
+        assertFalse(RecommendationManager.isUnofficialContent("Life Goes On", "Oliver Tree"))
+        assertFalse(RecommendationManager.isUnofficialContent("Alive", "Sia"))
+        assertFalse(RecommendationManager.isUnofficialContent("Dynamite", "BTS"))
+        assertFalse(RecommendationManager.isUnofficialContent("Live Forever", "Oasis"))
+        assertFalse(RecommendationManager.isUnofficialContent("Undercover", "Two Door Cinema Club"))
+    }
+
+    @Test
+    fun `isOfficialArtistChannel allows artists with radio, beat, prod, sub in name`() {
+        assertTrue(RecommendationManager.isOfficialArtistChannel("Creep", "Radiohead"))
+        assertTrue(RecommendationManager.isOfficialArtistChannel("Hey Jude", "The Beatles"))
+        assertTrue(RecommendationManager.isOfficialArtistChannel("Firestarter", "The Prodigy"))
+        assertTrue(RecommendationManager.isOfficialArtistChannel("Cradles", "Sub Urban"))
+        assertTrue(RecommendationManager.isOfficialArtistChannel("Blinding Lights", "The Weeknd"))
+    }
+
+    @Test
+    fun `isTooSimilar does not falsely match on short common words`() {
+        assertFalse(RecommendationManager.isTooSimilar("No", "No Love"))
+        assertFalse(RecommendationManager.isTooSimilar("Love", "Love Story"))
+        assertFalse(RecommendationManager.isTooSimilar("You", "Without You"))
+        assertFalse(RecommendationManager.isTooSimilar("Stay", "Stay With Me"))
+    }
+
+    @Test
+    fun `isCompatibleQueueLanguage enforces strict language with unknown tolerance`() {
+        assertTrue(RecommendationManager.isCompatibleQueueLanguage("Punjabi", "Punjabi", allowUnknown = true))
+        assertTrue(RecommendationManager.isCompatibleQueueLanguage("Unknown", "Punjabi", allowUnknown = true))
+        assertFalse(RecommendationManager.isCompatibleQueueLanguage("Hindi", "Punjabi", allowUnknown = true))
+        assertFalse(RecommendationManager.isCompatibleQueueLanguage("English", "Punjabi", allowUnknown = true))
+
+        assertTrue(RecommendationManager.isCompatibleQueueLanguage("English", "English", allowUnknown = true))
+        assertTrue(RecommendationManager.isCompatibleQueueLanguage("Unknown", "English", allowUnknown = true))
+        assertFalse(RecommendationManager.isCompatibleQueueLanguage("Punjabi", "English", allowUnknown = true))
+    }
 }

@@ -3067,7 +3067,13 @@ private fun shouldShowVerifiedArtist(query: String, name: String, audience: Stri
     val cleanQuery = normalizeCreditToken(query)
     val cleanName = normalizeCreditToken(name)
     val closeMatch = cleanName == cleanQuery || cleanName.contains(cleanQuery) || cleanQuery.contains(cleanName)
-    return closeMatch && cleanName.isNotBlank()
+    if (!closeMatch || cleanName.isBlank()) return false
+    
+    val hasVerifiedMetric = audience.contains("M", ignoreCase = true) || 
+                            audience.contains("K", ignoreCase = true) ||
+                            audience.contains("subscribers", ignoreCase = true) ||
+                            audience.contains("listeners", ignoreCase = true)
+    return hasVerifiedMetric || com.vinmusic.innertube.InnerTube.verifiedArtistCache[cleanQuery] == true
 }
 
 private fun formatMonthlyListenersText(sourceText: String): String {

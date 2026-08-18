@@ -170,7 +170,7 @@ fun LibraryScreen(
                 .background(VinColors.White10)
                 .padding(4.dp)
         ) {
-            listOf("Liked", "Playlists", "Artists", "History").forEach { t ->
+            listOf("Liked", "Playlists", "Local", "Artists", "History").forEach { t ->
                 val active = vm.libraryTab == t
                 
                 val scale by animateFloatAsState(
@@ -204,7 +204,7 @@ fun LibraryScreen(
                     Text(
                         text = t,
                         color = activeTextColor,
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -214,6 +214,14 @@ fun LibraryScreen(
         }
 
         when (vm.libraryTab) {
+            // ── Local (Device Music & Folders) ─────────────────────────────────
+            "Local" -> {
+                LocalMusicSection(
+                    currentPlayingVideoId = vm.currentSong?.videoId,
+                    onSongClick = onSongClick,
+                    onSongMore = onSongMore
+                )
+            }
             // ── Liked ─────────────────────────────────────────────────────────
             "Liked" -> {
                 if (liked.isEmpty()) {
@@ -1199,5 +1207,433 @@ private fun YtPlaylistItem(
             tint = VinColors.Secondary,
             modifier = Modifier.size(20.dp)
         )
+    }
+}
+
+@Composable
+private fun LocalMusicSection(
+    currentPlayingVideoId: String?,
+    onSongClick: (VideoItem, List<VideoItem>) -> Unit,
+    onSongMore: (VideoItem) -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    
+    val permissionString = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+        android.Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+        android.Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+    var hasPermission by remember {
+        mutableStateOf(
+            androidx.core.content.ContextCompat.checkSelfPermission(context, permissionString) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val launcher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasPermission = granted
+    }
+
+    var scanResult by remember { mutableStateOf<com.vinmusic.data.LocalScanResult?>(null) }
+    var isScanning by remember { mutableStateOf(false) }
+    var selectedFolder by remember { mutableStateOf<com.vinmusic.data.LocalFolder?>(null) }
+    var subTab by rememberSaveable { mutableStateOf("Folders") }
+    var filterText by remember { mutableStateOf("") }
+
+    val scanLocalFiles: () -> Unit = {
+        isScanning = true
+        scope.launch(Dispatchers.IO) {
+            val res = com.vinmusic.data.LocalMediaScanner.scanLocalAudio(context)
+            withContext(Dispatchers.Main) {
+                scanResult = res
+                isScanning = false
+            }
+        }
+    }
+
+    LaunchedEffect(hasPermission) {
+        if (hasPermission) {
+            scanLocalFiles()
+        }
+    }
+
+    if (!hasPermission) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(80.dp)
+                    .clip(CircleShape)
+                    .background(VinColors.Accent.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Folder,
+                    contentDescription = null,
+                    tint = VinColors.Accent,
+                    modifier = Modifier.size(40.dp)
+                )
+            }
+            Spacer(Modifier.height(20.dp))
+            Text(
+                "Local Device Music",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = VinColors.Primary
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Access your offline MP3s, downloaded tracks, and folders directly inside VIN Music with 0ms playback and full 8D audio.",
+                fontSize = 14.sp,
+                color = VinColors.Secondary,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                lineHeight = 20.sp
+            )
+            Spacer(Modifier.height(24.dp))
+            Button(
+                onClick = { launcher.launch(permissionString) },
+                colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent),
+                shape = RoundedCornerShape(16.dp),
+                contentPadding = PaddingValues(horizontal = 28.dp, vertical = 14.dp)
+            ) {
+                Icon(Icons.Default.LockOpen, contentDescription = null, modifier = Modifier.size(18.dp), tint = Color.White)
+                Spacer(Modifier.width(8.dp))
+                Text("Allow Storage Access", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            }
+        }
+    } else {
+        val result = scanResult
+        if (isScanning && result == null) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = VinColors.Accent)
+            }
+        } else if (result == null || result.allSongs.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(Icons.Default.MusicOff, contentDescription = null, tint = VinColors.Secondary, modifier = Modifier.size(54.dp))
+                Spacer(Modifier.height(16.dp))
+                Text("No Local Audio Found", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = VinColors.Primary)
+                Spacer(Modifier.height(6.dp))
+                Text("Put music files in your Music or Downloads folder and tap rescan.", fontSize = 13.sp, color = VinColors.Secondary, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                Spacer(Modifier.height(20.dp))
+                OutlinedButton(
+                    onClick = { scanLocalFiles() },
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Rescan Phone")
+                }
+            }
+        } else {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Header & Stats
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            "${result.allSongs.size} Tracks · ${result.folders.size} Folders",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = VinColors.Secondary
+                        )
+                        Text(
+                            "Device Storage",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = VinColors.Primary
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        IconButton(
+                            onClick = { scanLocalFiles() },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(VinColors.White10)
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Rescan", tint = VinColors.Primary, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+
+                // Sub-Tabs ("Folders" vs "All Tracks")
+                if (selectedFolder == null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf("Folders" to Icons.Default.Folder, "All Tracks" to Icons.Default.MusicNote).forEach { (name, icon) ->
+                            val active = subTab == name
+                            FilterChip(
+                                selected = active,
+                                onClick = { subTab = name },
+                                label = { Text(name, fontSize = 12.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Normal) },
+                                leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = VinColors.Accent,
+                                    selectedLabelColor = Color.White,
+                                    selectedLeadingIconColor = Color.White,
+                                    containerColor = VinColors.White10,
+                                    labelColor = VinColors.Secondary,
+                                    iconColor = VinColors.Secondary
+                                ),
+                                border = null
+                            )
+                        }
+                    }
+                }
+
+                if (selectedFolder != null) {
+                    val folder = selectedFolder!!
+                    val filteredFolderSongs = remember(folder, filterText) {
+                        if (filterText.isBlank()) folder.songs
+                        else folder.songs.filter { it.title.contains(filterText, ignoreCase = true) || it.author.contains(filterText, ignoreCase = true) }
+                    }
+
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 220.dp)
+                    ) {
+                        item {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedFolder = null }
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = VinColors.Accent)
+                                Text("Back to Folders", color = VinColors.Accent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        item {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                                shape = RoundedCornerShape(20.dp),
+                                colors = CardDefaults.cardColors(containerColor = VinColors.Surface)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(52.dp)
+                                                .clip(RoundedCornerShape(14.dp))
+                                                .background(VinColors.Accent.copy(alpha = 0.2f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(Icons.Default.FolderOpen, contentDescription = null, tint = VinColors.Accent, modifier = Modifier.size(28.dp))
+                                        }
+                                        Column {
+                                            Text(folder.name, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = VinColors.Primary)
+                                            Text("${folder.songs.size} local tracks", fontSize = 13.sp, color = VinColors.Secondary)
+                                        }
+                                    }
+
+                                    IconButton(
+                                        onClick = {
+                                            if (folder.songs.isNotEmpty()) {
+                                                onSongClick(folder.songs.first(), folder.songs)
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .size(44.dp)
+                                            .clip(CircleShape)
+                                            .background(VinColors.Accent)
+                                    ) {
+                                        Icon(Icons.Default.PlayArrow, contentDescription = "Play All", tint = Color.White, modifier = Modifier.size(24.dp))
+                                    }
+                                }
+                            }
+                        }
+
+                        itemsIndexed(filteredFolderSongs, key = { _, s -> s.videoId }) { _, song ->
+                            SongListItem(
+                                song = song,
+                                isPlaying = (currentPlayingVideoId == song.videoId),
+                                onClick = { onSongClick(song, filteredFolderSongs) },
+                                onMore = { onSongMore(song) }
+                            )
+                        }
+                    }
+                } else if (subTab == "Folders") {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 220.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(result.folders, key = { it.name }) { folder ->
+                            LocalFolderCard(
+                                folder = folder,
+                                onClick = { selectedFolder = folder },
+                                onPlayClick = {
+                                    if (folder.songs.isNotEmpty()) {
+                                        onSongClick(folder.songs.first(), folder.songs)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                } else {
+                    val allTracks = result.allSongs
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 220.dp)
+                    ) {
+                        item {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("${allTracks.size} Songs", fontSize = 13.sp, color = VinColors.Secondary, fontWeight = FontWeight.SemiBold)
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(20.dp))
+                                        .background(VinColors.Accent.copy(alpha = 0.15f))
+                                        .clickable {
+                                            if (allTracks.isNotEmpty()) {
+                                                onSongClick(allTracks.first(), allTracks)
+                                            }
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = VinColors.Accent, modifier = Modifier.size(16.dp))
+                                    Text("Play All", color = VinColors.Accent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        itemsIndexed(allTracks, key = { _, s -> s.videoId }) { _, song ->
+                            SongListItem(
+                                song = song,
+                                isPlaying = (currentPlayingVideoId == song.videoId),
+                                onClick = { onSongClick(song, allTracks) },
+                                onMore = { onSongMore(song) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LocalFolderCard(
+    folder: com.vinmusic.data.LocalFolder,
+    onClick: () -> Unit,
+    onPlayClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() },
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = VinColors.White10)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(VinColors.Accent.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null,
+                        tint = VinColors.Accent,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                Column {
+                    Text(
+                        text = folder.name,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = VinColors.Primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${folder.songs.size} songs",
+                        fontSize = 12.sp,
+                        color = VinColors.Secondary
+                    )
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                IconButton(
+                    onClick = onPlayClick,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Play Folder",
+                        tint = VinColors.Accent,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = VinColors.Secondary.copy(alpha = 0.6f),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
     }
 }

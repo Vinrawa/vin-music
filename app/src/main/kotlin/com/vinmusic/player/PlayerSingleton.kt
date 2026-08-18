@@ -101,7 +101,11 @@ object PlayerSingleton {
         // No-op: ExoPlayer manages wake locks via setWakeMode(C.WAKE_MODE_NETWORK)
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Log.e(TAG, "Unhandled coroutine exception in PlayerSingleton", throwable)
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main + coroutineExceptionHandler)
 
     private var fetchJob: Job? = null
     private var errorRetryCount = 0
@@ -115,11 +119,15 @@ object PlayerSingleton {
     init {
         scope.launch {
             actionEvents.collect { action ->
-                when (action) {
-                    "NEXT" -> playNext()
-                    "PREV" -> playPrev()
-                    "LIKE" -> currentSong?.let { toggleLike(it) }
-                    "REPEAT" -> repeat = !repeat
+                try {
+                    when (action) {
+                        "NEXT" -> playNext()
+                        "PREV" -> playPrev()
+                        "LIKE" -> currentSong?.let { toggleLike(it) }
+                        "REPEAT" -> repeat = !repeat
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error handling action event '$action'", e)
                 }
             }
         }
@@ -622,14 +630,14 @@ object PlayerSingleton {
             recommendationRepository?.cacheRelatedForSong(song.videoId)
         }
 
-        fetchJob = scope.launch {
+        fetchJob = scope.launch(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Fetching stream/download for videoId=${song.videoId}")
                 ReliabilityDiagnostics.record("playback", "resolve_start", song.videoId, status = "started")
 
-                // 1. Offload SimpleCache queries, DB checks, and network checks entirely to Dispatchers.IO to avoid blocking the Main UI Thread and causing stuttering!
-                val cacheResult = withContext(Dispatchers.IO) {
-                    val ctx = context ?: return@withContext PlayerCacheManager.CacheCheckResult(false, false, false, 0L, false)
+                // 1. Check cache on Dispatchers.IO
+                val cacheResult = run {
+                    val ctx = context ?: return@run PlayerCacheManager.CacheCheckResult(false, false, false, 0L, false)
                     PlayerCacheManager.checkCacheStatus(ctx, database, song.videoId)
                 }
 
@@ -645,7 +653,7 @@ object PlayerSingleton {
                 var artBytes: ByteArray? = null
                 var onlineAndCached = isCachedComplete && isDeviceOnline
 
-                // Load artwork bytes locally first. Doing this here covers all play paths (downloaded, cached, and online).
+                // Load artwork bytes locally first on IO thread.
                 val ctx = context
                 if (ctx != null) {
                     try {
@@ -667,7 +675,7 @@ object PlayerSingleton {
                     }
                 }
 
-                // Immediately update notification with artwork bytes if we found them locally
+                // Update notification with artwork bytes if we found them locally
                 if (artBytes != null) {
                     withContext(Dispatchers.Main) {
                         if (currentSong?.videoId == song.videoId) {
@@ -679,16 +687,18 @@ object PlayerSingleton {
                     }
                 }
 
-                // If song is fully downloaded, play it instantly from local cache (offline style) even if online
+                // 1. Cache-First Instant Playback (0ms latency)
+                // If song is fully downloaded OR already cached in PlayerCache, play it instantly from local disk without hitting YouTube network!
                 if (isDownloadCacheValid) {
-                    Log.d(TAG, "Playing fully downloaded song instantly: videoId=${song.videoId}")
+                    Log.d(TAG, "Playing fully downloaded song instantly from local cache: videoId=${song.videoId}")
                     url = "https://music.youtube.com/cache/${song.videoId}"
                     onlineAndCached = false
-                } else if (isCachedComplete && !onlineAndCached) {
-                    Log.d(TAG, "Playing fully cached offline song (device is offline): videoId=${song.videoId}")
+                } else if (isCachedComplete) {
+                    Log.d(TAG, "Playing fully cached song instantly from PlayerCache: videoId=${song.videoId}")
                     url = "https://music.youtube.com/cache/${song.videoId}"
+                    onlineAndCached = false
                 } else {
-                    errorMessage = null
+                    withContext(Dispatchers.Main) { errorMessage = null }
                     // Fetch stream URL and artwork bytes in parallel
                     var fetchedUrl: String? = null
                     
@@ -705,13 +715,11 @@ object PlayerSingleton {
                         // Retry up to 2 times with 1-second delay for resilient playback
                         for (attempt in 1..2) {
                             ReliabilityDiagnostics.record("playback", "resolve_attempt", song.videoId, attempt = attempt, status = "started")
-                            fetchedUrl = withContext(Dispatchers.IO) {
-                                try {
-                                    InnerTube.getStreamUrl(song.videoId, quality)
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Stream URL fetch attempt $attempt failed: ${e.message}")
-                                    null
-                                }
+                            fetchedUrl = try {
+                                InnerTube.getStreamUrl(song.videoId, quality)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Stream URL fetch attempt $attempt failed: ${e.message}")
+                                null
                             }
                             ReliabilityDiagnostics.record(
                                 "playback", "resolve_attempt", song.videoId,
@@ -733,8 +741,10 @@ object PlayerSingleton {
                     }
 
                     if (fetchedUrl == null) {
-                        isLoading    = false
-                        errorMessage = "Couldn't load this track. Check your connection and try again."
+                        withContext(Dispatchers.Main) {
+                            isLoading    = false
+                            errorMessage = "Couldn't load this track. Check your connection and try again."
+                        }
                         Log.e(TAG, "Stream URL is NULL for ${song.videoId} | ${InnerTube.lastDebugMsg}")
                         ReliabilityDiagnostics.record("playback", "resolve_end", song.videoId, status = "failed", error = "stream_url_null", details = InnerTube.lastDebugMsg)
                         return@launch
@@ -742,14 +752,12 @@ object PlayerSingleton {
                     url = fetchedUrl
                 }
 
-                // Resolve SimpleCache on Dispatchers.IO to prevent synchronous disk scan blocking Main UI thread
+                // Resolve SimpleCache on IO
                 val resolvedCache = if (isCachedComplete) {
-                    withContext(Dispatchers.IO) {
-                        val c = context
-                        if (c != null) {
-                            if (isDownloadCacheValid) getDownloadCache(c) else getCache(c)
-                        } else null
-                    }
+                    val c = context
+                    if (c != null) {
+                        if (isDownloadCacheValid) getDownloadCache(c) else getCache(c)
+                    } else null
                 } else null
 
                 withContext(Dispatchers.Main) {
@@ -757,7 +765,7 @@ object PlayerSingleton {
                     // Ensure service is running
                     try {
                         val intent = android.content.Intent(ctx, VinMusicService::class.java)
-                        androidx.core.content.ContextCompat.startForegroundService(ctx, intent)
+                        ctx.startService(intent)
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to start VinMusicService in playSong: ${e.message}")
                     }
@@ -1086,19 +1094,18 @@ object PlayerSingleton {
 
     private fun prefetchNextSongs() {
         val ctx = context ?: return
-        if (queue.isEmpty()) return
+        if (queue.size <= 1) return // Do not prefetch if only 1 song in queue!
         
         prefetchCacheJob?.cancel()
         
         val nextSongs = mutableListOf<VideoItem>()
         for (offset in 1..2) {
-            val nextIndex = if (shuffle) {
-                (queueIndex + offset) % queue.size
-            } else {
-                (queueIndex + offset) % queue.size
-            }
-            if (nextIndex in queue.indices) {
-                nextSongs.add(queue[nextIndex])
+            val nextIndex = (queueIndex + offset) % queue.size
+            if (nextIndex != queueIndex && nextIndex in queue.indices) {
+                val candidate = queue[nextIndex]
+                if (candidate.videoId != currentSong?.videoId && nextSongs.none { it.videoId == candidate.videoId }) {
+                    nextSongs.add(candidate)
+                }
             }
         }
         if (nextSongs.isEmpty()) return

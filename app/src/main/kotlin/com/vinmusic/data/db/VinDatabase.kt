@@ -213,6 +213,9 @@ interface DownloadDao {
 
     @Query("SELECT * FROM downloads WHERE status = :status ORDER BY downloadedAt ASC")
     suspend fun getByStatus(status: String): List<DownloadEntity>
+
+    @Query("UPDATE downloads SET progress = :progress, sizeBytes = :sizeBytes WHERE videoId = :id")
+    suspend fun updateProgress(id: String, progress: Int, sizeBytes: Long)
 }
 
 @Dao

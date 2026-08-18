@@ -233,10 +233,31 @@ fun MiniPlayer(
 
             // Song info
             Column(Modifier.weight(1f)) {
-                Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    fontSize = 14.sp, fontWeight = FontWeight.Bold, color = VinColors.Primary)
-                Text(song.author, maxLines = 1,
-                    fontSize = 12.sp, color = VinColors.Secondary)
+                Text(
+                    song.title,
+                    maxLines = 1,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = VinColors.Primary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            initialDelayMillis = 1500
+                        )
+                )
+                Text(
+                    song.author,
+                    maxLines = 1,
+                    fontSize = 12.sp,
+                    color = VinColors.Secondary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            initialDelayMillis = 2000
+                        )
+                )
             }
 
             Spacer(Modifier.width(4.dp))

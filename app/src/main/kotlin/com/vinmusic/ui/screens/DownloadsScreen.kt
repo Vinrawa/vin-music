@@ -59,9 +59,9 @@ fun DownloadsScreen(
         db.downloadDao().getAllFlow().collect { downloads = it }
     }
 
-    // Load cached songs from player cache + interaction signals
-    LaunchedEffect(cacheRefreshToken, selectedTab, downloads) {
-        isLoadingCached = true
+    // Load cached songs from player cache + interaction signals (stable, no jitter)
+    LaunchedEffect(cacheRefreshToken, selectedTab) {
+        if (cachedSongs.isEmpty()) isLoadingCached = true
         try {
             withContext(Dispatchers.IO) {
                 val downloadedIds = downloads.map { it.videoId }.toSet()
@@ -189,87 +189,125 @@ fun DownloadsScreen(
 
         // Offline storage and cleanup panel for Downloads (only show in Downloads tab)
         if (selectedTab == "Downloads") {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(VinColors.White10)
-                .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(16.dp))
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text("Offline Downloads", fontSize = 12.sp, color = VinColors.Secondary, fontWeight = FontWeight.Medium)
-                    Text(usedText, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = VinColors.Primary)
-                }
-
-                OutlinedButton(
-                    onClick = {
-                        scope.launch(Dispatchers.IO) {
-                            try {
-                                val downloadCache = com.vinmusic.player.PlayerSingleton.getDownloadCache(ctx)
-                                val allDownloads = db.downloadDao().getAllFlow().first()
-                                for (dl in allDownloads) {
-                                    val intent = android.content.Intent(ctx, com.vinmusic.download.DownloadService::class.java).apply {
-                                        action = com.vinmusic.download.DownloadService.ACTION_CANCEL
-                                        putExtra(com.vinmusic.download.DownloadService.EXTRA_VIDEO_ID, dl.videoId)
-                                    }
-                                    ctx.startService(intent)
-                                    downloadCache?.removeResource(dl.videoId)
-                                    try {
-                                        dl.thumbnailPath?.let { path ->
-                                            val file = java.io.File(path)
-                                            if (file.exists()) file.delete()
-                                        }
-                                    } catch (e: Exception) {}
-                                    db.downloadDao().delete(dl.videoId)
-                                    db.interactionSignalDao().updateDownloaded(dl.videoId, false)
-                                }
-                                withContext(Dispatchers.Main) {
-                                    android.widget.Toast.makeText(ctx, "All downloads deleted!", android.widget.Toast.LENGTH_SHORT).show()
-                                }
-                            } catch (e: Exception) {
-                                Log.e("Downloads", "Error deleting all", e)
-                            }
-                        }
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = VinColors.AccentLight),
-                    border = BorderStroke(1.dp, VinColors.GlassBorder),
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Icon(Icons.Default.DeleteForever, null, modifier = Modifier.size(14.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Delete All", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-
-            Box(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(6.dp)
-                    .clip(CircleShape)
+                    .padding(horizontal = 20.dp, vertical = 8.dp)
+                    .clip(RoundedCornerShape(16.dp))
                     .background(VinColors.White10)
+                    .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(16.dp))
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Offline Downloads", fontSize = 12.sp, color = VinColors.Secondary, fontWeight = FontWeight.Medium)
+                        Text(usedText, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = VinColors.Primary)
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val hasPending = downloads.any { it.status == "queued" || it.status == "failed" }
+                        if (hasPending) {
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        val pending = downloads.filter { it.status == "queued" || it.status == "failed" }
+                                        for (dl in pending) {
+                                            val intent = android.content.Intent(ctx, com.vinmusic.download.DownloadService::class.java).apply {
+                                                action = com.vinmusic.download.DownloadService.ACTION_ENQUEUE
+                                                putExtra(com.vinmusic.download.DownloadService.EXTRA_VIDEO_ID, dl.videoId)
+                                                putExtra(com.vinmusic.download.DownloadService.EXTRA_TITLE, dl.title)
+                                                putExtra(com.vinmusic.download.DownloadService.EXTRA_AUTHOR, dl.author)
+                                                putExtra(com.vinmusic.download.DownloadService.EXTRA_DURATION, dl.durationText)
+                                                putExtra(com.vinmusic.download.DownloadService.EXTRA_THUMBNAIL, dl.thumbnailUrl)
+                                            }
+                                            ctx.startService(intent)
+                                        }
+                                        withContext(Dispatchers.Main) {
+                                            android.widget.Toast.makeText(ctx, "Resuming ${pending.size} download(s)...", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = VinColors.Accent),
+                                border = BorderStroke(1.dp, VinColors.Accent.copy(alpha = 0.6f)),
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Default.Refresh, null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Resume All", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch(Dispatchers.IO) {
+                                    try {
+                                        val downloadCache = com.vinmusic.player.PlayerSingleton.getDownloadCache(ctx)
+                                        val allDownloads = db.downloadDao().getAllFlow().first()
+                                        for (dl in allDownloads) {
+                                            val intent = android.content.Intent(ctx, com.vinmusic.download.DownloadService::class.java).apply {
+                                                action = com.vinmusic.download.DownloadService.ACTION_CANCEL
+                                                putExtra(com.vinmusic.download.DownloadService.EXTRA_VIDEO_ID, dl.videoId)
+                                            }
+                                            ctx.startService(intent)
+                                            downloadCache?.removeResource(dl.videoId)
+                                            try {
+                                                dl.thumbnailPath?.let { path ->
+                                                    val file = java.io.File(path)
+                                                    if (file.exists()) file.delete()
+                                                }
+                                            } catch (e: Exception) {}
+                                            db.downloadDao().delete(dl.videoId)
+                                            db.interactionSignalDao().updateDownloaded(dl.videoId, false)
+                                        }
+                                        withContext(Dispatchers.Main) {
+                                            android.widget.Toast.makeText(ctx, "All downloads deleted!", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e("Downloads", "Error deleting all", e)
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = VinColors.AccentLight),
+                            border = BorderStroke(1.dp, VinColors.GlassBorder),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Default.DeleteForever, null, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Delete All", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
                 Box(
                     modifier = Modifier
-                        .fillMaxHeight()
-                        .fillMaxWidth(storageProgressFraction)
+                        .fillMaxWidth()
+                        .height(6.dp)
                         .clip(CircleShape)
-                        .background(
-                            androidx.compose.ui.graphics.Brush.horizontalGradient(
-                                colors = listOf(VinColors.Accent, VinColors.AccentLight)
+                        .background(VinColors.White10)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(storageProgressFraction)
+                            .clip(CircleShape)
+                            .background(
+                                androidx.compose.ui.graphics.Brush.horizontalGradient(
+                                    colors = listOf(VinColors.Accent, VinColors.AccentLight)
+                                )
                             )
-                        )
-                )
+                    )
+                }
             }
-        }
         } // end storage panel
 
         Spacer(Modifier.height(8.dp))
@@ -354,7 +392,7 @@ fun DownloadsScreen(
                             Text(dl.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 fontSize = 14.sp, fontWeight = FontWeight.Medium, color = VinColors.Primary)
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(dl.author, maxLines = 1, fontSize = 12.sp, color = VinColors.Secondary)
+                                Text(dl.author, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp, color = VinColors.Secondary)
                                 if (isCompleted && dl.sizeBytes > 0) {
                                     Text("• ${formatBytes(dl.sizeBytes)}", fontSize = 12.sp, color = VinColors.Secondary)
                                 } else if (isDownloading) {
@@ -484,7 +522,7 @@ fun DownloadsScreen(
                             Column(Modifier.weight(1f)) {
                                 Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     fontSize = 14.sp, fontWeight = FontWeight.Medium, color = VinColors.Primary)
-                                Text(song.author, maxLines = 1, fontSize = 12.sp, color = VinColors.Secondary)
+                                Text(song.author, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp, color = VinColors.Secondary)
                             }
 
                             // More options

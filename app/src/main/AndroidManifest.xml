@@ -42,8 +42,9 @@
         android:enableOnBackInvokedCallback="true">
 
         <!-- Sentry configuration -->
-        <meta-data android:name="io.sentry.dsn" android:value="https://placeholderPublicKey@o000000.ingest.sentry.io/0000000" />
+        <meta-data android:name="io.sentry.dsn" android:value="https://dce5ff50d6078bb679b24e33fb193549@o4511553421967360.ingest.us.sentry.io/4511553487437824" />
         <meta-data android:name="io.sentry.traces.sample-rate" android:value="1.0" />
+        <meta-data android:name="io.sentry.logs.enabled" android:value="true" />
 
         <activity
             android:name=".MainActivity"

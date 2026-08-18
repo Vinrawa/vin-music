@@ -349,11 +349,11 @@ class PlayerViewModel @Inject constructor(
         }
 
         // Start and Bind to VinMusicService so it lives as long as the app is alive
-        // Media3 will automatically promote it to foreground when playback starts
+        // Media3 MediaSessionService automatically promotes to foreground with notification when playback starts
         try {
             val ctx = getApplication<android.app.Application>()
             val intent = android.content.Intent(ctx, VinMusicService::class.java)
-            androidx.core.content.ContextCompat.startForegroundService(ctx, intent)
+            ctx.startService(intent)
             ctx.bindService(intent, object : android.content.ServiceConnection {
                 override fun onServiceConnected(name: android.content.ComponentName?, service: android.os.IBinder?) {}
                 override fun onServiceDisconnected(name: android.content.ComponentName?) {}
@@ -419,7 +419,11 @@ class PlayerViewModel @Inject constructor(
         
         radioJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                // FAST PATH: Direct radio playlist (~2 seconds)
+                // Give primary song resolution 100% network bandwidth first before loading radio queue
+                delay(600)
+                if (!isActive) return@launch
+
+                // FAST PATH: Direct radio playlist
                 Log.d(TAG, "playSongWithRadio: fetching instant radio for ${song.videoId}")
                 val radioTracks = InnerTube.getWatchNextRadio(song.videoId)
                 Log.d(TAG, "playSongWithRadio: instant radio returned ${radioTracks.size} tracks")

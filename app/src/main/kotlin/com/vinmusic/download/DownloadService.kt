@@ -168,205 +168,156 @@ class DownloadService : Service() {
 
         val job = serviceScope.launch(Dispatchers.IO) {
             val db = VinDatabase.getInstance(applicationContext)
+            var downloadingEntity = entity.copy(status = "downloading", progress = 0)
 
-            Log.d(TAG, "Fetching stream URL for download: $videoId")
-            ReliabilityDiagnostics.record("download", "start", videoId, status = "started")
-            val prefs = applicationContext.getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
-            val quality = prefs.getString("download_quality", "High (256 kbps)")
-            fun resolveDownloadUrl(): String? {
-                repeat(2) { attempt ->
-                    ReliabilityDiagnostics.record("download", "resolve_attempt", videoId, attempt = attempt + 1, status = "started")
-                    val resolved = InnerTube.getStreamUrl(videoId, quality)
-                    ReliabilityDiagnostics.record("download", "resolve_attempt", videoId, attempt = attempt + 1, status = if (resolved.isNullOrBlank()) "empty" else "ok")
-                    if (!resolved.isNullOrBlank()) return resolved
-                    if (attempt == 0) Thread.sleep(350)
+            try {
+                // Check if device is offline before trying network
+                val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+                @Suppress("DEPRECATION")
+                val isOnline = cm?.activeNetworkInfo?.isConnected == true
+                if (!isOnline) {
+                    Log.w(TAG, "Device is offline. Keeping download queued: $videoId")
+                    db.downloadDao().insert(entity.copy(status = "queued"))
+                    return@launch
                 }
-                return null
-            }
-            val url = resolveDownloadUrl()
-            if (url == null) {
-                Log.e(TAG, "Failed to fetch stream URL for download: $videoId")
-                ReliabilityDiagnostics.record("download", "resolve_end", videoId, status = "failed", error = "stream_url_null", details = InnerTube.lastDebugMsg)
-                db.downloadDao().insert(entity.copy(status = "failed"))
+
+                Log.d(TAG, "Fetching stream URL for download: $videoId")
+                ReliabilityDiagnostics.record("download", "start", videoId, status = "started")
+                val prefs = applicationContext.getSharedPreferences("vin_music_prefs", Context.MODE_PRIVATE)
+                val quality = prefs.getString("download_quality", "High (256 kbps)")
+                fun resolveDownloadUrl(): String? {
+                    repeat(2) { attempt ->
+                        ReliabilityDiagnostics.record("download", "resolve_attempt", videoId, attempt = attempt + 1, status = "started")
+                        val resolved = InnerTube.getStreamUrl(videoId, quality)
+                        ReliabilityDiagnostics.record("download", "resolve_attempt", videoId, attempt = attempt + 1, status = if (resolved.isNullOrBlank()) "empty" else "ok")
+                        if (!resolved.isNullOrBlank()) return resolved
+                        if (attempt == 0) Thread.sleep(350)
+                    }
+                    return null
+                }
+                val url = resolveDownloadUrl()
+                if (url == null) {
+                    Log.e(TAG, "Failed to fetch stream URL for download: $videoId")
+                    ReliabilityDiagnostics.record("download", "resolve_end", videoId, status = "failed", error = "stream_url_null", details = InnerTube.lastDebugMsg)
+                    db.downloadDao().insert(entity.copy(status = "failed"))
+                    return@launch
+                }
+
+                // Start thumbnail download in parallel (non-blocking)
+                val thumbDeferred = async(Dispatchers.IO) {
+                    var thumbnailPath: String? = null
+                    val tUrl = entity.thumbnailUrl
+                    try {
+                        if (tUrl != null) {
+                            thumbnailPath = downloadThumbnail(videoId, tUrl)
+                        }
+                        if (thumbnailPath == null) {
+                            thumbnailPath = downloadThumbnail(videoId, "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg")
+                        }
+                        if (thumbnailPath == null) {
+                            thumbnailPath = downloadThumbnail(videoId, "https://i.ytimg.com/vi/$videoId/hqdefault.jpg")
+                        }
+                        Log.d(TAG, "Thumbnail downloaded for $videoId: $thumbnailPath")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to download thumbnail for $videoId: ${e.message}")
+                    }
+                    thumbnailPath
+                }
+                
+                downloadingEntity = entity.copy(status = "downloading", progress = 0, filePath = url)
+                db.downloadDao().insert(downloadingEntity)
                 updateNotification()
-                checkQueue()
-                return@launch
-            }
 
-            // Create a copying entity storing the stream url in filePath
-            var thumbnailPath: String? = null
-            val tUrl = entity.thumbnailUrl
-            try {
-                // Prioritize the provided thumbnail URL (which is usually the square YouTube Music album art)
-                if (tUrl != null) {
-                    thumbnailPath = downloadThumbnail(videoId, tUrl)
-                }
-                // Fallback to YouTube video thumbnails (maxres → hq)
-                if (thumbnailPath == null) {
-                    thumbnailPath = downloadThumbnail(videoId, "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg")
-                }
-                if (thumbnailPath == null) {
-                    thumbnailPath = downloadThumbnail(videoId, "https://i.ytimg.com/vi/$videoId/hqdefault.jpg")
-                }
-                Log.d(TAG, "Thumbnail downloaded for $videoId: $thumbnailPath")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to download thumbnail for $videoId: ${e.message}")
-                // Continue with download even if thumbnail fails
-            }
-            
-            val downloadingEntity = entity.copy(status = "downloading", progress = 0, filePath = url, thumbnailPath = thumbnailPath)
-            db.downloadDao().insert(downloadingEntity)
-            updateNotification()
-
-            try {
                 val cache = PlayerSingleton.getDownloadCache(applicationContext)
                 if (cache == null) {
                     Log.e(TAG, "SimpleCache not available for download: $videoId")
                     db.downloadDao().insert(downloadingEntity.copy(status = "failed"))
-                    updateNotification()
-                    checkQueue()
                     return@launch
                 }
-
-                val resolvedUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                val requestProps = buildMap<String, String> {
-                    put("Origin", "https://www.youtube.com")
-                    put("Referer", "https://www.youtube.com/")
-                    put("Accept-Encoding", "identity")
-                    put("Range", "bytes=0-")
-                }
-
-                val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-                    .setUserAgent(resolvedUa)
-                    .setConnectTimeoutMs(30_000)
-                    .setReadTimeoutMs(30_000)
-                    .setAllowCrossProtocolRedirects(true)
-                    .setDefaultRequestProperties(requestProps)
-
-                val cacheDataSource = CacheDataSource.Factory()
-                    .setCache(cache)
-                    .setUpstreamDataSourceFactory(httpDataSourceFactory)
-                    .createDataSource()
 
                 var activeUrl = url
                 var uriParsed = android.net.Uri.parse(activeUrl)
                 val clenStr = uriParsed.getQueryParameter("clen")
-                val contentLength = clenStr?.toLongOrNull() ?: -1L
+                val totalLength = clenStr?.toLongOrNull() ?: -1L
 
-                var totalLength = contentLength
-                if (totalLength <= 0) {
-                    try {
-                        val spec = DataSpec.Builder()
-                            .setUri(uriParsed)
-                            .setKey(videoId)
-                            .build()
-                        totalLength = cacheDataSource.open(spec)
-                        cacheDataSource.close()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to resolve content length: ${e.message}")
-                        totalLength = -1L
-                    }
-                }
+                Log.d(TAG, "Starting high-speed single stream download for: $videoId. clen: $totalLength")
 
-                Log.d(TAG, "Starting chunked download for: $videoId. clen: $totalLength. url: ${url.take(120)}")
+                var streamCached = false
+                var lastError: Exception? = null
 
-                val chunkSize = 1024 * 1024L // 1MB chunks
-                var bytesCached = 0L
+                repeat(2) { attempt ->
+                    if (streamCached) return@repeat
 
-                if (totalLength <= 0L) {
-                    var streamCached = false
-                    var lastError: Exception? = null
-                    repeat(2) { attempt ->
-                        if (streamCached) return@repeat
-                        val streamSpec = DataSpec.Builder()
-                            .setUri(uriParsed)
-                            .setKey(videoId)
-                            .setLength(-1L)
-                            .build()
-                        val streamWriter = CacheWriter(
-                            cacheDataSource,
-                            streamSpec,
-                            ByteArray(128 * 1024),
-                            null
-                        )
-                        try {
-                            db.downloadDao().insert(downloadingEntity.copy(progress = 10))
-                            updateNotification()
-                            streamWriter.cache()
-                            streamCached = true
-                        } catch (e: Exception) {
-                            lastError = e
-                            Log.e(TAG, "Error caching unknown-length stream attempt ${attempt + 1}: ${e.message}")
-                            ReliabilityDiagnostics.record("download", "cache", videoId, attempt = attempt + 1, status = "failed", httpCode = (e as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode, error = e.javaClass.simpleName, details = e.message)
-                            val refreshed = resolveDownloadUrl()
-                            if (!refreshed.isNullOrBlank()) {
-                                activeUrl = refreshed
-                                uriParsed = android.net.Uri.parse(activeUrl)
-                            }
-                        }
-                    }
-                    if (!streamCached) {
-                        throw lastError ?: IllegalStateException("Failed to cache unknown-length stream")
-                    }
-                    bytesCached = cache.getCachedBytes(videoId, 0, -1).coerceAtLeast(0L)
-                    db.downloadDao().insert(downloadingEntity.copy(progress = 95, sizeBytes = bytesCached))
-                    updateNotification()
-                }
-
-                while (totalLength > 0L && bytesCached < totalLength) {
-                    yield() // Check for coroutine cancellation gracefully
-
-                    val chunkEnd = minOf(bytesCached + chunkSize, totalLength)
-                    val chunkLength = chunkEnd - bytesCached
-
-                    var chunkCached = false
-                    var lastError: Exception? = null
-                    repeat(2) { attempt ->
-                        if (chunkCached) return@repeat
-                        val chunkDataSpec = DataSpec.Builder()
-                            .setUri(uriParsed)
-                            .setKey(videoId)
-                            .setPosition(bytesCached)
-                            .setLength(chunkLength)
-                            .build()
-
-                        val chunkWriter = CacheWriter(
-                            cacheDataSource,
-                            chunkDataSpec,
-                            ByteArray(128 * 1024),
-                            null
-                        )
-
-                        try {
-                            chunkWriter.cache()
-                            chunkCached = true
-                        } catch (e: Exception) {
-                            lastError = e
-                            Log.e(TAG, "Error caching chunk starting at $bytesCached attempt ${attempt + 1}: ${e.message}")
-                            ReliabilityDiagnostics.record("download", "chunk", videoId, attempt = attempt + 1, status = "failed", httpCode = (e as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode, error = e.javaClass.simpleName, details = "offset=$bytesCached ${e.message}")
-                            val refreshed = resolveDownloadUrl()
-                            if (!refreshed.isNullOrBlank()) {
-                                activeUrl = refreshed
-                                uriParsed = android.net.Uri.parse(activeUrl)
-                            }
-                        }
-                    }
-                    if (!chunkCached) {
-                        throw lastError ?: IllegalStateException("Failed to cache chunk at $bytesCached")
-                    }
-
-                    bytesCached = chunkEnd
-                    val pct = if (totalLength > 0) (bytesCached * 100 / totalLength).toInt().coerceIn(0, 100) else 0
-
-                    db.downloadDao().insert(
-                        downloadingEntity.copy(
-                            progress = pct,
-                            sizeBytes = bytesCached
-                        )
+                    val safeUrl = activeUrl ?: ""
+                    val resolvedUa = InnerTube.getUserAgentForUrl(safeUrl)
+                    val isNativeClient = safeUrl.contains("c=IOS") || safeUrl.contains("c=ANDROID")
+                    val requestProps = mutableMapOf(
+                        "Accept-Encoding" to "identity"
                     )
-                    updateNotification()
+                    if (!isNativeClient) {
+                        requestProps["Origin"] = "https://www.youtube.com"
+                        requestProps["Referer"] = "https://www.youtube.com/"
+                    }
+
+                    val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+                        .setUserAgent(resolvedUa)
+                        .setConnectTimeoutMs(15_000)
+                        .setReadTimeoutMs(20_000)
+                        .setAllowCrossProtocolRedirects(true)
+                        .setDefaultRequestProperties(requestProps)
+
+                    val cacheDataSource = CacheDataSource.Factory()
+                        .setCache(cache)
+                        .setUpstreamDataSourceFactory(httpDataSourceFactory)
+                        .createDataSource()
+
+                    val streamSpec = DataSpec.Builder()
+                        .setUri(uriParsed)
+                        .setKey(videoId)
+                        .setLength(if (totalLength > 0) totalLength else -1L)
+                        .build()
+
+                    var lastDbUpdateMs = 0L
+                    var lastPct = 0
+
+                    val streamWriter = CacheWriter(
+                        cacheDataSource,
+                        streamSpec,
+                        ByteArray(256 * 1024), // 256KB buffer for maximum throughput
+                        CacheWriter.ProgressListener { requestLength, bytesCachedNow, _ ->
+                            val effectiveLength = if (totalLength > 0) totalLength else requestLength
+                            val pct = if (effectiveLength > 0) ((bytesCachedNow * 100) / effectiveLength).toInt().coerceIn(0, 99) else 50
+                            val now = System.currentTimeMillis()
+                            if (pct != lastPct && (pct % 5 == 0 || now - lastDbUpdateMs > 300)) {
+                                lastPct = pct
+                                lastDbUpdateMs = now
+                                serviceScope.launch(Dispatchers.IO) {
+                                    db.downloadDao().updateProgress(videoId, pct, bytesCachedNow)
+                                }
+                            }
+                        }
+                    )
+
+                    try {
+                        streamWriter.cache()
+                        streamCached = true
+                    } catch (e: Exception) {
+                        lastError = e
+                        Log.e(TAG, "Error caching stream attempt ${attempt + 1}: ${e.message}")
+                        ReliabilityDiagnostics.record("download", "cache", videoId, attempt = attempt + 1, status = "failed", httpCode = (e as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode, error = e.javaClass.simpleName, details = e.message)
+                        val refreshed = resolveDownloadUrl()
+                        if (!refreshed.isNullOrBlank()) {
+                            activeUrl = refreshed
+                            uriParsed = android.net.Uri.parse(activeUrl)
+                        }
+                    }
                 }
 
+                if (!streamCached) {
+                    throw lastError ?: IllegalStateException("Failed to download audio stream")
+                }
+
+                val finalThumbnailPath = thumbDeferred.await()
                 val finalCachedBytes = cache.getCachedBytes(videoId, 0, -1)
 
                 // Verify download is actually complete before marking as done
@@ -375,7 +326,7 @@ class DownloadService : Service() {
                     db.downloadDao().insert(downloadingEntity.copy(status = "failed", progress = 0))
                     return@launch
                 }
-                if (totalLength > 0L && finalCachedBytes < (totalLength * 0.99).toLong()) {
+                if (totalLength > 0L && finalCachedBytes < (totalLength * 0.95).toLong()) {
                     Log.e(TAG, "Download verification failed: $videoId cached $finalCachedBytes of expected $totalLength bytes (${(finalCachedBytes * 100 / totalLength)}%)")
                     db.downloadDao().insert(downloadingEntity.copy(status = "failed", progress = 0, sizeBytes = finalCachedBytes))
                     return@launch
@@ -389,7 +340,7 @@ class DownloadService : Service() {
                                 status = "completed",
                                 progress = 100,
                                 sizeBytes = finalCachedBytes,
-                                thumbnailPath = downloadingEntity.thumbnailPath  // Preserve thumbnail path
+                                thumbnailPath = finalThumbnailPath
                             )
                         )
                         // Update interaction signal for downloaded status
@@ -449,7 +400,7 @@ class DownloadService : Service() {
                     Log.e(TAG, "Failed to cache artist banner: ${e.message}")
                 }
 
-                Log.d(TAG, "Download finished successfully: $videoId. Total cached bytes stored: $finalCachedBytes. Expected content length: $contentLength")
+                Log.d(TAG, "Download finished successfully: $videoId. Total cached bytes stored: $finalCachedBytes. Expected content length: $totalLength")
                 ReliabilityDiagnostics.record("download", "complete", videoId, status = "ok", details = "bytes=$finalCachedBytes")
 
             } catch (e: CancellationException) {

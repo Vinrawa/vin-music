@@ -68,17 +68,21 @@ object PlayerCacheManager {
         val isDownloadCacheValid = !healed && isDownloadCompleted && dlCacheBytes > 100_000L
         val pCache = PlayerSingleton.getCache(ctx)
         val pCacheBytes = pCache?.getCachedBytes(videoId, 0, -1) ?: 0L
-        val isPlayerCached = pCacheBytes > 1_000_000L
+        val isPlayerCached = pCacheBytes > 500_000L
         val playerContentLength = pCache?.getContentMetadata(videoId)
             ?.get(ContentMetadata.KEY_CONTENT_LENGTH, -1L) ?: -1L
-        // Prefetch stores only 2.5MB. Do not mistake that partial range for a
-        // complete offline track; otherwise offline playback stops early and
-        // the network fallback is skipped.
-        val isPlayerCacheComplete = playerContentLength > 0L &&
-            pCacheBytes >= (playerContentLength * 0.99).toLong()
+        val onlineState = isOnline(ctx)
+
+        // If content length is known, verify >= 95% is cached.
+        // If content length is -1L (common in YouTube chunked streams), consider complete if pCacheBytes >= 1.2MB.
+        // When device is offline, allow playing from cache if pCacheBytes > 500KB so user can listen offline seamlessly!
+        val isPlayerCacheComplete = when {
+            playerContentLength > 0L -> pCacheBytes >= (playerContentLength * 0.95).toLong()
+            !onlineState -> pCacheBytes > 500_000L
+            else -> pCacheBytes >= 1_200_000L
+        }
         val isCachedComplete = isDownloadCacheValid || isPlayerCacheComplete
         val totalCachedBytes = if (isDownloadCacheValid) dlCacheBytes else if (isPlayerCacheComplete) pCacheBytes else 0L
-        val onlineState = isOnline(ctx)
 
         CacheCheckResult(
             isDownloadCacheValid = isDownloadCacheValid,

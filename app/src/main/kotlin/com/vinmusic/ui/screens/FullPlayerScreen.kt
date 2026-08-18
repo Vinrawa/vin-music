@@ -17,6 +17,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -772,11 +773,16 @@ fun FullPlayerScreen(
                 Text(
                     text = song.title,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                     fontSize = 24.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = VinColors.Primary,
-                    textAlign = TextAlign.Center
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            initialDelayMillis = 1500
+                        )
                 )
                 val primaryArtist = remember(song.author) { parseContributors(song.author).firstOrNull() ?: song.author }
                 Text(
@@ -789,6 +795,11 @@ fun FullPlayerScreen(
                         .clip(RoundedCornerShape(4.dp))
                         .clickable { onArtistNameClick(primaryArtist) }
                         .padding(horizontal = 8.dp, vertical = 2.dp)
+                        .fillMaxWidth()
+                        .basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            initialDelayMillis = 2000
+                        )
                 )
             }
 

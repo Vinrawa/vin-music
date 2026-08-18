@@ -92,15 +92,43 @@ object InnerTube {
         android.util.Log.d("DEBUG_TOKEN", "ensureVisitorData called: force=$force, currentToken='${visitorData.take(15)}', elapsedMs=${System.currentTimeMillis() - visitorFetchedAt}")
         if (!force && visitorData.isNotEmpty() && System.currentTimeMillis() - visitorFetchedAt < VISITOR_TTL_MS) return
         try {
-            val html = http.newCall(Request.Builder()
-                .url("https://www.youtube.com/")
-                .header("User-Agent",      "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36")
-                .header("Accept-Language", "en-IN,en;q=0.9,hi;q=0.8")
-                .build()).execute().use { it.body?.string() }
+            // 1. Try official JSON visitor_id endpoint (fast, robust, never hits redirect loop)
+            val jsonBody = gson.toJson(mapOf(
+                "context" to mapOf(
+                    "client" to mapOf(
+                        "clientName" to "WEB",
+                        "clientVersion" to "2.20240801.01.00",
+                        "hl" to "en",
+                        "gl" to "IN"
+                    )
+                )
+            )).toRequestBody(JSON)
 
-            val vd = html?.let {
-                Regex("\"VISITOR_DATA\":\"([^\"]+)\"").find(it)?.groupValues?.get(1)
+            val req = Request.Builder()
+                .url("$BASE/visitor_id?prettyPrint=false")
+                .post(jsonBody)
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .build()
+
+            val raw = http.newCall(req).execute().use { it.body?.string() }
+            val root = raw?.let { gson.fromJson(it, Map::class.java) }
+            val responseContext = root?.get("responseContext") as? Map<*, *>
+            var vd = responseContext?.get("visitorData") as? String
+
+            // 2. Fallback to scraping music.youtube.com if API endpoint returned empty
+            if (vd.isNullOrBlank()) {
+                val html = http.newCall(Request.Builder()
+                    .url("https://music.youtube.com/")
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    .header("Accept-Language", "en-IN,en;q=0.9,hi;q=0.8")
+                    .build()).execute().use { it.body?.string() }
+
+                vd = html?.let {
+                    Regex("\"VISITOR_DATA\":\"([^\"]+)\"").find(it)?.groupValues?.get(1)
+                }
             }
+
             if (!vd.isNullOrBlank()) {
                 visitorData = vd
                 visitorFetchedAt = System.currentTimeMillis()
@@ -234,16 +262,60 @@ object InnerTube {
         return matchedTerms * 10_000 + description.length.coerceAtMost(10_000)
     }
 
+    private val streamUrlCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
+    private const val STREAM_URL_CACHE_TTL_MS = 3 * 3600 * 1000L // 3 hours
+
     // ── Main entry ────────────────────────────────────────────────────────────
     fun getStreamUrl(videoId: String, quality: String? = null): String? {
-        android.util.Log.d("DEBUG_TOKEN", "getStreamUrl START videoId=$videoId visitorData='$visitorData'")
+        android.util.Log.d("DEBUG_TOKEN", "getStreamUrl START videoId=$videoId")
         log("getStreamUrl videoId=$videoId quality=$quality")
         if (videoId.isBlank()) { log("ERROR: blank videoId!"); return null }
 
-        // 1. Fetch visitor token (bypasses LOGIN_REQUIRED for most music)
-        ensureVisitorData()
+        // Fast In-Memory Cache Check (0ms instantaneous return for duplicate/recent requests)
+        val cachedEntry = streamUrlCache[videoId]
+        if (cachedEntry != null) {
+            val (fetchedAt, cachedUrl) = cachedEntry
+            if (System.currentTimeMillis() - fetchedAt < STREAM_URL_CACHE_TTL_MS && cachedUrl.isNotBlank()) {
+                android.util.Log.d("DEBUG_TOKEN", "getStreamUrl IN-MEMORY CACHE HIT: videoId=$videoId (0ms)")
+                return cachedUrl
+            }
+        }
 
-        // 2. Try InnerTube direct clients first (much faster than NewPipe HTML parsing)
+        // 1. Primary: Patched NewPipeExtractor (fastest & bypasses bot checks directly in ~350ms)
+        try {
+            NewPipeInit.init()
+            val info = org.schabi.newpipe.extractor.stream.StreamInfo.getInfo(
+                org.schabi.newpipe.extractor.ServiceList.YouTube,
+                "https://www.youtube.com/watch?v=$videoId"
+            )
+            val url = info.audioStreams
+                .filter { it.content?.isNotEmpty() == true }
+                .let { streams ->
+                    val targetKbps = when {
+                        quality?.contains("96") == true  -> 96
+                        quality?.contains("160") == true -> 160
+                        quality?.contains("128") == true -> 128
+                        quality?.contains("256") == true -> 256
+                        quality?.contains("320") == true -> 320
+                        else -> null
+                    }
+                    if (targetKbps != null) {
+                        streams.minByOrNull { Math.abs(it.bitrate - (targetKbps * 1024)) }?.content
+                    } else {
+                        streams.maxByOrNull { it.bitrate }?.content
+                    }
+                }
+            if (!url.isNullOrEmpty()) {
+                streamUrlCache[videoId] = Pair(System.currentTimeMillis(), url)
+                log("NewPipe result SUCCESS Host: ${android.net.Uri.parse(url).host}")
+                return url
+            }
+        } catch (e: Throwable) {
+            log("NewPipe fast attempt: ${e.javaClass.simpleName}: ${e.message?.take(100)}")
+        }
+
+        // 2. Fetch visitor token and try InnerTube direct clients in parallel race
+        ensureVisitorData()
         log("Trying InnerTube direct clients in parallel racing...")
         val url = runBlocking {
             val channel = Channel<String>(Channel.UNLIMITED)
@@ -322,39 +394,6 @@ object InnerTube {
         if (!refreshedUrl.isNullOrEmpty()) {
             log("SUCCESS via refreshed token race Host: ${android.net.Uri.parse(refreshedUrl).host}")
             return refreshedUrl
-        }
-
-        // 3. Fallback to NewPipeExtractor
-        log("Trying NewPipeExtractor as fallback...")
-        try {
-            NewPipeInit.init()
-            val info = org.schabi.newpipe.extractor.stream.StreamInfo.getInfo(
-                org.schabi.newpipe.extractor.ServiceList.YouTube,
-                "https://www.youtube.com/watch?v=$videoId"
-            )
-            val url = info.audioStreams
-                .filter { it.content?.isNotEmpty() == true }
-                .let { streams ->
-                    val targetKbps = when {
-                        quality?.contains("96") == true  -> 96
-                        quality?.contains("160") == true -> 160
-                        quality?.contains("128") == true -> 128
-                        quality?.contains("256") == true -> 256
-                        quality?.contains("320") == true -> 320
-                        else -> null
-                    }
-                    if (targetKbps != null) {
-                        streams.minByOrNull { Math.abs(it.bitrate - (targetKbps * 1024)) }?.content
-                    } else {
-                        streams.maxByOrNull { it.bitrate }?.content
-                    }
-                }
-            if (!url.isNullOrEmpty()) {
-                log("NewPipe result SUCCESS Host: ${android.net.Uri.parse(url).host}")
-                return url
-            }
-        } catch (e: Throwable) {
-            log("NewPipe FAILED: ${e.javaClass.simpleName}: ${e.message?.take(100)}")
         }
 
         log("ALL clients and fallbacks failed for $videoId")

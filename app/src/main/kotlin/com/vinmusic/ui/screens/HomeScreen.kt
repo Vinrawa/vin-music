@@ -739,7 +739,7 @@ fun HomeScreen(
         onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
-    LaunchedEffect(recentlyPlayed) {
+    LaunchedEffect(recentlyPlayed.firstOrNull()?.videoId) {
         val lastSong = recentlyPlayed.firstOrNull()
         if (lastSong != null && lastSong.videoId != lastRadioSeedId) {
             lastRadioSeedId = lastSong.videoId

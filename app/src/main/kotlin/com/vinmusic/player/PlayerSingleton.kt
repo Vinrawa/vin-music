@@ -688,13 +688,14 @@ object PlayerSingleton {
                 }
 
                 // 1. Cache-First Instant Playback (0ms latency)
-                // If song is fully downloaded OR already cached in PlayerCache, play it instantly from local disk without hitting YouTube network!
+                // If song is fully downloaded offline OR device is offline with player cache, play direct from disk.
+                // For online streaming with cached bytes, ExoPlayer's CacheDataSource reads cached bytes in 0ms and streams the rest.
                 if (isDownloadCacheValid) {
                     Log.d(TAG, "Playing fully downloaded song instantly from local cache: videoId=${song.videoId}")
                     url = "https://music.youtube.com/cache/${song.videoId}"
                     onlineAndCached = false
-                } else if (isCachedComplete) {
-                    Log.d(TAG, "Playing fully cached song instantly from PlayerCache: videoId=${song.videoId}")
+                } else if (!isDeviceOnline && isPlayerCached) {
+                    Log.d(TAG, "Device offline: Playing cached bytes from PlayerCache: videoId=${song.videoId}")
                     url = "https://music.youtube.com/cache/${song.videoId}"
                     onlineAndCached = false
                 } else {

@@ -188,7 +188,7 @@ object PlayerCacheManager {
                             val dataSpec = androidx.media3.datasource.DataSpec.Builder()
                                 .setUri(android.net.Uri.parse(streamUrl))
                                 .setPosition(0)
-                                .setLength(2_500_000L)
+                                .setLength(12_000_000L)
                                 .setKey(nextSong.videoId)
                                 .build()
                             androidx.media3.datasource.cache.CacheWriter(cacheDataSource, dataSpec, null, null).cache()

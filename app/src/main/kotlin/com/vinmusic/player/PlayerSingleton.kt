@@ -687,10 +687,13 @@ object PlayerSingleton {
                     }
                 }
 
-                // 1. Cache-First Instant Playback (0ms latency)
-                // If song is fully downloaded offline OR device is offline with player cache, play direct from disk.
-                // For online streaming with cached bytes, ExoPlayer's CacheDataSource reads cached bytes in 0ms and streams the rest.
-                if (isDownloadCacheValid) {
+                // 0. Local Device Audio (0ms instant playback via ContentResolver)
+                if (song.localUriString != null || song.videoId.startsWith("local_") || song.videoId.startsWith("content://") || song.videoId.startsWith("file://")) {
+                    val localUri = song.localUriString ?: if (song.videoId.startsWith("local_")) song.videoId.removePrefix("local_") else song.videoId
+                    Log.d(TAG, "Playing local device audio track directly: $localUri")
+                    url = localUri
+                    onlineAndCached = false
+                } else if (isDownloadCacheValid) {
                     Log.d(TAG, "Playing fully downloaded song instantly from local cache: videoId=${song.videoId}")
                     url = "https://music.youtube.com/cache/${song.videoId}"
                     onlineAndCached = false
@@ -780,7 +783,12 @@ object PlayerSingleton {
                     
                     // ALWAYS use custom MediaSource with dynamic UA factory to match the client that generated the stream URL
         val dynamicHttpFactory = createDynamicHttpDataSourceFactory()
-        val mediaSource: androidx.media3.exoplayer.source.MediaSource = if (isCachedComplete) {
+        val mediaSource: androidx.media3.exoplayer.source.MediaSource = if (url.startsWith("content://") || url.startsWith("file://")) {
+            Log.d(TAG, "Playing local media content URI with DefaultDataSource: $url")
+            val defaultFactory = androidx.media3.datasource.DefaultDataSource.Factory(ctx)
+            androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(defaultFactory)
+                .createMediaSource(mediaItem)
+        } else if (isCachedComplete) {
             val cache = resolvedCache
             if (cache != null) {
                 if (onlineAndCached) {

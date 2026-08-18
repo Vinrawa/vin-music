@@ -2941,11 +2941,15 @@ object InnerTube {
 }
 
 data class VideoItem(
-    val videoId: String, val title: String,
-    val author: String, val durationText: String = ""
+    val videoId: String,
+    val title: String,
+    val author: String,
+    val durationText: String = "",
+    val customThumbnailUrl: String? = null,
+    val localUriString: String? = null
 ) {
-    val thumbnail:   String get() = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
-    val thumbnailHd: String get() = "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg"
+    val thumbnail:   String get() = customThumbnailUrl ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+    val thumbnailHd: String get() = customThumbnailUrl ?: "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg"
 }
 
 data class ArtistItem(

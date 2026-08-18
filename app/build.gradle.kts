@@ -26,8 +26,8 @@ android {
         applicationId   = "com.vinmusic"
         minSdk          = 26
         targetSdk       = 35
-        versionCode     = 16
-        versionName     = "2.2.0"
+        versionCode     = 17
+        versionName     = "2.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

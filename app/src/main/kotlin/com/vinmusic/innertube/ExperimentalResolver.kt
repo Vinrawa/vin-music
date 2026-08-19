@@ -18,6 +18,20 @@ object ExperimentalResolver {
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .followRedirects(true)
+        .addInterceptor { chain ->
+            val req = chain.request()
+            val existing = req.header("Cookie")
+            val missing = mutableListOf<String>()
+            if (existing.isNullOrBlank() || !existing.contains("SOCS=")) missing.add("SOCS=CAI")
+            if (existing.isNullOrBlank() || !existing.contains("CONSENT=")) missing.add("CONSENT=YES+1")
+
+            val finalCookie = when {
+                existing.isNullOrBlank() -> missing.joinToString("; ")
+                missing.isNotEmpty() -> "$existing; ${missing.joinToString("; ")}"
+                else -> existing
+            }
+            chain.proceed(req.newBuilder().header("Cookie", finalCookie).build())
+        }
         .build()
 
     fun getStreamUrl(videoId: String, quality: String? = null): String? {

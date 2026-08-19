@@ -43,9 +43,22 @@ object NewPipeInit {
             .readTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)
             .addInterceptor { chain ->
-                chain.proceed(chain.request().newBuilder()
+                val req = chain.request()
+                val existing = req.header("Cookie")
+                val missing = mutableListOf<String>()
+                if (existing.isNullOrBlank() || !existing.contains("SOCS=")) missing.add("SOCS=CAI")
+                if (existing.isNullOrBlank() || !existing.contains("CONSENT=")) missing.add("CONSENT=YES+1")
+
+                val finalCookie = when {
+                    existing.isNullOrBlank() -> missing.joinToString("; ")
+                    missing.isNotEmpty() -> "$existing; ${missing.joinToString("; ")}"
+                    else -> existing
+                }
+
+                val newReq = req.newBuilder()
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0")
-                    .build())
+                    .header("Cookie", finalCookie)
+                chain.proceed(newReq.build())
             }
             .build()
 

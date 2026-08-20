@@ -173,15 +173,19 @@ class FirebaseSyncManager @Inject constructor(
                         PlaylistEntity(name = name, createdAt = createdAt)
                     )
                 }
-                val resolvedPlaylistId = playlistId ?: return@forEach
+                val resolvedPlaylistId = playlistId
+                // Add songs to the playlist with deduplication
+                val existingSongsInPlaylist = db.playlistDao().getAllPlaylistSongs().filter { it.playlistId == resolvedPlaylistId }
+                val existingVideoIds = existingSongsInPlaylist.map { it.videoId }.toSet()
+                var currentMaxPos = existingSongsInPlaylist.maxOfOrNull { it.position } ?: -1
 
-                // Add songs to the playlist
-                val songsToInsert = songs.map { songMap ->
+                val songsToInsert = songs.mapNotNull { songMap ->
                     val videoId = songMap["videoId"] as? String ?: ""
+                    if (videoId.isBlank() || existingVideoIds.contains(videoId)) return@mapNotNull null
                     val title = songMap["title"] as? String ?: ""
                     val author = songMap["author"] as? String ?: ""
                     val durationText = songMap["durationText"] as? String ?: ""
-                    val position = (songMap["position"] as? Number)?.toInt() ?: 0
+                    currentMaxPos++
 
                     PlaylistSongEntity(
                         playlistId = resolvedPlaylistId,
@@ -189,7 +193,7 @@ class FirebaseSyncManager @Inject constructor(
                         title = title,
                         author = author,
                         durationText = durationText,
-                        position = position
+                        position = currentMaxPos
                     )
                 }
                 if (songsToInsert.isNotEmpty()) {

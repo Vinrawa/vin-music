@@ -30,6 +30,9 @@ import com.vinmusic.innertube.ArtistItem
 import com.vinmusic.player.PlayerViewModel
 import com.vinmusic.ui.components.SongListItem
 import com.vinmusic.ui.theme.VinColors
+import com.vinmusic.ui.theme.Vin
+import com.vinmusic.ui.theme.glassCard
+import com.vinmusic.ui.theme.shimmerEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1074,12 +1077,12 @@ fun LibraryScreen(
 private fun LibraryHeader(subtitle: String, onPlayAll: () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text(subtitle, color = VinColors.Secondary, fontSize = 13.sp)
+        Text(subtitle, style = Vin.Text.cardSubtitle)
         Button(onClick = onPlayAll, colors = ButtonDefaults.buttonColors(containerColor = VinColors.Accent),
             shape = RoundedCornerShape(12.dp)) {
             Icon(Icons.Default.PlayArrow, null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(4.dp))
-            Text("Play All")
+            Text("Play All", style = Vin.Text.button)
         }
     }
 }
@@ -1093,9 +1096,21 @@ private fun PlaylistItem(playlist: PlaylistEntity, db: VinDatabase, onClick: () 
         }
     }
 
-    Row(modifier = Modifier.fillMaxWidth()
-        .clickable { onClick() }
-        .padding(horizontal = 16.dp, vertical = 12.dp),
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        label = "playlist_row_scale"
+    )
+
+    Row(modifier = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = 16.dp, vertical = 6.dp)
+        .graphicsLayer(scaleX = scale, scaleY = scale)
+        .glassCard(cornerRadius = 16.dp)
+        .clickable(interactionSource = interactionSource, indication = LocalIndication.current) { onClick() }
+        .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)) {
         
@@ -1112,9 +1127,7 @@ private fun PlaylistItem(playlist: PlaylistEntity, db: VinDatabase, onClick: () 
             ) {
                 Text(
                     text = playlist.name,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = VinColors.Primary,
+                    style = Vin.Text.cardTitle.copy(fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false)
@@ -1128,7 +1141,7 @@ private fun PlaylistItem(playlist: PlaylistEntity, db: VinDatabase, onClick: () 
                     )
                 }
             }
-            Text("Playlist • ${songs.size} tracks", fontSize = 13.sp, color = VinColors.Secondary)
+            Text("Playlist • ${songs.size} tracks", style = Vin.Text.cardSubtitle)
         }
         IconButton(
             onClick = onMore,
@@ -1150,8 +1163,8 @@ private fun EmptyState(icon: androidx.compose.ui.graphics.vector.ImageVector, ti
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(icon, null, tint = VinColors.White20, modifier = Modifier.size(56.dp))
             Spacer(Modifier.height(12.dp))
-            Text(title,    color = VinColors.Secondary, fontSize = 16.sp)
-            Text(subtitle, color = VinColors.Secondary, fontSize = 13.sp)
+            Text(title, style = Vin.Text.body.copy(color = VinColors.Secondary))
+            Text(subtitle, style = Vin.Text.cardSubtitle)
         }
     }
 }
@@ -1161,11 +1174,22 @@ private fun YtPlaylistItem(
     playlist: com.vinmusic.innertube.AlbumItem,
     onClick: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        label = "yt_playlist_row_scale"
+    )
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .graphicsLayer(scaleX = scale, scaleY = scale)
+            .glassCard(cornerRadius = 16.dp)
+            .clickable(interactionSource = interactionSource, indication = LocalIndication.current) { onClick() }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
@@ -1173,7 +1197,8 @@ private fun YtPlaylistItem(
             modifier = Modifier
                 .size(60.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(VinColors.White10)
+                .background(VinColors.Surface)
+                .shimmerEffect()
         ) {
             coil3.compose.AsyncImage(
                 model = playlist.thumbnail,
@@ -1186,16 +1211,13 @@ private fun YtPlaylistItem(
         Column(Modifier.weight(1f)) {
             Text(
                 text = playlist.title,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = VinColors.Primary,
+                style = Vin.Text.cardTitle.copy(fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = playlist.songCount.ifBlank { "Playlist • YouTube Music" },
-                fontSize = 13.sp,
-                color = VinColors.Secondary,
+                style = Vin.Text.cardSubtitle,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )

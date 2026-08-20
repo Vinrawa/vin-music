@@ -42,6 +42,8 @@ import com.vinmusic.ui.screens.*
 import com.vinmusic.ui.theme.VinColors
 import com.vinmusic.ui.theme.VinMusicTheme
 import com.vinmusic.ui.components.BottomNavBar
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
 import io.sentry.compose.withSentryObservableEffect
 import com.vinmusic.ui.components.MiniPlayer
 import com.vinmusic.innertube.InnerTube
@@ -249,7 +251,12 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
             .fillMaxSize()
             .background(com.vinmusic.ui.theme.Vin.Gradients.background)
     ) {
-        
+        // Shared blur state: NavHost content below is the "source", the mini
+        // player + nav bar pills are the "effect" — this is what makes them
+        // real frosted glass (blurring whatever's actually scrolling behind
+        // them) instead of a flat translucent color pretending to be glass.
+        val hazeState = remember { HazeState() }
+
         SharedTransitionLayout {
             Scaffold(
             containerColor = androidx.compose.ui.graphics.Color.Transparent,
@@ -265,6 +272,7 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                                     vm = vm,
                                     animatedVisibilityScope = this@AnimatedVisibility,
                                     sharedTransitionScope = this@SharedTransitionLayout,
+                                    hazeState = hazeState,
                                     onClick = { showFullPlayer = true }
                                 )
                             }
@@ -272,6 +280,7 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                         // Bottom navigation
                         BottomNavBar(
                             currentRoute = currentRoute,
+                            hazeState = hazeState,
                             onNavigate   = { route ->
                                 if (route == "home") {
                                     // Single-click: collapse all overlays and bring user straight back to the clean home screen
@@ -298,10 +307,12 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
             NavHost(
                 navController    = navController,
                 startDestination = "home",
-                modifier         = Modifier.padding(
-                    top = padding.calculateTopPadding(),
-                    bottom = 0.dp
-                ),
+                modifier         = Modifier
+                    .padding(
+                        top = padding.calculateTopPadding(),
+                        bottom = 0.dp
+                    )
+                    .hazeSource(state = hazeState),
                 enterTransition  = { fadeIn() + slideInHorizontally { it / 4 } },
                 exitTransition   = { fadeOut() }
             ) {

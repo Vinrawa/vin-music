@@ -30,6 +30,10 @@ import com.vinmusic.ui.components.SongListItem
 import com.vinmusic.ui.components.TrackCard
 import com.vinmusic.ui.components.UserAvatar
 import com.vinmusic.ui.theme.VinColors
+import com.vinmusic.ui.theme.Vin
+import com.vinmusic.ui.theme.glassCard
+import com.vinmusic.ui.theme.floatingShadow
+import com.vinmusic.ui.theme.shimmerEffect
 import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -1630,9 +1634,16 @@ fun HomeScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .graphicsLayer(shadowElevation = 8.dp.value, shape = RoundedCornerShape(24.dp), clip = false)
                         .clip(RoundedCornerShape(24.dp))
                         .background(VinColors.White10)
-                        .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(24.dp))
+                        .border(
+                            width = 1.dp,
+                            brush = Brush.verticalGradient(
+                                listOf(Color.White.copy(alpha = 0.16f), VinColors.GlassBorder)
+                            ),
+                            shape = RoundedCornerShape(24.dp)
+                        )
                         .padding(horizontal = 16.dp, vertical = 12.dp)
                 ) {
                     Row(
@@ -1855,6 +1866,7 @@ fun HomeScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .graphicsLayer(shadowElevation = 6.dp.value, shape = RoundedCornerShape(18.dp), clip = false)
                             .clip(RoundedCornerShape(18.dp))
                             .background(VinColors.White10)
                             .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(18.dp))
@@ -1873,9 +1885,7 @@ fun HomeScreen(
                             )
                             Text(
                                 "Search songs, artists, or lofi mood mixes...",
-                                fontSize = 14.sp,
-                                color = VinColors.Secondary,
-                                fontWeight = FontWeight.Medium
+                                style = Vin.Text.cardSubtitle.copy(fontSize = 14.sp)
                             )
                         }
                     }
@@ -3765,9 +3775,7 @@ private fun SectionTitle(text: String) {
     Text(
         text,
         modifier = Modifier.padding(horizontal = 20.dp),
-        fontSize = 22.sp,
-        fontWeight = FontWeight.ExtraBold,
-        color = VinColors.Primary
+        style = Vin.Text.sectionHeader
     )
 }
 
@@ -3785,24 +3793,28 @@ fun SmallRecentlyPlayedCard(song: VideoItem, onClick: () -> Unit) {
         modifier = Modifier
             .width(210.dp)
             .graphicsLayer(scaleX = scale, scaleY = scale)
-            .clip(RoundedCornerShape(18.dp))
-            .background(VinColors.White10)
-            .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(18.dp))
+            .glassCard(cornerRadius = 18.dp)
             .clickable(interactionSource = interactionSource, indication = null) { onClick() }
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        AsyncImage(
-            model = song.thumbnail, contentDescription = null,
-            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(12.dp)).scale(1.35f),
-            contentScale = ContentScale.Crop
-        )
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(VinColors.Surface)
+                .shimmerEffect()
+        ) {
+            AsyncImage(
+                model = song.thumbnail, contentDescription = null,
+                modifier = Modifier.fillMaxSize().scale(1.35f),
+                contentScale = ContentScale.Crop
+            )
+        }
         Column(modifier = Modifier.weight(1f)) {
-            Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-            Text(song.author, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                fontSize = 11.sp, color = VinColors.Secondary, fontWeight = FontWeight.Medium)
+            Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = Vin.Text.cardTitleSmall)
+            Text(song.author, maxLines = 1, overflow = TextOverflow.Ellipsis, style = Vin.Text.cardSubtitle)
         }
     }
 }
@@ -3813,15 +3825,25 @@ fun QuickPlaylistCard(
     onSongClick: (VideoItem, List<VideoItem>) -> Unit,
     scope: kotlinx.coroutines.CoroutineScope
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.95f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+        label = "quick_playlist_scale"
+    )
+
     Box(
         modifier = Modifier
             .width(120.dp)
             .height(120.dp)
+            .graphicsLayer(scaleX = scale, scaleY = scale)
+            .graphicsLayer(shadowElevation = 8.dp.value, shape = RoundedCornerShape(18.dp), clip = false)
             .clip(RoundedCornerShape(18.dp))
             .background(Brush.linearGradient(
                 colors = listOf(pl.gradStart, pl.gradEnd)
             ))
-            .clickable {
+            .clickable(interactionSource = interactionSource, indication = LocalIndication.current) {
                 scope.launch(Dispatchers.IO) {
                     val results = InnerTube.search(pl.query)
                     if (results.isNotEmpty()) {
@@ -3842,8 +3864,8 @@ fun QuickPlaylistCard(
                 Icon(pl.icon, null, tint = Color.White, modifier = Modifier.size(20.dp))
             }
             Text(
-                pl.name, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                color = Color.White, maxLines = 2, lineHeight = 16.sp
+                pl.name, style = Vin.Text.cardTitleSmall.copy(color = Color.White),
+                maxLines = 2, lineHeight = 16.sp
             )
         }
     }
@@ -3858,7 +3880,7 @@ fun EmptyScreenState(message: String) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(Icons.Default.Info, null, tint = VinColors.White20, modifier = Modifier.size(44.dp))
             Spacer(Modifier.height(8.dp))
-            Text(message, color = VinColors.Secondary, fontSize = 13.sp)
+            Text(message, style = Vin.Text.cardSubtitle)
         }
     }
 }
@@ -3892,9 +3914,7 @@ fun RecommendedTrackCard(song: com.vinmusic.innertube.VideoItem, reason: String,
         modifier = Modifier
             .width(160.dp)
             .graphicsLayer(scaleX = scale, scaleY = scale)
-            .clip(RoundedCornerShape(20.dp))
-            .background(VinColors.White10)
-            .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(20.dp))
+            .glassCard(cornerRadius = 20.dp)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null
@@ -3902,7 +3922,13 @@ fun RecommendedTrackCard(song: com.vinmusic.innertube.VideoItem, reason: String,
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Box(modifier = Modifier.size(144.dp).clip(RoundedCornerShape(14.dp))) {
+        Box(
+            modifier = Modifier
+                .size(144.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(VinColors.Surface)
+                .shimmerEffect()
+        ) {
             AsyncImage(
                 model = song.thumbnail, contentDescription = null,
                 modifier = Modifier.fillMaxSize().scale(1.35f), contentScale = ContentScale.Crop
@@ -3914,16 +3940,13 @@ fun RecommendedTrackCard(song: com.vinmusic.innertube.VideoItem, reason: String,
                 text = song.title,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
+                style = Vin.Text.cardTitle
             )
             Text(
                 text = song.author,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                fontSize = 13.sp,
-                color = VinColors.Secondary
+                style = Vin.Text.cardSubtitle
             )
         }
     }
@@ -3953,6 +3976,7 @@ fun ArtistCircleCard(
         Box(
             modifier = Modifier
                 .size(130.dp)
+                .graphicsLayer(shadowElevation = 12.dp.value, shape = CircleShape, clip = false)
                 .background(
                     brush = Brush.linearGradient(listOf(VinColors.Accent, VinColors.AccentLight)),
                     shape = CircleShape
@@ -3965,6 +3989,7 @@ fun ArtistCircleCard(
                     .fillMaxSize()
                     .clip(CircleShape)
                     .background(VinColors.Surface2)
+                    .shimmerEffect()
             ) {
                 AsyncImage(
                     model = artist.thumbnail,
@@ -3976,9 +4001,7 @@ fun ArtistCircleCard(
         }
         Text(
             text = artist.name,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.ExtraBold,
-            color = VinColors.Primary,
+            style = Vin.Text.cardTitle,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
@@ -3986,9 +4009,7 @@ fun ArtistCircleCard(
         )
         Text(
             text = if (artist.subscriberCount.isNotEmpty()) homeMonthlyListenersText(artist.subscriberCount) else "Artist",
-            fontSize = 12.sp,
-            color = VinColors.Secondary,
-            fontWeight = FontWeight.Medium,
+            style = Vin.Text.cardSubtitle,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
     }
@@ -4036,9 +4057,10 @@ fun SpotifyMixCard(
         Box(
             modifier = Modifier
                 .size(148.dp)
+                .graphicsLayer(shadowElevation = 10.dp.value, shape = RoundedCornerShape(18.dp), clip = false)
                 .clip(RoundedCornerShape(18.dp))
                 .background(Brush.verticalGradient(colors = listOf(startColor, endColor)))
-                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(18.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(18.dp))
         ) {
             val coverUrl = mix.songs.firstOrNull()?.videoItem?.thumbnail
             if (coverUrl != null) {
@@ -4093,9 +4115,7 @@ fun SpotifyMixCard(
 
         Text(
             text = mix.title,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color.White,
+            style = Vin.Text.cardTitleSmall,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 4.dp)
@@ -4103,8 +4123,7 @@ fun SpotifyMixCard(
         Spacer(Modifier.height(2.dp))
         Text(
             text = mix.description,
-            fontSize = 11.sp,
-            color = Color.White.copy(alpha = 0.55f),
+            style = Vin.Text.cardSubtitle,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             lineHeight = 14.sp,
@@ -4129,9 +4148,7 @@ fun SpotifyMixCompactCard(
                 scaleX = if (isPressed) 0.96f else 1f,
                 scaleY = if (isPressed) 0.96f else 1f
             )
-            .clip(RoundedCornerShape(18.dp))
-            .background(VinColors.White10)
-            .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(18.dp))
+            .glassCard(cornerRadius = 18.dp)
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -4141,6 +4158,8 @@ fun SpotifyMixCompactCard(
             modifier = Modifier
                 .size(48.dp)
                 .clip(RoundedCornerShape(12.dp))
+                .background(VinColors.Surface)
+                .shimmerEffect()
         ) {
             if (coverUrl != null) {
                 AsyncImage(
@@ -4160,17 +4179,14 @@ fun SpotifyMixCompactCard(
                 mix.title,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
+                style = Vin.Text.cardTitleSmall
             )
             Text(
                 mix.description,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                fontSize = 11.sp,
-                lineHeight = 14.sp,
-                color = VinColors.Secondary
+                style = Vin.Text.cardSubtitle,
+                lineHeight = 14.sp
             )
         }
     }
@@ -4194,14 +4210,18 @@ fun QuickPickRow(
         modifier = Modifier
             .fillMaxWidth()
             .graphicsLayer(scaleX = scale, scaleY = scale)
-            .clip(RoundedCornerShape(16.dp))
-            .background(if (isPressed) Color.White.copy(alpha = 0.06f) else VinColors.White10)
-            .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(16.dp))
-            .clickable(interactionSource = interactionSource, indication = null) { onClick() }
+            .glassCard(cornerRadius = 16.dp)
+            .clickable(interactionSource = interactionSource, indication = LocalIndication.current) { onClick() }
             .padding(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(modifier = Modifier.size(56.dp).clip(RoundedCornerShape(10.dp))) {
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(VinColors.Surface)
+                .shimmerEffect()
+        ) {
             AsyncImage(
                 model = song.thumbnail,
                 contentDescription = null,
@@ -4226,19 +4246,15 @@ fun QuickPickRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = song.title,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
+                style = Vin.Text.cardTitle,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = song.author,
-                fontSize = 13.sp,
-                color = VinColors.Secondary,
+                style = Vin.Text.cardSubtitle,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                fontWeight = FontWeight.Medium
+                overflow = TextOverflow.Ellipsis
             )
         }
         if (onMore != null) {
@@ -4272,9 +4288,7 @@ fun RecommendedRadioCard(song: VideoItem, onClick: () -> Unit) {
         modifier = Modifier
             .width(140.dp)
             .graphicsLayer(scaleX = scale, scaleY = scale)
-            .clip(RoundedCornerShape(20.dp))
-            .background(VinColors.White10)
-            .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(20.dp))
+            .glassCard(cornerRadius = 20.dp)
             .clickable(interactionSource = interactionSource, indication = null) { onClick() }
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -4325,9 +4339,7 @@ fun RecommendedRadioCard(song: VideoItem, onClick: () -> Unit) {
                 text = song.title,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
+                style = Vin.Text.cardTitleSmall,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -4335,8 +4347,7 @@ fun RecommendedRadioCard(song: VideoItem, onClick: () -> Unit) {
                 text = song.author,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                fontSize = 11.sp,
-                color = VinColors.Secondary,
+                style = Vin.Text.cardSubtitle,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -4346,16 +4357,27 @@ fun RecommendedRadioCard(song: VideoItem, onClick: () -> Unit) {
 
 @Composable
 fun RecommendedPlaylistCard(playlist: com.vinmusic.innertube.AlbumItem, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+        label = "rec_playlist_scale"
+    )
+
     Column(
         modifier = modifier
             .width(140.dp)
-            .clickable { onClick() }
+            .graphicsLayer(scaleX = scale, scaleY = scale)
+            .clickable(interactionSource = interactionSource, indication = null) { onClick() }
     ) {
-        androidx.compose.foundation.layout.Box(
+        Box(
             modifier = Modifier
                 .size(140.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(0xFF2A2A2A))
+                .graphicsLayer(shadowElevation = 8.dp.value, shape = RoundedCornerShape(14.dp), clip = false)
+                .clip(RoundedCornerShape(14.dp))
+                .background(VinColors.Surface)
+                .shimmerEffect()
         ) {
             AsyncImage(
                 model = playlist.thumbnail,
@@ -4367,16 +4389,13 @@ fun RecommendedPlaylistCard(playlist: com.vinmusic.innertube.AlbumItem, modifier
         Spacer(Modifier.height(8.dp))
         Text(
             text = playlist.title.orEmpty(),
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
+            style = Vin.Text.cardTitleSmall,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
         Text(
             text = playlist.author.orEmpty(),
-            color = Color.Gray,
-            fontSize = 12.sp,
+            style = Vin.Text.cardSubtitle,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )

@@ -264,6 +264,36 @@ object Vin {
             letterSpacing = 0.3.sp,
             color = Colors.TextPrimary
         )
+
+        // ── Cards & Shelves ──────────────────────────────────────────────
+        // The app's shelf/card rows (recently played, mixes, recommendations,
+        // quick picks, playlists) consistently use bold white titles over a
+        // secondary-colored subtitle, at a handful of recurring sizes — these
+        // name that pattern instead of every card re-declaring fontSize/fontWeight.
+        val sectionHeader = TextStyle(
+            fontFamily = OutfitFamily,
+            fontWeight = FontWeight.ExtraBold,
+            fontSize = 22.sp,
+            color = Colors.TextPrimary
+        )
+        val cardTitle = TextStyle(
+            fontFamily = OutfitFamily,
+            fontWeight = FontWeight.Bold,
+            fontSize = 15.sp,
+            color = Colors.TextPrimary
+        )
+        val cardTitleSmall = TextStyle(
+            fontFamily = OutfitFamily,
+            fontWeight = FontWeight.Bold,
+            fontSize = 13.sp,
+            color = Colors.TextPrimary
+        )
+        val cardSubtitle = TextStyle(
+            fontFamily = OutfitFamily,
+            fontWeight = FontWeight.Medium,
+            fontSize = 12.sp,
+            color = Colors.TextSecondary
+        )
     }
 
     // ── Elevation / Shadow ────────────────────────────────────────────────────
@@ -290,18 +320,91 @@ object Vin {
 //  MODIFIER EXTENSIONS — Reusable style modifiers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/** Apply glassmorphic card styling: semi-transparent bg + luminous border */
+/**
+ * Premium elevated card: lifted surface tone + a top sheen + a subtle
+ * top-catches-the-light edge (gradient border, brighter at the top) instead of
+ * a flat single-tone outline. This is what actually reads as "raised glass"
+ * on a near-black background — a flat border alone does not.
+ *
+ * NOTE ON THE SHADOW: graphicsLayer's shadowElevation still draws a real
+ * elevation shadow, but its default ambient/spot shadow color is pure black —
+ * on this app's near-black background (Colors.Background = 0xFF070707) a
+ * black-on-black shadow has almost zero visible contrast, so it was
+ * previously a no-op. We tint it and, more importantly, add a top sheen
+ * below (a soft white gradient painted on the card itself) — that's the cue
+ * that's actually guaranteed to render regardless of what's behind the card.
+ */
 fun Modifier.glassCard(
     cornerRadius: Dp = Vin.Radius.lg,
-    borderAlpha: Float = 0.08f
+    borderAlpha: Float = 0.10f,
+    elevated: Boolean = true
 ): Modifier = this
+    .then(
+        if (elevated) {
+            Modifier.graphicsLayer(
+                shadowElevation = 10.dp.value,
+                shape = RoundedCornerShape(cornerRadius),
+                clip = false,
+                ambientShadowColor = Color.Black.copy(alpha = 0.6f),
+                spotShadowColor = Color.Black.copy(alpha = 0.75f)
+            )
+        } else Modifier
+    )
     .clip(RoundedCornerShape(cornerRadius))
-    .background(Vin.Colors.Glass)
+    .background(Vin.Colors.SurfaceCard)
+    .background(
+        Brush.verticalGradient(
+            colorStops = arrayOf(
+                0.0f to Color.White.copy(alpha = 0.08f),
+                0.5f to Color.Transparent
+            )
+        )
+    )
     .border(
-        width = 0.8.dp,
-        color = Vin.Colors.GlassBorder,
+        width = 1.dp,
+        brush = Brush.verticalGradient(
+            colors = listOf(
+                Color.White.copy(alpha = borderAlpha + 0.14f),
+                Vin.Colors.GlassBorder.copy(alpha = 0.9f)
+            )
+        ),
         shape = RoundedCornerShape(cornerRadius)
     )
+
+/**
+ * Soft floating shadow for pill/capsule elements (nav bar, mini player) so
+ * they read as hovering above content, not stuck to it. Same fix as
+ * glassCard(): the default black shadow is invisible on a near-black
+ * background, so it's tinted here — but pair this with a top sheen at the
+ * call site (see MiniPlayer / BottomNavBar) for the effect to actually show.
+ */
+fun Modifier.floatingShadow(
+    cornerRadius: Dp = Vin.Radius.full,
+    elevation: Dp = 18.dp
+): Modifier = this.graphicsLayer(
+    shadowElevation = elevation.value,
+    shape = RoundedCornerShape(cornerRadius),
+    clip = false,
+    ambientShadowColor = Color.Black.copy(alpha = 0.6f),
+    spotShadowColor = Color.Black.copy(alpha = 0.75f)
+)
+
+/**
+ * Top sheen overlay: paints a soft white-to-transparent wash across the top
+ * half of whatever it's applied to. Use as an extra `.background()` layer
+ * (after your base color, before your border) on any card/pill that isn't
+ * already covered by glassCard() — e.g. floatingShadow() elements, which set
+ * their own background at the call site. This, not the elevation shadow, is
+ * what actually reads as "premium raised surface" on a near-black theme.
+ */
+fun Modifier.topSheen(alpha: Float = 0.08f): Modifier = this.background(
+    Brush.verticalGradient(
+        colorStops = arrayOf(
+            0.0f to Color.White.copy(alpha = alpha),
+            0.5f to Color.Transparent
+        )
+    )
+)
 
 /** Apply a subtle glow behind an element using accent color */
 fun Modifier.accentGlow(

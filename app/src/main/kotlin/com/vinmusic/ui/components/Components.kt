@@ -26,12 +26,19 @@ import coil3.compose.AsyncImage
 import com.vinmusic.innertube.VideoItem
 import com.vinmusic.player.PlayerViewModel
 import com.vinmusic.ui.theme.VinColors
+import com.vinmusic.ui.theme.Vin
+import com.vinmusic.ui.theme.glassCard
+import com.vinmusic.ui.theme.floatingShadow
+import com.vinmusic.ui.theme.shimmerEffect
+import com.vinmusic.ui.theme.topSheen
 import androidx.media3.common.util.UnstableApi
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import androidx.compose.ui.platform.LocalContext
 import com.vinmusic.ui.utils.ColorExtractor
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeEffect
 
 // ── Mini Player ───────────────────────────────────────────────────────────────
 
@@ -41,6 +48,7 @@ fun MiniPlayer(
     vm: PlayerViewModel,
     animatedVisibilityScope: AnimatedVisibilityScope,
     sharedTransitionScope: SharedTransitionScope,
+    hazeState: HazeState,
     onClick: () -> Unit
 ) {
     val song = vm.currentSong ?: return
@@ -95,8 +103,14 @@ fun MiniPlayer(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                .floatingShadow(cornerRadius = 20.dp, elevation = 14.dp)
                 .clip(RoundedCornerShape(20.dp))
-                .background(VinColors.Surface2)
+                .hazeEffect(state = hazeState) {
+                    backgroundColor = VinColors.Surface2
+                    blurRadius = 24.dp
+                }
+                .background(VinColors.Surface2.copy(alpha = 0.55f))
+                .topSheen()
                 .border(
                     BorderStroke(
                         0.8.dp,
@@ -236,9 +250,7 @@ fun MiniPlayer(
                 Text(
                     song.title,
                     maxLines = 1,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = VinColors.Primary,
+                    style = Vin.Text.cardTitleSmall,
                     modifier = Modifier
                         .fillMaxWidth()
                         .basicMarquee(
@@ -249,8 +261,7 @@ fun MiniPlayer(
                 Text(
                     song.author,
                     maxLines = 1,
-                    fontSize = 12.sp,
-                    color = VinColors.Secondary,
+                    style = Vin.Text.cardSubtitle,
                     modifier = Modifier
                         .fillMaxWidth()
                         .basicMarquee(
@@ -300,7 +311,7 @@ val NAV_ITEMS = listOf(
 )
 
 @Composable
-fun BottomNavBar(currentRoute: String, onNavigate: (String) -> Unit) {
+fun BottomNavBar(currentRoute: String, hazeState: HazeState, onNavigate: (String) -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -312,8 +323,14 @@ fun BottomNavBar(currentRoute: String, onNavigate: (String) -> Unit) {
             modifier = Modifier
                 .fillMaxWidth()
                 .height(64.dp) // sleek, premium capsule height
+                .floatingShadow(cornerRadius = Vin.Radius.full, elevation = 16.dp)
                 .clip(CircleShape)
-                .background(VinColors.Surface2)
+                .hazeEffect(state = hazeState) {
+                    backgroundColor = VinColors.Surface2
+                    blurRadius = 24.dp
+                }
+                .background(VinColors.Surface2.copy(alpha = 0.55f))
+                .topSheen()
                 .border(
                     BorderStroke(1.dp, VinColors.GlassBorder),
                     CircleShape
@@ -409,9 +426,17 @@ fun SongListItem(
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp)
             .graphicsLayer(scaleX = scale, scaleY = scale)
-            .clip(RoundedCornerShape(16.dp))
-            .background(if (isPlaying) VinColors.AccentGlow else VinColors.White10)
-            .border(1.dp, if (isPlaying) VinColors.Accent.copy(alpha = 0.4f) else VinColors.GlassBorder, RoundedCornerShape(16.dp))
+            .then(
+                if (isPlaying) {
+                    Modifier
+                        .graphicsLayer(shadowElevation = 10.dp.value, shape = RoundedCornerShape(16.dp), clip = false)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(VinColors.AccentGlow)
+                        .border(1.dp, VinColors.Accent.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                } else {
+                    Modifier.glassCard(cornerRadius = 16.dp)
+                }
+            )
             .clickable(
                 interactionSource = interactionSource,
                 indication = LocalIndication.current
@@ -425,8 +450,14 @@ fun SongListItem(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Album art
-            Box(modifier = Modifier.size(60.dp).clip(RoundedCornerShape(10.dp))) {
+            // Album art — shimmer shows through the translucent placeholder while loading
+            Box(
+                modifier = Modifier
+                    .size(60.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(VinColors.Surface)
+                    .shimmerEffect()
+            ) {
                 AsyncImage(
                     model = song.thumbnail, contentDescription = null,
                     placeholder = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
@@ -444,12 +475,14 @@ fun SongListItem(
 
             Column(Modifier.weight(1f)) {
                 Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    fontSize = 16.sp, fontWeight = FontWeight.Bold,
-                    color = if (isPlaying) VinColors.AccentLight else VinColors.Primary)
+                    style = Vin.Text.cardTitle.copy(
+                        fontSize = 16.sp,
+                        color = if (isPlaying) VinColors.AccentLight else VinColors.Primary
+                    ))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(song.author, maxLines = 1, fontSize = 13.sp, color = VinColors.Secondary, modifier = Modifier.weight(1f, fill = false))
+                    Text(song.author, maxLines = 1, style = Vin.Text.cardSubtitle, modifier = Modifier.weight(1f, fill = false))
                     if (song.durationText.isNotEmpty()) {
-                        Text("• ${song.durationText}", fontSize = 13.sp, color = VinColors.Secondary)
+                        Text("• ${song.durationText}", style = Vin.Text.cardSubtitle)
                     }
                     if (isOfficial) {
                         Spacer(Modifier.width(2.dp))
@@ -515,9 +548,7 @@ fun TrackCard(song: VideoItem, onClick: () -> Unit) {
         modifier = Modifier
             .width(160.dp)
             .graphicsLayer(scaleX = scale, scaleY = scale)
-            .clip(RoundedCornerShape(20.dp))
-            .background(VinColors.White10)
-            .border(1.dp, VinColors.GlassBorder, RoundedCornerShape(20.dp))
+            .glassCard(cornerRadius = 20.dp)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null
@@ -525,7 +556,13 @@ fun TrackCard(song: VideoItem, onClick: () -> Unit) {
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Box(modifier = Modifier.size(140.dp).clip(RoundedCornerShape(14.dp))) {
+        Box(
+            modifier = Modifier
+                .size(140.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(VinColors.Surface)
+                .shimmerEffect()
+        ) {
             AsyncImage(
                 model = song.thumbnail, contentDescription = null,
                 placeholder = androidx.compose.ui.graphics.painter.ColorPainter(Color.White.copy(alpha = 0.08f)),
@@ -537,9 +574,9 @@ fun TrackCard(song: VideoItem, onClick: () -> Unit) {
             ))
         }
         Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            style = Vin.Text.cardTitle)
         Text(song.author, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            fontSize = 13.sp, color = VinColors.Secondary, fontWeight = FontWeight.Medium)
+            style = Vin.Text.cardSubtitle)
     }
 }
 

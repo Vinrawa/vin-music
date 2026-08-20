@@ -194,4 +194,7 @@ dependencies {
 
     // TarsosDSP
     implementation(libs.tarsos.core)
+
+    // Haze (Real Frosted Glass Backdrop Blur)
+    implementation("dev.chrisbanes.haze:haze:1.3.1")
 }

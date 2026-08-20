@@ -58,3 +58,10 @@ logcat_dump.txt
 *_OLD.txt
 *_regression.txt
 regression_diff.txt
+*.zip
+*.log
+*logcat*.txt
+claude_export/
+dsfd.jpg
+fix_*.py
+add_*.py

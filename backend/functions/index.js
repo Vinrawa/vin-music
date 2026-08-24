@@ -61,10 +61,23 @@ exports.generateDecode = onRequest(
       return;
     }
 
-    // Simple IP rate limiting
+    // Simple IP rate limiting (per-instance; resets on cold start)
     const ip = req.ip || "unknown";
     const now = Date.now();
     const hourAgo = now - 3600000;
+
+    // Evict stale IPs so the tracker Map can't grow without bound on
+    // long-lived instances.
+    if (ipCounts.size > 5000) {
+      for (const [key, ts] of ipCounts) {
+        const fresh = ts.filter((t) => t > hourAgo);
+        if (fresh.length === 0) {
+          ipCounts.delete(key);
+        } else {
+          ipCounts.set(key, fresh);
+        }
+      }
+    }
 
     if (!ipCounts.has(ip)) {
       ipCounts.set(ip, []);
@@ -77,17 +90,28 @@ exports.generateDecode = onRequest(
     timestamps.push(now);
     ipCounts.set(ip, timestamps);
 
-    const {
-      title,
-      author,
-      album,
-      lyrics,
-      musicBrainzInfo,
-      lastFmTags,
-      lastFmWiki,
-      wikiSummary,
-      samples,
-    } = req.body;
+    // Clamp every client-supplied field before it reaches the prompt — these
+    // used to be interpolated verbatim, so megabyte bodies could be fed into
+    // paid LLM calls until context overflow.
+    const clampText = (value, max = 20000) =>
+      typeof value === "string" ? value.slice(0, max) : null;
+    const clampList = (value, maxItems = 20, maxEach = 200) =>
+      Array.isArray(value)
+        ? value
+            .filter((item) => typeof item === "string")
+            .slice(0, maxItems)
+            .map((item) => item.slice(0, maxEach))
+        : null;
+
+    const title = clampText(req.body.title, 300);
+    const author = clampText(req.body.author, 300);
+    const album = clampText(req.body.album, 300);
+    const lyrics = clampText(req.body.lyrics, 60000);
+    const musicBrainzInfo = clampText(req.body.musicBrainzInfo);
+    const lastFmTags = clampList(req.body.lastFmTags);
+    const lastFmWiki = clampText(req.body.lastFmWiki);
+    const wikiSummary = clampText(req.body.wikiSummary);
+    const samples = clampList(req.body.samples);
 
     if (!title || !author) {
       res.status(400).json({ error: "title and author are required" });

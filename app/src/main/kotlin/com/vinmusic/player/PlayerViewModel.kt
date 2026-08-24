@@ -49,7 +49,11 @@ class PlayerViewModel @Inject constructor(
     val errorMessage   get() = PlayerSingleton.errorMessage
     val queue          get() = PlayerSingleton.queue
     val queueIndex     get() = PlayerSingleton.queueIndex
-    
+
+    // ── Lifecycle-owned resources (registered in init, released in onCleared) ──
+    private var playerListener: Player.Listener? = null
+    private var serviceConnection: android.content.ServiceConnection? = null
+
     var repeat: Boolean
         get() = PlayerSingleton.repeat
         set(value) { PlayerSingleton.repeat = value }
@@ -280,7 +284,7 @@ class PlayerViewModel @Inject constructor(
             override fun onAudioSessionIdChanged(audioSessionId: Int) {
                 initAudioFx(audioSessionId)
             }
-        })
+        }.also { playerListener = it })
         startProgressJob()
         loadLikedSongs()
 
@@ -354,10 +358,12 @@ class PlayerViewModel @Inject constructor(
             val ctx = getApplication<android.app.Application>()
             val intent = android.content.Intent(ctx, VinMusicService::class.java)
             ctx.startService(intent)
-            ctx.bindService(intent, object : android.content.ServiceConnection {
+            val connection = object : android.content.ServiceConnection {
                 override fun onServiceConnected(name: android.content.ComponentName?, service: android.os.IBinder?) {}
                 override fun onServiceDisconnected(name: android.content.ComponentName?) {}
-            }, android.content.Context.BIND_AUTO_CREATE)
+            }
+            serviceConnection = connection
+            ctx.bindService(intent, connection, android.content.Context.BIND_AUTO_CREATE)
         } catch (e: Exception) { Log.e(TAG, "Failed to start/bind VinMusicService: ${e.message}") }
     }
 
@@ -619,7 +625,9 @@ class PlayerViewModel @Inject constructor(
                         if (remainingMs <= crossfadeSecs * 1000) {
                             val ratio = (remainingMs.toFloat() / (crossfadeSecs * 1000)).coerceIn(0f, 1f)
                             exoPlayer.volume = Math.sqrt(ratio.toDouble()).toFloat()
-                            if (remainingMs <= 500) {
+                            // Repeat-one must not advance the queue — the track loops
+                            // and the fade-in branch below restores volume instead.
+                            if (remainingMs <= 500 && exoPlayer.repeatMode != Player.REPEAT_MODE_ONE) {
                                 playNext()
                             }
                         } else if (currentTimeMs <= crossfadeSecs * 1000) {
@@ -1094,13 +1102,19 @@ class PlayerViewModel @Inject constructor(
 
     private suspend fun fadeOutAndStop() {
         val steps = 150
-        repeat(steps) {
-            val ratio = 1f - (it + 1).toFloat() / steps
-            exoPlayer.volume = Math.sqrt(ratio.toDouble()).toFloat()
-            delay(100)
+        try {
+            repeat(steps) {
+                val ratio = 1f - (it + 1).toFloat() / steps
+                exoPlayer.volume = Math.sqrt(ratio.toDouble()).toFloat()
+                delay(100)
+            }
+            exoPlayer.pause()
+        } finally {
+            // Restore even if the timer is cancelled mid-fade — otherwise volume
+            // stays faded forever, because the progress job skips its reset while
+            // a MINUTES timer is armed.
+            exoPlayer.volume = 1f
         }
-        exoPlayer.pause()
-        exoPlayer.volume = 1f
     }
 
     // ── EQ — gradual apply to prevent audio tearing ───────────────────────────
@@ -1369,6 +1383,17 @@ class PlayerViewModel @Inject constructor(
         eqHandler.removeCallbacks(eqApplyRunnable)
         pbHandler.removeCallbacks(pbApplyRunnable)
         prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+        // Detach from the immortal PlayerSingleton so this ViewModel (and its whole
+        // DB/handler graph) doesn't leak for the life of the process.
+        playerListener?.let { listener ->
+            runCatching { exoPlayer.removeListener(listener) }
+        }
+        playerListener = null
+        PlayerSingleton.onSongEndedCallback = null
+        serviceConnection?.let { connection ->
+            runCatching { getApplication<Application>().unbindService(connection) }
+        }
+        serviceConnection = null
         super.onCleared()
     }
 

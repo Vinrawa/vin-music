@@ -5,20 +5,26 @@ service cloud.firestore {
       // Authenticated users can read shared song metadata (BPM, energy, genres)
       allow read: if request.auth != null;
 
-      // Only allow create/update with validated fields
-      allow create, update: if request.auth != null
-        && request.resource.data.keys().hasAll(['videoId', 'title', 'artist', 'status'])
-        && request.resource.data.videoId is string
-        && request.resource.data.title is string && request.resource.data.title.size() < 200
-        && request.resource.data.artist is string && request.resource.data.artist.size() < 100
-        && request.resource.data.status in ['analyzing', 'ready']
-        && (!('bpmReal' in request.resource.data) || (request.resource.data.bpmReal >= 40 && request.resource.data.bpmReal <= 250))
-        && (!('energyReal' in request.resource.data) || (request.resource.data.energyReal >= 0.0 && request.resource.data.energyReal <= 1.0))
-        && (!('genreTags' in request.resource.data) || request.resource.data.genreTags.size() <= 10)
-        && (!('moodTags' in request.resource.data) || request.resource.data.moodTags.size() <= 10)
-        && (!('claimedAt' in request.resource.data) || request.resource.data.claimedAt == request.time);
+      // The app's only shared write is {likedByCount: FieldValue.increment(n)}
+      // via set(merge) — the previous rules required full metadata fields on
+      // every write, so like-counts for NEW songs were silently rejected with
+      // PERMISSION_DENIED. These rules validate exactly that write shape.
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['likedByCount'])
+        && request.resource.data.likedByCount is number
+        && request.resource.data.likedByCount >= 0
+        && request.resource.data.likedByCount <= 1000000;
 
-      // No delete allowed — shared data is append-only
+      allow update: if request.auth != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likedByCount'])
+        && request.resource.data.likedByCount is number
+        && request.resource.data.likedByCount >= 0
+        && request.resource.data.likedByCount <= 1000000;
+
+      // No delete allowed — shared data is append-only.
+      // NOTE: if a future feature writes full song *metadata* again (title/
+      // artist/status/bpmReal/...), reintroduce validated-field checks for those
+      // writes here — do not widen these rules to accept arbitrary fields.
       allow delete: if false;
     }
 

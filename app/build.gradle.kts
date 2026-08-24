@@ -197,4 +197,7 @@ dependencies {
 
     // Haze (Real Frosted Glass Backdrop Blur)
     implementation("dev.chrisbanes.haze:haze:1.3.1")
+
+    // EncryptedSharedPreferences (YT session cookie storage)
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }

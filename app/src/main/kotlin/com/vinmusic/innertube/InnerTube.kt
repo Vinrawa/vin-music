@@ -18,6 +18,7 @@ object InnerTube {
     private val gson = Gson()
 
     /** Last log message — shown on screen without ADB */
+    @Volatile
     var lastDebugMsg = ""; private set
 
     /** Visitor data token, refreshed periodically for long-running sessions. */
@@ -104,59 +105,64 @@ object InnerTube {
     /** Fetches a fresh YouTube visitor data token (helps bypass LOGIN_REQUIRED) */
     fun ensureVisitorData(force: Boolean = false) {
         android.util.Log.d("DEBUG_TOKEN", "ensureVisitorData called: force=$force, currentToken='${visitorData.take(15)}', elapsedMs=${System.currentTimeMillis() - visitorFetchedAt}")
-        if (!force && visitorData.isNotEmpty() && System.currentTimeMillis() - visitorFetchedAt < VISITOR_TTL_MS) return
-        try {
-            // 1. Try official JSON visitor_id endpoint (fast, robust, never hits redirect loop)
-            val jsonBody = gson.toJson(mapOf(
-                "context" to mapOf(
-                    "client" to mapOf(
-                        "clientName" to "WEB",
-                        "clientVersion" to "2.20240801.01.00",
-                        "hl" to "en",
-                        "gl" to "IN"
+        // Serialize refreshes — concurrent LOGIN_REQUIRED responses each used to fire
+        // their own fetch (~6 parallel endpoint hits + HTML scrapes racing writes to
+        // one prefs file). Rare TTL-gated operation, so a coarse lock costs nothing.
+        synchronized(this) {
+            if (!force && visitorData.isNotEmpty() && System.currentTimeMillis() - visitorFetchedAt < VISITOR_TTL_MS) return
+            try {
+                // 1. Try official JSON visitor_id endpoint (fast, robust, never hits redirect loop)
+                val jsonBody = gson.toJson(mapOf(
+                    "context" to mapOf(
+                        "client" to mapOf(
+                            "clientName" to "WEB",
+                            "clientVersion" to "2.20240801.01.00",
+                            "hl" to "en",
+                            "gl" to "IN"
+                        )
                     )
-                )
-            )).toRequestBody(JSON)
+                )).toRequestBody(JSON)
 
-            val req = Request.Builder()
-                .url("$BASE/visitor_id?prettyPrint=false")
-                .post(jsonBody)
-                .header("Content-Type", "application/json")
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                .build()
-
-            val raw = http.newCall(req).execute().use { it.body?.string() }
-            val root = raw?.let { gson.fromJson(it, Map::class.java) }
-            val responseContext = root?.get("responseContext") as? Map<*, *>
-            var vd = responseContext?.get("visitorData") as? String
-
-            // 2. Fallback to scraping music.youtube.com if API endpoint returned empty
-            if (vd.isNullOrBlank()) {
-                val html = http.newCall(Request.Builder()
-                    .url("https://music.youtube.com/")
+                val req = Request.Builder()
+                    .url("$BASE/visitor_id?prettyPrint=false")
+                    .post(jsonBody)
+                    .header("Content-Type", "application/json")
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    .header("Accept-Language", "en-IN,en;q=0.9,hi;q=0.8")
-                    .build()).execute().use { it.body?.string() }
+                    .build()
 
-                vd = html?.let {
-                    Regex("\"VISITOR_DATA\":\"([^\"]+)\"").find(it)?.groupValues?.get(1)
-                }
-            }
+                val raw = http.newCall(req).execute().use { it.body?.string() }
+                val root = raw?.let { gson.fromJson(it, Map::class.java) }
+                val responseContext = root?.get("responseContext") as? Map<*, *>
+                var vd = responseContext?.get("visitorData") as? String
 
-            if (!vd.isNullOrBlank()) {
-                visitorData = vd
-                visitorFetchedAt = System.currentTimeMillis()
-                appContext?.getSharedPreferences("innertube_prefs", android.content.Context.MODE_PRIVATE)?.edit()?.apply {
-                    putString("visitor_data", visitorData)
-                    putLong("visitor_fetched_at", visitorFetchedAt)
-                    apply()
+                // 2. Fallback to scraping music.youtube.com if API endpoint returned empty
+                if (vd.isNullOrBlank()) {
+                    val html = http.newCall(Request.Builder()
+                        .url("https://music.youtube.com/")
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                        .header("Accept-Language", "en-IN,en;q=0.9,hi;q=0.8")
+                        .build()).execute().use { it.body?.string() }
+
+                    vd = html?.let {
+                        Regex("\"VISITOR_DATA\":\"([^\"]+)\"").find(it)?.groupValues?.get(1)
+                    }
                 }
-                android.util.Log.d("DEBUG_TOKEN", "ensureVisitorData PERSISTED: token='${visitorData.take(20)}...'")
+
+                if (!vd.isNullOrBlank()) {
+                    visitorData = vd
+                    visitorFetchedAt = System.currentTimeMillis()
+                    appContext?.getSharedPreferences("innertube_prefs", android.content.Context.MODE_PRIVATE)?.edit()?.apply {
+                        putString("visitor_data", visitorData)
+                        putLong("visitor_fetched_at", visitorFetchedAt)
+                        apply()
+                    }
+                    android.util.Log.d("DEBUG_TOKEN", "ensureVisitorData PERSISTED: token='${visitorData.take(20)}...'")
+                }
+                log("visitorData: ${if (vd != null) "${vd.take(20)}... [OK]" else "not found"}")
+            } catch (e: Exception) {
+                android.util.Log.e("DEBUG_TOKEN", "ensureVisitorData ERROR: ${e.message}")
+                log("visitorData fetch err: ${e.message?.take(60)}")
             }
-            log("visitorData: ${if (vd != null) "${vd.take(20)}... [OK]" else "not found"}")
-        } catch (e: Exception) {
-            android.util.Log.e("DEBUG_TOKEN", "ensureVisitorData ERROR: ${e.message}")
-            log("visitorData fetch err: ${e.message?.take(60)}")
         }
     }
 
@@ -277,7 +283,25 @@ object InnerTube {
     }
 
     private val streamUrlCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
+
+    /** TTL is checked on read, so entries never left the map on their own — sweep
+     *  expired ones (and cap size) whenever a new URL is cached. */
+    private fun cacheStreamUrl(videoId: String, url: String) {
+        streamUrlCache[videoId] = Pair(System.currentTimeMillis(), url)
+        if (streamUrlCache.size > MAX_STREAM_URL_CACHE_ENTRIES) {
+            val cutoff = System.currentTimeMillis() - STREAM_URL_CACHE_TTL_MS
+            streamUrlCache.entries.removeIf { it.value.first < cutoff }
+        }
+        // Still oversized (e.g. many URLs cached within one TTL window)? Drop oldest.
+        if (streamUrlCache.size > MAX_STREAM_URL_CACHE_ENTRIES) {
+            streamUrlCache.entries
+                .sortedBy { it.value.first }
+                .take(streamUrlCache.size - MAX_STREAM_URL_CACHE_ENTRIES)
+                .forEach { streamUrlCache.remove(it.key, it.value) }
+        }
+    }
     private const val STREAM_URL_CACHE_TTL_MS = 3 * 3600 * 1000L // 3 hours
+    private const val MAX_STREAM_URL_CACHE_ENTRIES = 200
 
     // ── Main entry ────────────────────────────────────────────────────────────
     fun getStreamUrl(videoId: String, quality: String? = null): String? {
@@ -320,7 +344,7 @@ object InnerTube {
                     }
                 }
             if (!url.isNullOrEmpty()) {
-                streamUrlCache[videoId] = Pair(System.currentTimeMillis(), url)
+                cacheStreamUrl(videoId, url)
                 log("NewPipe result SUCCESS Host: ${android.net.Uri.parse(url).host}")
                 return url
             }
@@ -470,17 +494,17 @@ object InnerTube {
         if (visitorData.isNotEmpty())
             reqBuilder.header("X-Goog-Visitor-Id", visitorData)
 
-        val raw: String
-        try {
-            val response = clientOverride.newCall(reqBuilder.build()).execute()
-            log("HTTP Status: ${response.code}")
-            raw = response.body?.string() ?: ""
-            if (raw.isEmpty()) {
-                log("Result: Empty body")
-                return null
+        val raw: String = try {
+            clientOverride.newCall(reqBuilder.build()).execute().use { response ->
+                log("HTTP Status: ${response.code}")
+                response.body?.string() ?: ""
             }
         } catch (e: Exception) {
             log("Exception Stage: Network request failed - ${e.message}")
+            return null
+        }
+        if (raw.isEmpty()) {
+            log("Result: Empty body")
             return null
         }
 
@@ -574,7 +598,12 @@ object InnerTube {
             )
             val url = info.videoStreams
                 .filter { it.content?.isNotEmpty() == true }
-                .minByOrNull { it.getResolution() ?: "" }?.content
+                // Compare numeric resolution — lexicographic order would pick
+                // "1080p" as "smallest" since "1" < "3".
+                .minByOrNull { stream ->
+                    stream.getResolution()?.takeWhile { ch -> ch.isDigit() }?.toIntOrNull()
+                        ?: Int.MAX_VALUE
+                }?.content
             if (!url.isNullOrEmpty()) {
                 log("Video URL via NewPipe: ${url.take(60)}")
                 return url
@@ -2079,12 +2108,14 @@ object InnerTube {
                             } ?: ""
                         
                         val ownerBadges = cr["ownerBadges"] as? List<*>
+                        // Badge styles only — the old `subs.contains("M")` fallback marked
+                        // every channel with a K/M subscriber count ("1.2K", "3.4M") verified.
                         val isVerified = ownerBadges?.any { b ->
                             val mbr = (b as? Map<*, *>)?.get("metadataBadgeRenderer") as? Map<*, *>
                             val style = mbr?.get("style") as? String ?: ""
                             style == "BADGE_STYLE_TYPE_VERIFIED_ARTIST" || style == "BADGE_STYLE_TYPE_VERIFIED"
-                        } == true || subs.contains("M", ignoreCase = true)
-                        
+                        } == true
+
                         if (isVerified) verifiedArtistCache[id] = true
                         artists.add(ArtistItem(id, name, thumb, subs, isVerified))
                     }
@@ -2118,7 +2149,9 @@ object InnerTube {
                 if (ytmArtistId.isNotBlank() && artists.none { it.channelId == ytmArtistId }) {
                     val cd = fetchChannelData(ytmArtistId, query)
                     val artThumb = cd.avatarUrl.ifEmpty { cd.bannerUrl }
-                    val isVer: Boolean = (verifiedArtistCache[ytmArtistId] == true) || cd.subscriberCount.contains("M", ignoreCase = true) || cd.subscriberCount.contains("K", ignoreCase = true)
+                    // Verified status must come from the badge cache only; subscriber
+                    // text contains "K"/"M" for virtually every channel.
+                    val isVer: Boolean = verifiedArtistCache[ytmArtistId] == true
                     artists.add(0, ArtistItem(ytmArtistId, cd.title.ifEmpty { query }, artThumb, cd.subscriberCount, isVer))
                 }
             }

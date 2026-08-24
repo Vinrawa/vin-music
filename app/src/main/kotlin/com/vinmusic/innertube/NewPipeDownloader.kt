@@ -22,13 +22,16 @@ class NewPipeDownloader(private val client: OkHttpClient) : Downloader() {
         val body = request.dataToSend()
         if (body != null) builder.post(body.toRequestBody("application/json".toMediaType()))
         else if (request.httpMethod() == "POST") builder.post("".toRequestBody())
-        val resp = client.newCall(builder.build()).execute()
-        return NPResponse(
-            resp.code, resp.message,
-            resp.headers.toMultimap(),
-            resp.body?.string(),
-            request.url()
-        )
+        // .use{} guarantees the response (and its connection) is returned to the
+        // pool even if reading the body throws mid-stream.
+        return client.newCall(builder.build()).execute().use { resp ->
+            NPResponse(
+                resp.code, resp.message,
+                resp.headers.toMultimap(),
+                resp.body?.string(),
+                request.url()
+            )
+        }
     }
 }
 

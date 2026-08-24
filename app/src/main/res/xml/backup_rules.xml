@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Legacy backup rules (Android 12 and below). Exclude anything containing
+     credentials or PII — vin_music_prefs holds the YT session cookie and
+     account email; the secure prefs file holds encrypted copies of it. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="vin_music_prefs.xml" />
+    <exclude domain="sharedpref" path="vin_music_secure_prefs.xml" />
+</full-backup-content>

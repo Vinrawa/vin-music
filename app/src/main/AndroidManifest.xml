@@ -15,6 +15,9 @@
     <!-- Wake lock (keep playing when screen off) -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Required for the ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS prompt in MainActivity -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Storage (downloads & local audio) -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -34,6 +37,8 @@
     <application
         android:name=".VinMusicApp"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="Vin Music"
         android:roundIcon="@mipmap/ic_launcher_round"

@@ -147,6 +147,12 @@ class DownloadService : Service() {
             }
 
             if (queuedList.isEmpty() && activeJobs.isEmpty()) {
+                // Queue fully drained — drop foreground protection here (not in
+                // updateNotification, which can race a just-started download).
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.cancel(NOTIFICATION_ID)
                 stopSelf()
                 return@launch
             }
@@ -406,7 +412,9 @@ class DownloadService : Service() {
             } catch (e: CancellationException) {
                 Log.d(TAG, "Download cancelled: $videoId")
                 ReliabilityDiagnostics.record("download", "cancelled", videoId, status = "cancelled")
-                db.downloadDao().insert(downloadingEntity.copy(status = "failed", progress = 0))
+                // Deliberately NO db write here: cancelDownload() deletes this row
+                // concurrently, and inserting "failed" would resurrect a ghost entry
+                // referencing files that were just cleaned up.
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error downloading $videoId: ${e.message}", e)
@@ -419,8 +427,10 @@ class DownloadService : Service() {
                 }
             } finally {
                 activeJobs.remove(videoId)
-                updateNotification()
+                // Queue first: it may start the next download, and the notification
+                // update below must not drop foreground protection while work remains.
                 checkQueue()
+                updateNotification()
             }
         }
         activeJobs[videoId] = job
@@ -428,13 +438,7 @@ class DownloadService : Service() {
 
     private fun updateNotification() {
         val activeCount = activeJobs.size
-        if (activeCount == 0) {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.cancel(NOTIFICATION_ID)
-            return
-        }
+        if (activeCount == 0) return // drained — checkQueue() owns foreground teardown
 
         val text = "Downloading $activeCount track(s)..."
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

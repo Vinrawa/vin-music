@@ -1509,7 +1509,8 @@ fun SettingsScreen(
     }
 
     // ── Update Available Dialog ──────────────────────────────────────────────────
-    if (showUpdateDialog && updateInfo != null) {
+    val currentUpdateInfo = updateInfo
+    if (showUpdateDialog && currentUpdateInfo != null) {
         AlertDialog(
             onDismissRequest = { showUpdateDialog = false },
             title = {
@@ -1522,14 +1523,14 @@ fun SettingsScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "v${updateInfo!!.latestVersionName}",
+                        "v${currentUpdateInfo.latestVersionName ?: "?"}",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = VinColors.Accent
                     )
-                    if (updateInfo!!.releaseNotes.isNotBlank()) {
+                    if (!currentUpdateInfo.releaseNotes.isNullOrBlank()) {
                         Text(
-                            updateInfo!!.releaseNotes,
+                            currentUpdateInfo.releaseNotes!!,
                             fontSize = 13.sp,
                             color = VinColors.Secondary,
                             lineHeight = 18.sp
@@ -1540,7 +1541,7 @@ fun SettingsScreen(
             confirmButton = {
                 TextButton(onClick = {
                     showUpdateDialog = false
-                    com.vinmusic.update.UpdateManager.downloadAndInstall(ctx, updateInfo!!)
+                    com.vinmusic.update.UpdateManager.downloadAndInstall(ctx, currentUpdateInfo)
                 }) {
                     Text("Download", color = VinColors.Accent, fontWeight = FontWeight.Bold)
                 }

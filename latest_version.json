@@ -2,6 +2,7 @@
   "latestVersionCode": 18,
   "latestVersionName": "2.2.2",
   "apkUrl": "https://vinrawa.github.io/Vin-music-v2/vinmusic.apk",
+  "sha256": "354515dc42eae9b6e7efb0835dc4434132fef0b362987997367b7de550a47273",
   "forceUpdate": false,
   "releaseNotes": "Real Frosted-Glass live blur (Haze), Top Sheen lighting, enhanced Glassmorphism, and UI/UX visual upgrades."
 }

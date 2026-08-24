@@ -27,10 +27,18 @@ jobs:
         uses: actions/configure-pages@v5
         with:
           enablement: true
+      # Stage ONLY the public site files. Never publish the whole checkout —
+      # it previously leaked app/release-keystore.jks and internal docs.
+      - name: Stage site files
+        run: |
+          mkdir -p site
+          cp index.html site/
+          cp latest_version.json site/
+          cp vinmusic.apk site/
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '.'
+          path: 'site'
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

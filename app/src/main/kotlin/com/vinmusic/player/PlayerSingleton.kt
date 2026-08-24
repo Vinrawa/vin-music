@@ -82,6 +82,7 @@ object PlayerSingleton {
     private var virtualizer: android.media.audiofx.Virtualizer? = null
     private var presetReverb: android.media.audiofx.PresetReverb? = null
 
+    @Volatile
     var nextStreamUrlDeferred: Pair<String, Deferred<String?>>? = null
 
     private var db: VinDatabase? = null
@@ -264,39 +265,43 @@ object PlayerSingleton {
                 // Lazy Queue Extension: When user is within 5 songs of queue end, dynamically fetch and append 10 more recommendations
                 if (queue.size - queueIndex <= 5 && !repeat && smartAutoplayEnabled && !isExtendingQueue) {
                     isExtendingQueue = true
-                    val seedSong = currentSong ?: queue[queueIndex]
-                    Log.d(TAG, "Lazy queue expansion triggered (queue size=${queue.size}, index=$queueIndex) for seed=${seedSong.videoId}")
-                    val currentQueueCopy = queue.toList()
-                    val recommended = withContext(Dispatchers.IO) {
-                        try {
-                            recommendationRepository?.getSongRadio(seedSong.videoId, seedSong.title, seedSong.author, currentQueueCopy)
-                        } catch (e: Exception) {
-                            null
+                    try {
+                        val seedSong = currentSong ?: queue[queueIndex]
+                        Log.d(TAG, "Lazy queue expansion triggered (queue size=${queue.size}, index=$queueIndex) for seed=${seedSong.videoId}")
+                        val currentQueueCopy = queue.toList()
+                        val recommended = withContext(Dispatchers.IO) {
+                            try {
+                                recommendationRepository?.getSongRadio(seedSong.videoId, seedSong.title, seedSong.author, currentQueueCopy)
+                            } catch (e: Exception) {
+                                null
+                            }
                         }
-                    }
-                    if (!recommended.isNullOrEmpty()) {
-                        withContext(Dispatchers.Main) {
-                            val newQueue = queue.toMutableList()
-                            val existingIds = newQueue.map { it.videoId }.toSet()
-                            val uniqueRecs = recommended.filter { it.videoId !in existingIds }.take(10)
-                            if (uniqueRecs.isNotEmpty()) {
-                                newQueue.addAll(uniqueRecs)
-                                queue = newQueue
-                                Log.d(TAG, "SmartQueue lazily extended: appended ${uniqueRecs.size} tracks, new total=${queue.size}")
-                                
-                                // Re-evaluate next song with newly appended items
-                                val newNextIndex = if (shuffle) {
-                                    if (smartShuffle) getSmartShuffleNextIndex() else queue.indices.random()
-                                } else {
-                                    (queueIndex + 1) % queue.size
-                                }
-                                if (newNextIndex in queue.indices) {
-                                    nextSong = queue[newNextIndex]
+                        if (!recommended.isNullOrEmpty()) {
+                            withContext(Dispatchers.Main) {
+                                val newQueue = queue.toMutableList()
+                                val existingIds = newQueue.map { it.videoId }.toSet()
+                                val uniqueRecs = recommended.filter { it.videoId !in existingIds }.take(10)
+                                if (uniqueRecs.isNotEmpty()) {
+                                    newQueue.addAll(uniqueRecs)
+                                    queue = newQueue
+                                    Log.d(TAG, "SmartQueue lazily extended: appended ${uniqueRecs.size} tracks, new total=${queue.size}")
+
+                                    // Re-evaluate next song with newly appended items
+                                    val newNextIndex = if (shuffle) {
+                                        if (smartShuffle) getSmartShuffleNextIndex() else queue.indices.random()
+                                    } else {
+                                        (queueIndex + 1) % queue.size
+                                    }
+                                    if (newNextIndex in queue.indices) {
+                                        nextSong = queue[newNextIndex]
+                                    }
                                 }
                             }
                         }
+                    } finally {
+                        // Without this, an exception mid-extension permanently disables lazy queue extension.
+                        isExtendingQueue = false
                     }
-                    isExtendingQueue = false
                 }
                 
                 // If we already have a prefetch running or completed for this next song, skip
@@ -391,11 +396,15 @@ object PlayerSingleton {
     }
 
     /** Clear only the disposable online player cache; downloaded songs are separate. */
-    private fun clearPlayerCache(context: Context, reason: String) {
-        val cache = getCache(context) ?: return
-        val keys = runCatching { cache.keys.toList() }.getOrDefault(emptyList())
-        keys.forEach { key -> runCatching { cache.removeResource(key) } }
-        Log.w(TAG, "Cleared player cache after $reason (${keys.size} entries)")
+    private suspend fun clearPlayerCache(context: Context, reason: String) {
+        // Disk I/O — must leave the Main dispatcher; this runs during 403 recovery
+        // when playback is already struggling, so jank here compounds the failure.
+        withContext(Dispatchers.IO) {
+            val cache = getCache(context) ?: return@withContext
+            val keys = runCatching { cache.keys.toList() }.getOrDefault(emptyList())
+            keys.forEach { key -> runCatching { cache.removeResource(key) } }
+            Log.w(TAG, "Cleared player cache after $reason (${keys.size} entries)")
+        }
         ReliabilityDiagnostics.record(
             "playback", "cache_clear", currentSong?.videoId,
             status = "ok", details = reason
@@ -611,7 +620,12 @@ object PlayerSingleton {
         recordPlay(song)
         checkAndClaimFeatures(song)
 
-        val database = db ?: return
+        val database = db ?: run {
+            // Without this reset the spinner set above would spin forever.
+            isLoading = false
+            errorMessage = "Player is still starting. Try again in a moment."
+            return
+        }
 
         scope.launch(Dispatchers.IO) {
             val liked = database.likedSongDao().isLiked(song.videoId)
@@ -689,7 +703,19 @@ object PlayerSingleton {
 
                 // 0. Local Device Audio (0ms instant playback via ContentResolver)
                 if (song.localUriString != null || song.videoId.startsWith("local_") || song.videoId.startsWith("content://") || song.videoId.startsWith("file://")) {
-                    val localUri = song.localUriString ?: if (song.videoId.startsWith("local_")) song.videoId.removePrefix("local_") else song.videoId
+                    // A bare `local_<id>` is not a playable URI — rebuild the MediaStore URI.
+                    val localUri = song.localUriString ?: when {
+                        song.videoId.startsWith("local_") -> {
+                            val mediaStoreId = song.videoId.removePrefix("local_").toLongOrNull()
+                            if (mediaStoreId != null) {
+                                android.content.ContentUris.withAppendedId(
+                                    android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                                    mediaStoreId
+                                ).toString()
+                            } else song.videoId
+                        }
+                        else -> song.videoId
+                    }
                     Log.d(TAG, "Playing local device audio track directly: $localUri")
                     url = localUri
                     onlineAndCached = false
@@ -1142,7 +1168,7 @@ object PlayerSingleton {
                 .sortedByDescending { it.playCount }
             for (sig in signals) {
                 if (sig.videoId !in existingIds && fallback.none { it.videoId == sig.videoId }) {
-                    fallback.add(VideoItem(sig.videoId, sig.title, sig.author, sig.durationText))
+                    fallback.add(buildFallbackItem(sig.videoId, sig.title, sig.author, sig.durationText))
                     if (fallback.size >= 20) break
                 }
             }
@@ -1157,7 +1183,7 @@ object PlayerSingleton {
                 val history = database.historyDao().getAllHistory()
                 for (entry in history) {
                     if (entry.videoId !in seenIds && fallback.none { it.videoId == entry.videoId }) {
-                        fallback.add(VideoItem(entry.videoId, entry.title, entry.author, entry.durationText))
+                        fallback.add(buildFallbackItem(entry.videoId, entry.title, entry.author, entry.durationText))
                         if (fallback.size >= 20) break
                     }
                 }
@@ -1167,6 +1193,22 @@ object PlayerSingleton {
         }
 
         fallback.shuffled()
+    }
+
+    /** Rebuild playable items for queue fallbacks — history/signals store bare
+     *  `local_<mediaStoreId>` ids for local device tracks, and a bare id is not a
+     *  playable URI (it used to fall through to the HTTP data source and fail). */
+    private fun buildFallbackItem(videoId: String, title: String, author: String, durationText: String): VideoItem {
+        val mediaStoreId = if (videoId.startsWith("local_")) videoId.removePrefix("local_").toLongOrNull() else null
+        return if (mediaStoreId != null) {
+            val uri = android.content.ContentUris.withAppendedId(
+                android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                mediaStoreId
+            )
+            VideoItem(videoId, title, author, durationText, localUriString = uri.toString())
+        } else {
+            VideoItem(videoId, title, author, durationText)
+        }
     }
 
     private fun onSongEnded() {

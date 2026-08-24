@@ -53,5 +53,14 @@
     java.lang.Object readResolve();
 }
 
+# ── Strip verbose/debug/info logging from release builds ──────────────────────
+# Logs were shipping account emails, visitor tokens and auth-response bodies to
+# logcat in production. Keep warn/error for crash diagnosis; drop v/d/i entirely.
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+}
+
 # Media3 - keep ExoPlayer internals
 -keep class androidx.media3.** { *; }

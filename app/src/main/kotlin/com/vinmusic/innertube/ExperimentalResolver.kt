@@ -66,8 +66,9 @@ object ExperimentalResolver {
             .header("Origin", "https://www.youtube.com")
 
         try {
-            val response = http.newCall(reqBuilder.build()).execute()
-            val raw = response.body?.string() ?: ""
+            val raw = http.newCall(reqBuilder.build()).execute().use { response ->
+                response.body?.string() ?: ""
+            }
             
             val root = gson.fromJson(raw, Map::class.java)
             val status = (root["playabilityStatus"] as? Map<*, *>)?.get("status") as? String

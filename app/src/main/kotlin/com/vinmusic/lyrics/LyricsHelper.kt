@@ -214,7 +214,12 @@ object LyricsHelper {
     private fun cleanTitle(title: String): String {
         return title
             .replace(Regex("\\[.*?]|\\(.*?\\)"), "") // Remove parentheses and brackets content
-            .replace(Regex("(?i)official|music video|lyrical|video|audio|lyrics?|hd|4k|feat\\.?.*|ft\\.?.*|full song|full video|latest song.*|new song.*|punjabi song.*|hindi song.*"), "")
+            // Strip featured artists and everything after them. The word anchors matter:
+            // the old unbounded `feat\.?.*|ft\.?.*` alternation matched "ft" inside
+            // ordinary words, truncating titles like "Gift of Love" → "Gi".
+            .replace(Regex("(?i)\\s*\\b(?:feat(?:uring)?|ft)\\.?(?:\\s+.*|$)"), "")
+            .replace(Regex("(?i)\\b(?:official|music videos?|lyrical|videos?|audios?|lyrics?|hd|4k|full songs?|full videos?)\\b"), "")
+            .replace(Regex("(?i)\\b(?:latest|new|punjabi|hindi)\\s+songs?\\b.*"), "")
             .replace(" - Topic", "", ignoreCase = true)
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -482,9 +487,12 @@ object LyricsHelper {
             .url(url)
             .header("User-Agent", "VinMusic/2.0 (https://github.com/vinmusic)")
             .build()
-        val response = http.newCall(request).execute()
-        if (!response.isSuccessful) return null
-        return response.use { it.body?.string() }
+        // Close the response on every path — a bare return-null on non-2xx leaked
+        // the connection, and 404s are the *normal* path when a lyric isn't found.
+        http.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            return response.body?.string()
+        }
     }
 
     fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")

@@ -5,6 +5,7 @@ import android.os.Bundle
 import com.google.firebase.analytics.FirebaseAnalytics
 
 object AnalyticsHelper {
+    @Volatile
     private var firebaseAnalytics: FirebaseAnalytics? = null
 
     private fun getAnalytics(context: Context): FirebaseAnalytics {

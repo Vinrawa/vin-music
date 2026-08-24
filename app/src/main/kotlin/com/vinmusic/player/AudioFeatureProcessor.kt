@@ -5,8 +5,11 @@ import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.audio.AudioProcessor.AudioFormat
 import androidx.media3.common.audio.AudioProcessor.UnhandledAudioFormatException
 import com.vinmusic.recommendation.dsp.BpmEstimator
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -35,6 +38,16 @@ class AudioFeatureProcessor : BaseAudioProcessor() {
     private var window2EndSample = 0L
 
     private var isAnalysisTriggered = false
+
+    // Analysis outlives individual queueInput calls but must not outlive the
+    // processor: jobs are tracked so onReset can cancel them (previously they were
+    // detached and uncancellable, each also pinning ~22 MB of copied buffers).
+    private val analysisScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e ->
+            Log.e("AudioFeatureProcessor", "Analysis crashed: ${e.message}")
+        }
+    )
+    private val activeAnalysisJobs = mutableListOf<Job>()
 
     fun resetForSong(
         songKey: String,
@@ -72,6 +85,7 @@ class AudioFeatureProcessor : BaseAudioProcessor() {
     }
 
     override fun onReset() {
+        synchronized(activeAnalysisJobs) { activeAnalysisJobs.toList() }.forEach { it.cancel() }
         window1Buffer = null
         window2Buffer = null
         window1EndSample = 0L
@@ -168,10 +182,13 @@ class AudioFeatureProcessor : BaseAudioProcessor() {
         val w1 = window1Buffer?.copyOf()
         val w2 = window2Buffer?.copyOf()
 
-        // Turn off analysis capture immediately to free buffers and stop processing
+        // Turn off analysis capture immediately and release the ~22 MB capture
+        // buffers — the copies above are all the analysis needs.
         shouldAnalyze = false
+        window1Buffer = null
+        window2Buffer = null
 
-        CoroutineScope(Dispatchers.Default).launch {
+        val job = analysisScope.launch {
             try {
                 Log.d("AudioFeatureProcessor", "Starting background analysis for $title - $artist ($songKey)")
 
@@ -243,6 +260,10 @@ class AudioFeatureProcessor : BaseAudioProcessor() {
             } catch (e: Exception) {
                 Log.e("AudioFeatureProcessor", "Background analysis failed for $songKey", e)
             }
+        }
+        synchronized(activeAnalysisJobs) { activeAnalysisJobs.add(job) }
+        job.invokeOnCompletion {
+            synchronized(activeAnalysisJobs) { activeAnalysisJobs.remove(job) }
         }
     }
 

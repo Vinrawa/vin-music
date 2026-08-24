@@ -28,10 +28,17 @@ object ArtistBannerCache {
     }
 
     private fun normalizedName(artistName: String): String {
-        return artistName.lowercase()
+        val cleaned = artistName.lowercase()
             .replace(Regex("[^a-z0-9]"), "_")
             .replace(Regex("_+"), "_")
             .trim('_')
+        // Non-Latin names (core Punjabi/Hindi audience) collapse to "" here, which
+        // made every such artist share a single ".jpg" banner file. Use a stable
+        // hash-based name instead.
+        if (cleaned.isEmpty()) {
+            return "artist_%08x".format(artistName.hashCode())
+        }
+        return cleaned
     }
 
     fun bannerPath(context: Context, artistName: String): String? {

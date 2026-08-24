@@ -280,9 +280,14 @@ internal object TtmlParser {
      *   (used when the API declares syncType="richsync" even if timing data is sparse).
      */
     fun parse(ttml: String, forceRichSync: Boolean = false): List<LyricsLine> {
-        return runCatching {
+        return try {
             val factory = DocumentBuilderFactory.newInstance().apply {
                 isNamespaceAware = true
+                // This XML comes from a remote lyrics API — fully disable DOCTYPE so
+                // external entities AND internal entity expansion ("billion laughs")
+                // are rejected outright, not just external resolution.
+                runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
+                runCatching { setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING, true) }
                 runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
                 runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
                 runCatching { setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false) }
@@ -325,7 +330,11 @@ internal object TtmlParser {
             }
                 .distinctBy { "${it.timeMs}|${it.text}" }
                 .sortedBy { it.timeMs }
-        }.getOrElse { emptyList() }
+        } catch (e: Exception) {
+            // Catch Exception, not Throwable — Errors (StackOverflow from deeply
+            // nested XML) should not be silently swallowed here.
+            emptyList()
+        }
     }
 
     /**

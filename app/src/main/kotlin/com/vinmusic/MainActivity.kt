@@ -62,9 +62,20 @@ class MainActivity : ComponentActivity() {
 
     private val playerVm: PlayerViewModel by viewModels()
 
+    private var mediaControllerFuture: com.google.common.util.concurrent.ListenableFuture<androidx.media3.session.MediaController>? = null
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { }
+
+    override fun onDestroy() {
+        // Release the MediaController connection acquired in onCreate.
+        mediaControllerFuture?.let { future ->
+            androidx.media3.session.MediaController.releaseFuture(future)
+        }
+        mediaControllerFuture = null
+        super.onDestroy()
+    }
 
     @OptIn(UnstableApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -93,13 +104,12 @@ class MainActivity : ComponentActivity() {
         // Connect MediaController to bind VinMusicService and activate media notifications
         try {
             val sessionToken = androidx.media3.session.SessionToken(
-                this, 
+                this,
                 android.content.ComponentName(this, com.vinmusic.player.VinMusicService::class.java)
             )
-            val controllerFuture = androidx.media3.session.MediaController.Builder(this, sessionToken).buildAsync()
-            controllerFuture.addListener({
-                android.util.Log.d("VIN_MAIN", "MediaController successfully connected to session")
-            }, { command -> runOnUiThread(command) })
+            mediaControllerFuture = androidx.media3.session.MediaController.Builder(this, sessionToken).buildAsync()
+            // Released in onDestroy() — an unreleased controller leaks its service
+            // binding on every Activity recreation.
         } catch (e: Exception) {
             android.util.Log.e("VIN_MAIN", "Failed to connect MediaController: ${e.message}")
         }
@@ -681,7 +691,7 @@ fun VinMusicApp(vm: PlayerViewModel, authVm: AuthViewModel) {
                 },
                 onDeletePlaylist = {
                     scope.launch(Dispatchers.IO) {
-                        db.playlistDao().deletePlaylist(pl.id)
+                        db.playlistDao().deletePlaylistWithSongs(pl.id)
                     }
                 },
                 onDismiss = { selectedPlaylistForOptions = null }

@@ -238,6 +238,16 @@ interface PlaylistDao {
     @Query("DELETE FROM playlists WHERE id = :id")
     suspend fun deletePlaylist(id: Long)
 
+    /** playlist_songs has no FK cascade — deleting only the playlist row orphaned its songs forever. */
+    @Query("DELETE FROM playlist_songs WHERE playlistId = :id")
+    suspend fun deleteSongsForPlaylist(id: Long)
+
+    @Transaction
+    suspend fun deletePlaylistWithSongs(id: Long) {
+        deleteSongsForPlaylist(id)
+        deletePlaylist(id)
+    }
+
     @Query("SELECT * FROM playlist_songs WHERE playlistId = :id ORDER BY position")
     fun getSongsFlow(id: Long): Flow<List<PlaylistSongEntity>>
 

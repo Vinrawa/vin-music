@@ -1006,14 +1006,14 @@ fun UpdateDialog(
         text = {
             Column {
                 Text(
-                    text = "Version ${updateInfo.latestVersionName} is available.",
+                    text = "Version ${updateInfo.latestVersionName ?: "?"} is available.",
                     color = VinColors.Primary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Medium
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    text = "What's new:\n${updateInfo.releaseNotes}",
+                    text = "What's new:\n${updateInfo.releaseNotes ?: ""}",
                     color = VinColors.Secondary,
                     fontSize = 14.sp
                 )

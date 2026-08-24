@@ -39,9 +39,7 @@ object ShareCardGenerator {
             val bitmap = withContext(Dispatchers.IO) {
                 generateCard(context, songTitle, artistName, thumbnailUrl, duration)
             }
-            withContext(Dispatchers.Main) {
-                shareImage(context, bitmap, songTitle, artistName)
-            }
+            shareImage(context, bitmap, songTitle, artistName)
         } catch (e: Exception) {
             android.util.Log.e("ShareCard", "Error generating or sharing card", e)
             withContext(Dispatchers.Main) {
@@ -288,21 +286,23 @@ object ShareCardGenerator {
         return count
     }
 
-    private fun shareImage(context: Context, bitmap: Bitmap, title: String, artist: String) {
+    private suspend fun shareImage(context: Context, bitmap: Bitmap, title: String, artist: String) {
         try {
-            // Save to cache dir
-            val shareDir = File(context.cacheDir, "share_cards")
-            shareDir.mkdirs()
-            val file = File(shareDir, "vin_music_card.png")
-            FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.PNG, 95, out)
-            }
+            // PNG encode + write of a 1080×1920 card takes hundreds of ms — keep it off Main.
+            val uri: Uri = withContext(Dispatchers.IO) {
+                val shareDir = File(context.cacheDir, "share_cards")
+                shareDir.mkdirs()
+                val file = File(shareDir, "vin_music_card.png")
+                FileOutputStream(file).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 95, out)
+                }
 
-            val uri: Uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                file
-            )
+                FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    file
+                )
+            }
 
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "image/png"
@@ -310,11 +310,13 @@ object ShareCardGenerator {
                 putExtra(Intent.EXTRA_TEXT, "Listening to \"$title\" by $artist on Vin Music!")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            
+
             val chooserIntent = Intent.createChooser(shareIntent, "Share Song Card").apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(chooserIntent)
+            withContext(Dispatchers.Main) {
+                context.startActivity(chooserIntent)
+            }
         } catch (e: Exception) {
             android.util.Log.e("ShareCard", "Failed to share: ${e.message}", e)
             Toast.makeText(context, "Failed to share image: ${e.localizedMessage}", Toast.LENGTH_LONG).show()

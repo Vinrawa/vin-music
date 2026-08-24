@@ -637,7 +637,7 @@ fun PlaylistDetailScreen(
                                      IconButton(
                                          onClick = {
                                              scope.launch(Dispatchers.IO) {
-                                                 db.playlistDao().deletePlaylist(playlistId)
+                                                 db.playlistDao().deletePlaylistWithSongs(playlistId)
                                                  withContext(Dispatchers.Main) {
                                                      onBack()
                                                  }

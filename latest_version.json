@@ -1,8 +1,8 @@
 {
-  "latestVersionCode": 18,
-  "latestVersionName": "2.2.2",
+  "latestVersionCode": 19,
+  "latestVersionName": "2.3.0",
   "apkUrl": "https://vinrawa.github.io/Vin-music-v2/vinmusic.apk",
-  "sha256": "354515dc42eae9b6e7efb0835dc4434132fef0b362987997367b7de550a47273",
+  "sha256": "c9f38b59786b5a27ad0efb00e86e34954be74d5fed8582797ed2e413fee6c696",
   "forceUpdate": false,
-  "releaseNotes": "Real Frosted-Glass live blur (Haze), Top Sheen lighting, enhanced Glassmorphism, and UI/UX visual upgrades."
+  "releaseNotes": "Major security upgrade & key rotation, SHA-256 update verification, memory leak fixes, download reliability, and widget crash-proofing. (Note: Please uninstall any previous build before installing this security update)."
 }

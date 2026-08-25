@@ -73,7 +73,7 @@ object YTMusicApi {
     private fun webRemixContext() = mapOf(
         "client" to mapOf(
             "clientName" to "WEB_REMIX",
-            "clientVersion" to "1.20231214.00.00",
+            "clientVersion" to InnerTube.WEB_REMIX_CLIENT_VERSION,
             "hl" to "en",
             "gl" to "IN",
         )
@@ -86,7 +86,7 @@ object YTMusicApi {
             .header("Content-Type", "application/json")
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .header("X-YouTube-Client-Name", "67")
-            .header("X-YouTube-Client-Version", "1.20231214.00.00")
+            .header("X-YouTube-Client-Version", InnerTube.WEB_REMIX_CLIENT_VERSION)
             .header("Origin", "https://music.youtube.com")
             .header("Referer", "https://music.youtube.com/")
         val ctx = appContext

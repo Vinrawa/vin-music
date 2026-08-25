@@ -29,7 +29,12 @@ data class SongMetadata(
     val tempo: Int,     // BPM
     val year: Int,
     val isOfficial: Boolean,
-    val sourceQuality: String
+    val sourceQuality: String,
+    // True when genre/mood came from actual evidence (keyword match or analyzed
+    // tags) rather than the fallback default — low-confidence values must not
+    // train the TasteDNA profile.
+    val genreConfident: Boolean = false,
+    val moodConfident: Boolean = false
 )
 
 data class RecommendedSong(
@@ -58,7 +63,10 @@ object RecommendationManager {
     
     // Cache recommendations for 15 minutes to prevent frequent network requests
     private const val CACHE_EXPIRY_MS = 15 * 60 * 1000L
-    private const val CACHE_SCHEMA_VERSION = 3
+    // Disk-cached shelves live for 6 hours so home refreshes between sessions
+    // instead of staying frozen until a manual pull-to-refresh.
+    private const val SHELF_DISK_TTL_MS = 6 * 60 * 60 * 1000L
+    private const val CACHE_SCHEMA_VERSION = 4
     private var lastCacheTime: Long = 0L
     private val cachedSections = ArrayList<Pair<String, List<RecommendedSong>>>()
     
@@ -189,6 +197,14 @@ object RecommendationManager {
             }
             val json = prefs.getString("cached_sections", null) ?: return null
             val time = prefs.getLong("cached_time", 0L)
+
+            // Expired shelves are treated as a cache miss so a fresh session
+            // regenerates from current listening behavior.
+            if (System.currentTimeMillis() - time > SHELF_DISK_TTL_MS) {
+                Log.d(TAG, "Disk cache older than TTL — treating as invalid.")
+                prefs.edit().remove("cached_sections").remove("cached_time").apply()
+                return null
+            }
             
             val type = object : TypeToken<List<CachedSection>>() {}.type
             val list: List<CachedSection> = gson.fromJson(json, type) ?: return null
@@ -617,20 +633,24 @@ object RecommendationManager {
         if (cachedFeature != null) {
             var realGenre = meta.genre
             var realMood = meta.mood
+            var genreConfident = meta.genreConfident
+            var moodConfident = meta.moodConfident
             try {
                 val gson = Gson()
                 val typeToken = object : TypeToken<List<String>>() {}.type
                 val genres: List<String> = gson.fromJson(cachedFeature.genreTags, typeToken) ?: emptyList()
                 val moods: List<String> = gson.fromJson(cachedFeature.moodTags, typeToken) ?: emptyList()
-                if (genres.isNotEmpty()) realGenre = genres[0]
-                if (moods.isNotEmpty()) realMood = moods[0]
+                if (genres.isNotEmpty()) { realGenre = genres[0]; genreConfident = true }
+                if (moods.isNotEmpty()) { realMood = moods[0]; moodConfident = true }
             } catch (_: Exception) {}
 
             meta = meta.copy(
                 energy = cachedFeature.energyReal.toDouble(),
                 tempo = if (cachedFeature.bpmReal in 40f..250f) cachedFeature.bpmReal.toInt() else meta.tempo,
                 genre = realGenre,
-                mood = realMood
+                mood = realMood,
+                genreConfident = genreConfident,
+                moodConfident = moodConfident
             )
         }
         return meta
@@ -741,12 +761,19 @@ object RecommendationManager {
             language = "Tamil"
         } else if (koreanKeywords.any { fullText.contains(it) }) {
             language = "Korean"
-        } else if (englishKeywords.any { Regex("\\b$it\\b").containsMatchIn(fullText) }) {
-            language = "English"
+        } else {
+            // Generic English words are weak evidence ("you"/"love" appear in
+            // Hinglish titles too) — require at least two distinct hits so random
+            // Latin-script non-English songs don't train the language profile.
+            val englishHits = englishKeywords.filter { Regex("\\b$it\\b").containsMatchIn(fullText) }
+            if (englishHits.size >= 2) {
+                language = "English"
+            }
         }
 
         // 2. Genre Detection
         var genre = "Pop"
+        var genreConfident = false
         val lofiKeywords = listOf("lofi", "lo-fi", "chill", "slowed", "reverb", "aesthetic", "bedtime", "relax", "meditate", "sleep", "study", "ambient", "peaceful", "calm")
         val rapKeywords = listOf("rap", "hip hop", "hiphop", "hip-hop", "cypher", "freestyle", "beat", "diss", "badshah", "raftaar", "kr\$na", "emiway", "mc stan", "divine", "drake", "eminem", "shubh", "kendrick", "lamar", "durk", "cole", "travis", "future", "lil baby", "savage", "boomin", "playboi", "carti", "kanye", "thug", "young stunners")
         val indieKeywords = listOf("indie", "prateek kuhad", "anuv jain", "local train", "yellow diary", "independent", "mitraz", "aditya rikhari", "darshan raval", "taba chake", "kuhad", "anuv", "chai met toast", "osho jain")
@@ -754,21 +781,22 @@ object RecommendationManager {
         val bollywoodKeywords = listOf("bollywood", "t-series", "zee music", "yrf", "soundtrack", "ost", "arijit", "pritam", "saregama", "shreya", "kakkar", "nautiyal", "atif", "aslam", "sonu", "nigam", "udit", "rahman")
 
         if (lofiKeywords.any { fullText.contains(it) }) {
-            genre = "Lofi"
+            genre = "Lofi"; genreConfident = true
         } else if (rapKeywords.any { fullText.contains(it) }) {
-            genre = "Rap/Hip-Hop"
+            genre = "Rap/Hip-Hop"; genreConfident = true
         } else if (indieKeywords.any { fullText.contains(it) }) {
-            genre = "Indie"
+            genre = "Indie"; genreConfident = true
         } else if (rockKeywords.any { fullText.contains(it) }) {
-            genre = "Rock"
+            genre = "Rock"; genreConfident = true
         } else if (bollywoodKeywords.any { fullText.contains(it) } && language == "Hindi") {
-            genre = "Bollywood"
+            genre = "Bollywood"; genreConfident = true
         } else if (punjabiKeywords.any { fullText.contains(it) } && language == "Punjabi") {
-            genre = "Punjabi Folk"
+            genre = "Punjabi Folk"; genreConfident = true
         }
 
         // 3. Mood Detection
         var mood = "Chill/Relaxed"
+        var moodConfident = false
         val romanticKeywords = listOf("love", "pyar", "dil", "ishq", "romantic", "mohabat", "humsafar", "tum", "tujhe", "shreya ghoshal", "sweetheart", "kiss", "valentine", "sanam")
         val sadKeywords = listOf("sad", "breakup", "broken", "dard", "gam", "alone", "crying", "judaa", "tanha", "tears", "lonely", "hurt")
         val energeticKeywords = listOf("remix", "edm", "party", "club", "dance", "gym", "workout", "dj", "punjabi", "badshah", "upbeat", "bhangra", "bass boosted", "trap")
@@ -776,23 +804,23 @@ object RecommendationManager {
         val darkKeywords = listOf("dark", "heavy", "metal", "evil", "ghost", "shadow", "rage")
 
         if (sadKeywords.any { fullText.contains(it) }) {
-            mood = "Sad"
+            mood = "Sad"; moodConfident = true
         } else if (romanticKeywords.any { fullText.contains(it) }) {
-            mood = "Romantic"
+            mood = "Romantic"; moodConfident = true
         } else if (energeticKeywords.any { fullText.contains(it) }) {
-            mood = "Energetic"
+            mood = "Energetic"; moodConfident = true
         } else if (happyKeywords.any { fullText.contains(it) }) {
-            mood = "Happy"
+            mood = "Happy"; moodConfident = true
         } else if (darkKeywords.any { fullText.contains(it) }) {
-            mood = "Dark"
+            mood = "Dark"; moodConfident = true
         }
 
-        // 4. Energy & Tempo
+        // 4. Energy & Tempo — stable genre/mood baselines. No per-video random
+        // jitter: fake variance here directly pollutes the TasteDNA vector.
         var energy = 0.5
         var tempo = 100
         when (genre) {
             "Lofi" -> { energy = 0.25; tempo = 74 }
-            "Sad" -> { energy = 0.3; tempo = 82 }
             "Rap/Hip-Hop" -> { energy = 0.82; tempo = 136 }
             "Rock" -> { energy = 0.88; tempo = 128 }
             "Punjabi Folk" -> { energy = 0.85; tempo = 124 }
@@ -810,14 +838,11 @@ object RecommendationManager {
                     "Romantic" -> { energy = 0.5; tempo = 92 }
                     "Happy" -> { energy = 0.7; tempo = 115 }
                     "Dark" -> { energy = 0.8; tempo = 120 }
+                    "Chill/Relaxed" -> { energy = 0.3; tempo = 82 }
                     else -> { energy = 0.55; tempo = 96 }
                 }
             }
         }
-        
-        val hash = item.videoId.hashCode()
-        energy = (energy + (hash % 10) / 100.0).coerceIn(0.1, 0.99)
-        tempo = (tempo + (hash % 15) - 7).coerceIn(60, 180)
 
         // 5. Year
         var year = 2025
@@ -825,15 +850,11 @@ object RecommendationManager {
         val matchResult = yearRegex.find(item.title)
         if (matchResult != null) {
             year = matchResult.value.toIntOrNull() ?: 2025
-        } else {
-            if (fullText.contains("retro") || fullText.contains("classic") || fullText.contains("90s") || fullText.contains("80s") || fullText.contains("kishore") || fullText.contains("lata")) {
-                year = 1995 + (hash % 15)
-            } else {
-                year = 2021 + (hash % 5)
-            }
+        } else if (fullText.contains("retro") || fullText.contains("classic") || fullText.contains("90s") || fullText.contains("80s") || fullText.contains("kishore") || fullText.contains("lata")) {
+            year = 1998
         }
-        
-        val isOfficial = isOfficialArtistChannel(item.title, item.author) && 
+
+        val isOfficial = isOfficialArtistChannel(item.title, item.author) &&
                          !isUnofficialContent(item.title, item.author)
         val sourceQuality = if (isOfficial) "Ultra HD (320kbps)" else "Standard Quality (128kbps)"
 
@@ -843,11 +864,13 @@ object RecommendationManager {
             genre = genre,
             mood = mood,
             language = language,
-            energy = energy,
-            tempo = tempo,
+            energy = energy.coerceIn(0.1, 0.99),
+            tempo = tempo.coerceIn(60, 180),
             year = year,
             isOfficial = isOfficial,
-            sourceQuality = sourceQuality
+            sourceQuality = sourceQuality,
+            genreConfident = genreConfident,
+            moodConfident = moodConfident
         )
     }
 
@@ -859,6 +882,18 @@ object RecommendationManager {
         cachedProfile = null
     }
 
+    /** Aggregated per-track affinity so each song trains the profile exactly once. */
+    private data class TrackAffinity(
+        val videoId: String,
+        var title: String = "",
+        var author: String = "",
+        var durationText: String = "",
+        var interactionScore: Double = 0.0, // likes/completions/repeats minus skips
+        var lastPlayedAt: Long = 0L,
+        var inHistory: Boolean = false,
+        var imported: Boolean = false
+    )
+
     suspend fun buildTasteProfile(db: VinDatabase): TasteProfile = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         val cached = cachedProfile
@@ -869,29 +904,30 @@ object RecommendationManager {
         val signals = db.interactionSignalDao().getAll()
         val imports = db.playlistDao().getAllPlaylistSongs()
         val history = db.historyDao().getAllHistory()
-        
+
         val cachedFeaturesMap = try {
             db.songFeatureCacheDao().getAll().associateBy { it.songKey }
         } catch (_: Exception) {
             emptyMap<String, SongFeatureCache>()
         }
-        
+
         val artistScores = HashMap<String, Double>()
         val genreScores = HashMap<String, Double>()
         val moodScores = HashMap<String, Double>()
         val langScores = HashMap<String, Double>()
-        
+
         val favoriteTracks = HashSet<String>()
         val skippedTracks = HashSet<String>()
         val skippedArtists = HashSet<String>()
         val downloadedTracks = ArrayList<InteractionSignal>()
         val likedTracks = ArrayList<InteractionSignal>()
 
-        var weightedEnergy = 0.0
-        var weightedTempo = 0.0
-        var totalWeight = 0.0
+        // ── Pass 1: merge signals + history + imports into one entry per track ──
+        // Previously the same song could count three times (signal score + flat
+        // history +1 + import +3), and nothing decayed — so old obsessions and
+        // bulk imports dominated the DNA forever.
+        val tracks = HashMap<String, TrackAffinity>()
 
-        // 1. Process Interaction Signals (Play, Likes, Skips)
         for (sig in signals) {
             val author = sig.author.trim()
             if (author.isBlank() || author.lowercase() == "unknown") continue
@@ -909,7 +945,6 @@ object RecommendationManager {
             }
             score += sig.searchClickCount * 3.0
             score -= sig.skip20sCount * 6.0
-
             if (sig.skipCount > 0 && sig.skip20sCount == 0) {
                 score -= sig.skipCount * 3.0
             }
@@ -917,7 +952,6 @@ object RecommendationManager {
             if (score > 6.0) {
                 favoriteTracks.add(sig.videoId)
             }
-
             if (sig.skip20sCount >= 2 || sig.skipCount >= 4) {
                 skippedTracks.add(sig.videoId)
                 if (sig.skipCount > sig.playCount) {
@@ -925,60 +959,81 @@ object RecommendationManager {
                 }
             }
 
-            artistScores[author] = (artistScores[author] ?: 0.0) + score
-
-            val fakeItem = VideoItem(sig.videoId, sig.title, sig.author, sig.durationText)
-            val songKey = generateSongKey(sig.author, sig.title)
-            val cachedFeature = cachedFeaturesMap[songKey]
-            val meta = getCachedOrInferredMetadata(fakeItem, cachedFeature)
-            if (score > 0) {
-                genreScores[meta.genre] = (genreScores[meta.genre] ?: 0.0) + score
-                moodScores[meta.mood] = (moodScores[meta.mood] ?: 0.0) + score
-                langScores[meta.language] = (langScores[meta.language] ?: 0.0) + score
+            val agg = tracks.getOrPut(sig.videoId) {
+                TrackAffinity(sig.videoId, sig.title, author, sig.durationText)
             }
-
-            // Continuous vector TasteDNA profile calculation merged in the same pass
-            val vectorScore = sig.completeCount * 5.0 + sig.repeatCount * 6.0 + 
-                              (if (sig.isLiked) 10.0 else 0.0) + (if (sig.isDownloaded) 8.0 else 0.0)
-            if (vectorScore > 2.0) {
-                weightedEnergy += meta.energy * vectorScore
-                weightedTempo += meta.tempo * vectorScore
-                totalWeight += vectorScore
-            }
+            agg.interactionScore += score
+            agg.lastPlayedAt = maxOf(agg.lastPlayedAt, sig.lastPlayedAt)
         }
 
-        // 2. Process Imported Playlists (highly trains TasteDNA on cold/warm starts!)
-        for (imp in imports) {
-            val author = imp.author.trim()
-            if (author.isBlank() || author.lowercase() == "unknown") continue
-            
-            // Give each imported song a dynamic base score weight of +3.0
-            artistScores[author] = (artistScores[author] ?: 0.0) + 3.0
-            
-            val fakeItem = VideoItem(imp.videoId, imp.title, imp.author, imp.durationText)
-            val songKey = generateSongKey(imp.author, imp.title)
-            val cachedFeature = cachedFeaturesMap[songKey]
-            val meta = getCachedOrInferredMetadata(fakeItem, cachedFeature)
-            genreScores[meta.genre] = (genreScores[meta.genre] ?: 0.0) + 3.0
-            moodScores[meta.mood] = (moodScores[meta.mood] ?: 0.0) + 3.0
-            langScores[meta.language] = (langScores[meta.language] ?: 0.0) + 3.0
-        }
-
-        // 3. Process History Entries (Listen back logs)
         for (h in history) {
             val author = h.author.trim()
             if (author.isBlank() || author.lowercase() == "unknown") continue
-            
-            // Base weight for simple play history
-            artistScores[author] = (artistScores[author] ?: 0.0) + 1.0
-            
-            val fakeItem = VideoItem(h.videoId, h.title, h.author, h.durationText)
-            val songKey = generateSongKey(h.author, h.title)
+            val agg = tracks.getOrPut(h.videoId) {
+                TrackAffinity(h.videoId, h.title, author, h.durationText)
+            }
+            agg.inHistory = true
+            agg.lastPlayedAt = maxOf(agg.lastPlayedAt, h.playedAt)
+        }
+
+        for (imp in imports) {
+            val author = imp.author.trim()
+            if (author.isBlank() || author.lowercase() == "unknown") continue
+            val agg = tracks.getOrPut(imp.videoId) {
+                TrackAffinity(imp.videoId, imp.title, author, imp.durationText)
+            }
+            agg.imported = true
+        }
+
+        // ── Pass 2: recency-weighted scoring ──────────────────────────────────
+        // Exponential decay with a ~21-day time constant: what you listened to
+        // this week shapes your DNA far more than what you played months ago.
+        var weightedEnergy = 0.0
+        var weightedTempo = 0.0
+        var totalWeight = 0.0
+
+        for (agg in tracks.values) {
+            val ageDays = if (agg.lastPlayedAt > 0) {
+                ((now - agg.lastPlayedAt) / 86_400_000.0).coerceAtLeast(0.0)
+            } else Double.MAX_VALUE / 2.0
+            val recency = Math.exp(-ageDays / 21.0)
+
+            val positive = if (agg.interactionScore > 0) {
+                agg.interactionScore * (0.35 + 0.65 * recency)
+            } else 0.0
+            // Plain plays fade fast — they only matter while recent.
+            val plainPlay = if (agg.inHistory && agg.interactionScore <= 0) 0.6 * recency else 0.0
+            // Imports express deliberate intent, so no decay — but modest weight.
+            val importBoost = if (agg.imported && agg.interactionScore <= 0) 2.5 else 0.0
+
+            // Cap per-track influence so a single obsession can't own the profile.
+            val weight = (positive + plainPlay + importBoost).coerceIn(-8.0, 15.0)
+            if (weight == 0.0) continue
+
+            artistScores[agg.author] = (artistScores[agg.author] ?: 0.0) + weight
+
+            val fakeItem = VideoItem(agg.videoId, agg.title, agg.author, agg.durationText)
+            val songKey = generateSongKey(agg.author, agg.title)
             val cachedFeature = cachedFeaturesMap[songKey]
             val meta = getCachedOrInferredMetadata(fakeItem, cachedFeature)
-            genreScores[meta.genre] = (genreScores[meta.genre] ?: 0.0) + 1.0
-            moodScores[meta.mood] = (moodScores[meta.mood] ?: 0.0) + 1.0
-            langScores[meta.language] = (langScores[meta.language] ?: 0.0) + 1.0
+
+            if (weight > 0) {
+                // Only evidence-backed genres/moods may train those dimensions;
+                // fallback defaults would otherwise inflate "Pop" and "Chill".
+                if (meta.genreConfident) {
+                    genreScores[meta.genre] = (genreScores[meta.genre] ?: 0.0) + weight
+                }
+                if (meta.moodConfident) {
+                    moodScores[meta.mood] = (moodScores[meta.mood] ?: 0.0) + weight
+                }
+                langScores[meta.language] = (langScores[meta.language] ?: 0.0) + weight
+
+                if (agg.interactionScore > 2.0) {
+                    weightedEnergy += meta.energy * weight
+                    weightedTempo += meta.tempo * weight
+                    totalWeight += weight
+                }
+            }
         }
 
         val sortedArtists = artistScores.toList()
@@ -989,17 +1044,6 @@ object RecommendationManager {
         val sortedGenres = genreScores.toList().sortedByDescending { it.second }
         val sortedMoods = moodScores.toList().sortedByDescending { it.second }
         val sortedLangs = langScores.toList().sortedByDescending { it.second }
-        
-        // Add imports to vector profile calculation
-        for (imp in imports.take(15)) {
-            val fake = VideoItem(imp.videoId, imp.title, imp.author, imp.durationText)
-            val songKey = generateSongKey(imp.author, imp.title)
-            val cachedFeature = cachedFeaturesMap[songKey]
-            val meta = getCachedOrInferredMetadata(fake, cachedFeature)
-            weightedEnergy += meta.energy * 3.0
-            weightedTempo += meta.tempo * 3.0
-            totalWeight += 3.0
-        }
 
         val targetEnergy = if (totalWeight > 0) (weightedEnergy / totalWeight) else 0.58
         val targetTempo = if (totalWeight > 0) (weightedTempo / totalWeight).toInt() else 105
@@ -1633,6 +1677,68 @@ object RecommendationManager {
             .take(10)
     }
 
+    /** Fetches YT Music's own related tracks for a seed; empty list when unavailable. */
+    private suspend fun fetchYtmRelated(videoId: String): List<VideoItem> = withContext(Dispatchers.IO) {
+        try {
+            val next = com.vinmusic.innertube.YTMusicApi.getNextRelated(videoId, playlistId = "RDAMVM$videoId")
+            val browse = next.relatedBrowse ?: return@withContext emptyList()
+            com.vinmusic.innertube.YTMusicApi.getRelatedSongs(browse.browseId, browse.params)
+        } catch (e: Exception) {
+            Log.w(TAG, "YTM related fetch failed for $videoId: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** Interleaves per-seed lists round-robin so no single seed dominates. */
+    fun interleaveRoundRobin(lists: List<List<VideoItem>>, cap: Int): List<VideoItem> {
+        val out = ArrayList<VideoItem>(cap)
+        val maxLen = lists.maxOfOrNull { it.size } ?: 0
+        outer@ for (i in 0 until maxLen) {
+            for (list in lists) {
+                if (i < list.size) {
+                    out.add(list[i])
+                    if (out.size >= cap) break@outer
+                }
+            }
+        }
+        return out
+    }
+
+    /**
+     * Pre-filters raw radio/watch-next candidates before they enter the autoplay
+     * queue. Pure function (no DB access) so the fast path stays cheap — deeper
+     * ranking, skip history and taste scoring happen in Smart Queue, which
+     * replaces these results once ready.
+     *
+     * - drops compilations / non-music videos / unofficial uploads
+     * - caps the seed artist at 1 track and every other artist at 2
+     * - removes near-duplicate titles (same song, different upload)
+     * - keeps at most [maxItems] entries
+     */
+    fun curateRadioCandidates(seed: VideoItem, candidates: List<VideoItem>, maxItems: Int = 8): List<VideoItem> {
+        val selected = ArrayList<VideoItem>(maxItems)
+        val artistCounts = HashMap<String, Int>()
+        val seedArtist = normalizeArtistName(seed.author)
+        for (item in candidates) {
+            if (selected.size >= maxItems) break
+            if (item.videoId == seed.videoId) continue
+            val title = item.title.trim()
+            val author = item.author.trim()
+            if (title.isBlank()) continue
+            if (isCompilationTrack(title, item.durationText)) continue
+            if (isNonMusicVideo(title, author)) continue
+            if (isUnofficialContent(title, author)) continue
+            val artistKey = normalizeArtistName(author)
+            val cap = if (artistKey.isNotBlank() && artistKey == seedArtist) 1 else 2
+            if ((artistCounts[artistKey] ?: 0) >= cap) continue
+            if (isTooSimilar(seed.title, title)) continue
+            if (selected.any { normalizeArtistName(it.author) == artistKey && isTooSimilar(it.title, title) }) continue
+            selected.add(item)
+            artistCounts[artistKey] = (artistCounts[artistKey] ?: 0) + 1
+        }
+        return selected
+    }
+
     // ── GENERAL PERSONALIZED SHELVES (DIVERSITY & CAP GUARANTEE) ──────────────────
 
     suspend fun getRecommendations(ctx: Context, forceRefresh: Boolean = false): List<Pair<String, List<RecommendedSong>>> = withContext(Dispatchers.IO) {
@@ -1678,6 +1784,12 @@ object RecommendationManager {
         val profile = buildTasteProfile(db)
         val dna = profile.tasteDNA
 
+        // ── Session rotation offset ────────────────────────────────────────────
+        // Advances once a day (and on every pull-to-refresh) so seeds, featured
+        // artists and the rotating shelf subset change between sessions without
+        // ever feeling random within a session.
+        val rotationOffset = ((now / 86_400_000L).toInt()) + (if (forceRefresh) 1 else 0)
+
         data class CurationTask(
             val sectionKey: String,
             val queries: List<String>,
@@ -1708,7 +1820,7 @@ object RecommendationManager {
             mixQueries.addAll(listOf("popular hits music 2026", "hindi english punjabi songs hits"))
         }
         tasks.add(CurationTask(
-            sectionKey = "Your Taste Mix",
+            sectionKey = "Side A",
             queries = mixQueries,
             seedItem = null,
             sourceType = "your_taste_mix"
@@ -1717,6 +1829,9 @@ object RecommendationManager {
         // 1. More from [ArtistName] — one shelf per top artist (up to 3)
         val historyList = try { db.historyDao().getAllHistory() } catch (_: Exception) { emptyList() }
         val interactionSignals = try { db.interactionSignalDao().getAll() } catch (_: Exception) { emptyList() }
+        // Anything played very recently must not come back on discovery shelves —
+        // this is the main fix for "same songs har time".
+        val recentHistoryIds = historyList.take(25).map { it.videoId }.toSet()
         val listenedArtists = (historyList.map { it.author.trim() } + interactionSignals.map { it.author.trim() })
             .filter { it.isNotBlank() && it.lowercase() != "unknown" && !isCorporateOrDistributorChannel(it) }
         val cleanListenedCount = listenedArtists.map { normalizeArtistName(it) }.distinct().size
@@ -1764,7 +1879,9 @@ object RecommendationManager {
         val topPlayedList = interactionSignals.sortedByDescending { it.playCount }
 
         val similarSeed = if (cleanListenedCount >= 5) {
-            // Find the most representative seed: combine play count, recency, and likes
+            // Find the most representative seeds: combine play count, recency, and likes.
+            // Rotate through the top few across sessions so the "Similar songs" shelf
+            // explores different corners of the taste instead of one fixed track.
             val scoredTracks = interactionSignals
                 .filter { it.playCount > 0 }
                 .map { sig ->
@@ -1784,7 +1901,8 @@ object RecommendationManager {
                 }
                 .sortedByDescending { it.second }
 
-            scoredTracks.firstOrNull()?.first
+            val topSeeds = scoredTracks.take(6)
+            if (topSeeds.isEmpty()) null else topSeeds[rotationOffset % topSeeds.size].first
         } else {
             null
         }
@@ -1897,12 +2015,14 @@ object RecommendationManager {
             ))
         }
 
-        // "Fans also like" — discover adjacent artists via Every Noise genre graph, not hardcoded map
+        // "Fans also like" — adjacent artists via the Every Noise genre graph,
+        // the Spotify cluster DB and the curated similar-artist map. The featured
+        // subset rotates per session so this shelf doesn't repeat one fixed trio.
         val adjacentGenres = topGenresForShelves.flatMap { genre ->
             val gLower = genre.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop")
             genreSimilarMap?.get(gLower)?.take(2) ?: emptyList()
         }.distinct().take(6)
-        
+
         val adjacentArtistsFromGenres = adjacentGenres.flatMap { adjGenre ->
             val adjLower = adjGenre.lowercase(Locale.ROOT)
             // Find a few artists in this genre from the Spotify DB
@@ -1914,14 +2034,24 @@ object RecommendationManager {
                 ).filter { it.genre.lowercase(Locale.ROOT).contains(adjLower) || adjLower.contains(it.genre.lowercase(Locale.ROOT)) }
                  .map { it.artist }.distinct().take(2)
             } catch (_: Exception) { emptyList() }
-        }.distinct().filter { adj ->
-            moreFromArtists.none { normalizeArtistName(it) == normalizeArtistName(adj) }
-        }.take(6)
-        
-        if (adjacentArtistsFromGenres.isNotEmpty()) {
+        }
+
+        val fanArtistPool = (
+            adjacentArtistsFromGenres +
+                profile.topArtists.flatMap { (artist, _) -> SIMILAR_ARTISTS_MAP[normalizeArtistName(artist)].orEmpty() }
+            )
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !isCorporateOrDistributorChannel(it) }
+            .distinctBy { normalizeArtistName(it) }
+            .filter { adj -> moreFromArtists.none { normalizeArtistName(it) == normalizeArtistName(adj) } }
+
+        val fansAlsoLikeArtists = if (fanArtistPool.size <= 3) fanArtistPool
+            else List(3) { i -> fanArtistPool[(i * 2 + rotationOffset) % fanArtistPool.size] }.distinct()
+
+        if (fansAlsoLikeArtists.isNotEmpty()) {
             tasks.add(CurationTask(
                 sectionKey = "Fans also like",
-                queries = adjacentArtistsFromGenres.flatMap { artist -> listOf("$artist official songs", "$artist popular tracks") },
+                queries = fansAlsoLikeArtists.flatMap { artist -> listOf("$artist official songs", "$artist popular tracks") },
                 seedItem = null,
                 sourceType = "artists_like"
             ))
@@ -1950,6 +2080,66 @@ object RecommendationManager {
             seedItem = null,
             sourceType = "hidden_gems"
         ))
+
+        // Outside Your Lane — adjacent genres the profile barely touches.
+        // Deliberately NOT the user's core genres; exploration with a safety net.
+        val coreGenreTerms = topGenresForShelves.map { it.lowercase(Locale.ROOT) }
+        val laneGenrePool = (
+            adjacentGenres + listOf("jazz", "r&b soul", "electronic dance", "reggae", "afrobeat", "country folk", "synthwave", "bossa nova")
+            )
+            .map { it.lowercase(Locale.ROOT).trim() }
+            .distinct()
+            .filter { g ->
+                g.isNotBlank() && coreGenreTerms.none { core -> g.contains(core) || core.contains(g) }
+            }
+        val laneRotation = if (laneGenrePool.isEmpty()) emptyList()
+            else List(minOf(2, laneGenrePool.size)) { i -> laneGenrePool[(i * 2 + rotationOffset) % laneGenrePool.size] }.distinct()
+        if (laneRotation.isNotEmpty()) {
+            tasks.add(CurationTask(
+                sectionKey = "Outside Your Lane",
+                queries = laneRotation.flatMap { g -> listOf("$g official popular songs", "$g underrated artists") },
+                seedItem = null,
+                sourceType = "outside_your_lane"
+            ))
+        }
+
+        // B-Sides — deep cuts from an artist the user already loves. The featured
+        // artist advances through their top list across sessions.
+        val bSideArtist = moreFromArtists.getOrNull(
+            if (moreFromArtists.isEmpty()) 0 else rotationOffset % moreFromArtists.size
+        )
+        if (bSideArtist != null) {
+            tasks.add(CurationTask(
+                sectionKey = "B-Sides",
+                queries = listOf(
+                    "$bSideArtist album deep cuts official",
+                    "$bSideArtist underrated songs",
+                    "$bSideArtist live acoustic session"
+                ),
+                seedItem = null,
+                sourceType = "b_sides"
+            ))
+        }
+
+        // First Listen — brand-new releases from the user's artists and genres.
+        val yrNow = java.time.LocalDate.now().year
+        val firstListenQueries = mutableListOf<String>()
+        moreFromArtists.firstOrNull()?.let { artist ->
+            firstListenQueries.add("$artist new song $yrNow")
+            firstListenQueries.add("$artist latest release $yrNow")
+        }
+        topGenresForShelves.firstOrNull()?.let { genre ->
+            val genreLower = genre.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop").replace("punjabi folk", "punjabi")
+            firstListenQueries.add("$genreLower new releases $yrNow")
+        }
+        if (firstListenQueries.isNotEmpty()) {
+            tasks.add(CurationTask(
+                sectionKey = "First Listen",
+                queries = firstListenQueries,
+                seedItem = null,
+                sourceType = "first_listen"
+            ))
+        }
 
         // 5. Dynamic Time-of-Day Curation Task — uses genre graph, NOT hardcoded artists
         val topGenresForTime = profile.topGenres.map { it.first }.filter { it.isNotBlank() }.take(2)
@@ -1994,9 +2184,8 @@ object RecommendationManager {
         tasks.add(timeCuration)
 
         val newSections = ArrayList<Pair<String, List<RecommendedSong>>>()
-        val compilationSongs = java.util.Collections.synchronizedList(ArrayList<RecommendedSong>())
 
-        
+
         // GLOBAL ARTIST & DUPES DE-CLUSTERING FILTER: Cap at 2 tracks per artist globally on the Home Screen!
         val globalArtistCounts = HashMap<String, Int>()
         val globalShownVideoIds = HashSet<String>()
@@ -2021,16 +2210,27 @@ object RecommendationManager {
                                           .distinctBy { it.videoId }
                         taskCandidates.addAll(offlinePool)
                     } else if (task.sourceType == "your_taste_mix") {
-                        // Blend random history/likes (up to 8)
-                        val historyList = db.historyDao().getAllHistory()
-                        val signalsList = db.interactionSignalDao().getAll()
-                        val offlinePool = (historyList.map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
-                                          signalsList.map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
-                                          .distinctBy { it.videoId }
-                        val randomHistory = offlinePool.shuffled().take(8)
-                        taskCandidates.addAll(randomHistory)
+                        // Blend YTM related tracks around the user's most-completed
+                        // seeds — real engine similarity instead of echoing random
+                        // history entries.
+                        val rankedSeeds = db.interactionSignalDao().getAll()
+                            .sortedByDescending {
+                                it.completeCount + it.repeatCount * 2 + if (it.isLiked) 3 else 0
+                            }
+                            .filter { it.playCount > 0 || it.isLiked }
+                        // Rotate through the top seeds across sessions so Side A
+                        // doesn't orbit the same three tracks forever.
+                        val signalSeeds = (if (rankedSeeds.size <= 3) rankedSeeds
+                            else List(3) { i -> rankedSeeds[(i + rotationOffset) % rankedSeeds.size] })
+                            .map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
+                        if (signalSeeds.isNotEmpty()) {
+                            val perSeed = signalSeeds.map { seed ->
+                                async(Dispatchers.IO) { fetchYtmRelated(seed.videoId) }
+                            }.awaitAll()
+                            taskCandidates.addAll(interleaveRoundRobin(perSeed, cap = 40))
+                        }
 
-                        // And add search query results
+                        // Plus taste-blended search results for breadth
                         val queryJobs = task.queries.map { query ->
                             async(Dispatchers.IO) {
                                 try {
@@ -2045,6 +2245,12 @@ object RecommendationManager {
                         for (res in queryResults) {
                             taskCandidates.addAll(res)
                         }
+                    } else if (task.sourceType == "similar_songs" && task.seedItem != null) {
+                        // Primary: YTM's own related tracks for the representative
+                        // seed track; text-search queries are only the fallback.
+                        var related = fetchYtmRelated(task.seedItem.videoId)
+                        if (related.isEmpty()) related = fetchCandidatesFromQueries(task.queries)
+                        taskCandidates.addAll(related)
                     } else {
                         val queryJobs = task.queries.map { query ->
                             async(Dispatchers.IO) {
@@ -2069,11 +2275,13 @@ object RecommendationManager {
 
             for ((task, candidates) in taskResults) {
                 val filteredScored = ArrayList<RecommendedSong>()
-                
-                // Shuffle candidates dynamically on every call to avoid fixed/static playlist grids and promote fresh discoveries
-                val shuffledCandidates = candidates.shuffled()
-                
-                val candidateVideoIds = shuffledCandidates.map { it.videoId }
+
+                // Keep source order — YT related/search ranking is itself a quality
+                // signal; variety comes from the small entropy factor below instead
+                // of shuffling candidates before scoring.
+                val orderedCandidates = candidates
+
+                val candidateVideoIds = orderedCandidates.map { it.videoId }
                 val signalsMap = db.interactionSignalDao().getAll()
                     .filter { it.videoId in candidateVideoIds }
                     .associateBy { it.videoId }
@@ -2083,7 +2291,7 @@ object RecommendationManager {
                     db.songFeatureCacheDao().getAll().associateBy { it.songKey }
                 } catch (_: Exception) { emptyMap() }
 
-                for (item in shuffledCandidates) {
+                for (item in orderedCandidates) {
                     val author = item.author.trim()
                     val title = item.title.trim()
                     val normAuthor = author.lowercase(Locale.ROOT)
@@ -2096,9 +2304,8 @@ object RecommendationManager {
                     // Strict filter rules: compilation and unofficial streams blocked from main shelves!
                     val isCompile = isCompilationTrack(title, item.durationText) || isCompilationTitle(title)
                     if (isCompile) {
-                        val similarity = calculateTasteSimilarity(meta, dna)
-                        val score = similarity * 50.0 + (if (meta.isOfficial) 10.0 else 0.0)
-                        compilationSongs.add(RecommendedSong(item, score, "compilation", "Jukebox / Compilation mix"))
+                        // Compilations/jukeboxes no longer get a dedicated shelf —
+                        // they read as random filler on home.
                         continue
                     }
                     if (isNonMusicVideo(title, author)) continue
@@ -2113,8 +2320,14 @@ object RecommendationManager {
                         }
                     }
 
-                    if (profile.skippedTracks.contains(item.videoId) || 
+                    if (profile.skippedTracks.contains(item.videoId) ||
                         profile.skippedArtists.contains(normAuthor)) {
+                        continue
+                    }
+
+                    // Discovery shelves must surface NEW music — skip anything from
+                    // very recent plays (Rewind is the only familiar-by-design shelf).
+                    if (task.sourceType != "rewind_listen_back" && item.videoId in recentHistoryIds) {
                         continue
                     }
 
@@ -2161,10 +2374,13 @@ object RecommendationManager {
                         if (meta.energy <= 0.45 || meta.mood in listOf("Sad", "Romantic", "Chill", "Dark")) {
                             vibeBonus = 15.0
                         }
+                    } else if (task.sourceType == "first_listen" && meta.year >= yrNow - 1) {
+                        vibeBonus = 12.0
                     }
 
-                    // Dynamic random entropy factor (+/- 12 points) to guarantee varied selections on refresh
-                    val randomEntropyFactor = Math.random() * 12.0
+                    // Small entropy factor (±3 points) — enough for gentle variety
+                    // between refreshes without letting randomness outrank relevance.
+                    val randomEntropyFactor = (Math.random() - 0.5) * 6.0
                     val baseScore = (similarity * 60.0) + (historyScore * 20.0) + (if (meta.isOfficial) 20.0 else 0.0) + vibeBonus + randomEntropyFactor
                     
                     val likedByCount = cachedFeature?.likedByCount ?: 0
@@ -2181,11 +2397,14 @@ object RecommendationManager {
                         "fresh_finds"    -> "Fresh discovery for your taste"
                         "trending_songs" -> "Trending official hit"
                         "hidden_gems"    -> "Acoustically matches underrated gem"
+                        "outside_your_lane" -> "A genre you haven't explored yet"
+                        "b_sides"        -> "Deep cut from an artist you love"
+                        "first_listen"   -> "Brand new release for you"
                         "morning_vibe"   -> "Perfect acoustic start for your morning"
                         "afternoon_vibe" -> "Chill focus beats for your afternoon"
                         "evening_vibe"   -> "Energetic vibes for your evening"
                         "night_vibe"     -> "Soothing deep melodies for your night"
-                        "your_taste_mix" -> "Blended for your unique taste"
+                        "your_taste_mix" -> "Blended for your unique taste — Side A of your day"
                         else             -> "Curated recommendations"
                     }
 
@@ -2279,24 +2498,34 @@ object RecommendationManager {
             }
         }
 
-        // Append distinct dynamic compilation songs as a separate premium shelf!
-        if (compilationSongs.isNotEmpty()) {
-            val distinctCompilations = compilationSongs.distinctBy { it.videoItem.videoId }
-                .distinctBy { "${normalizeTitle(it.videoItem.title)}|${it.videoItem.author.lowercase(Locale.ROOT)}" }
-                .sortedByDescending { it.score }
-                .take(12)
-            if (distinctCompilations.size >= 3) {
-                newSections.add("Jukebox & Compilations" to distinctCompilations)
+        // ── Shelf rotation: keep home light ────────────────────────────────────
+        // Core personal shelves always show; everything else rotates through a
+        // capped set so the screen never drowns in shelves. The visible subset
+        // advances daily and on every pull-to-refresh.
+        val CORE_SHELF_PREFIXES = listOf("Side A", "Similar songs", "Fans also like")
+        val MAX_SHELVES = 6
+
+        val finalSections = run {
+            val core = newSections.filter { (title, _) ->
+                CORE_SHELF_PREFIXES.any { title.startsWith(it) }
             }
+            val rotatable = newSections.filterNot { (title, _) ->
+                CORE_SHELF_PREFIXES.any { title.startsWith(it) }
+            }
+            val orderedRotating = if (rotatable.isEmpty()) rotatable
+                else List(rotatable.size) { i -> rotatable[(i + rotationOffset) % rotatable.size] }
+            (core + orderedRotating).take(MAX_SHELVES)
         }
 
         synchronized(cachedSections) {
             cachedSections.clear()
-            cachedSections.addAll(newSections)
+            cachedSections.addAll(finalSections)
             lastCacheTime = System.currentTimeMillis()
         }
-        saveToDisk(ctx, newSections)
-        ArrayList(newSections)
+        saveToDisk(ctx, finalSections)
+        Log.d(TAG, "Shelf rotation: showing ${finalSections.size}/${newSections.size} shelves this session: " +
+            finalSections.joinToString(" | ") { it.first })
+        ArrayList(finalSections)
     }
 
     suspend fun findSpotifyTrackFuzzy(dao: SpotifyTrackDao, title: String, artist: String): SpotifyTrack? {

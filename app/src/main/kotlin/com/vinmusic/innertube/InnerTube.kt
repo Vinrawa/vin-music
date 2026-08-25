@@ -17,6 +17,15 @@ object InnerTube {
     private val JSON = "application/json".toMediaType()
     private val gson = Gson()
 
+    /**
+     * WEB_REMIX clientVersion built from today's date (ytmusicapi-style) so it can
+     * never go stale — YouTube starts rejecting hardcoded versions with 400
+     * INVALID_ARGUMENT once they fall behind the live web client.
+     */
+    val WEB_REMIX_CLIENT_VERSION: String
+        get() = "1." + java.time.LocalDate.now()
+            .format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE) + ".01.00"
+
     /** Last log message — shown on screen without ADB */
     @Volatile
     var lastDebugMsg = ""; private set
@@ -181,7 +190,7 @@ object InnerTube {
         if (videoId.isBlank()) return null
         val descriptions = mutableListOf<String>()
 
-        fetchPlayerDescription(videoId, "WEB_REMIX", "1.20231214.00.00", "67")?.let { descriptions.add(it) }
+        fetchPlayerDescription(videoId, "WEB_REMIX", WEB_REMIX_CLIENT_VERSION, "67")?.let { descriptions.add(it) }
         fetchPlayerDescription(videoId, "WEB", "2.20231219.04.00", "1")?.let { descriptions.add(it) }
         fetchNextDescription(videoId)?.let { descriptions.add(it) }
 
@@ -883,7 +892,7 @@ object InnerTube {
         val body = mapOf(
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             )),
             "query" to normalizedQuery,
@@ -896,7 +905,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -1182,7 +1191,7 @@ object InnerTube {
             "browseId" to channelId,
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             ))
         )
@@ -1193,7 +1202,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -1318,7 +1327,7 @@ object InnerTube {
             "browseId" to albumId,
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             ))
         )
@@ -1329,7 +1338,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -1391,7 +1400,7 @@ object InnerTube {
         val body = mapOf(
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             )),
             "enablePersistentPlaylistPanel" to true,
@@ -1405,7 +1414,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -1469,7 +1478,7 @@ object InnerTube {
             "browseId" to browseId,
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             ))
         )
@@ -1480,7 +1489,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -1599,7 +1608,7 @@ object InnerTube {
         val body = mapOf(
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             )),
             "query" to artistName,
@@ -1612,7 +1621,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -1693,7 +1702,7 @@ object InnerTube {
         val body = mapOf(
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             )),
             "query" to artistName,
@@ -1706,7 +1715,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -1787,7 +1796,7 @@ object InnerTube {
         val body = mapOf(
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             )),
             "query" to query,
@@ -1801,7 +1810,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -1880,7 +1889,7 @@ object InnerTube {
         val body = mutableMapOf(
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             )),
             "browseId" to browseId
@@ -1896,7 +1905,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -2209,7 +2218,7 @@ object InnerTube {
             )
             val ytmBody = mapOf(
                 "browseId" to activeChannelId,
-                "context" to mapOf("client" to mapOf("clientName" to "WEB_REMIX", "clientVersion" to "1.20231218.01.00", "hl" to "en", "gl" to "IN"))
+                "context" to mapOf("client" to mapOf("clientName" to "WEB_REMIX", "clientVersion" to WEB_REMIX_CLIENT_VERSION, "hl" to "en", "gl" to "IN"))
             )
 
             var webParsed: ChannelData? = null
@@ -2388,7 +2397,7 @@ object InnerTube {
             // First attempt: unfiltered search (picks up Top Result card)
             val body = mapOf(
                 "query" to artistName,
-                "context" to mapOf("client" to mapOf("clientName" to "WEB_REMIX", "clientVersion" to "1.20231218.01.00", "hl" to "en", "gl" to "IN"))
+                "context" to mapOf("client" to mapOf("clientName" to "WEB_REMIX", "clientVersion" to WEB_REMIX_CLIENT_VERSION, "hl" to "en", "gl" to "IN"))
             )
             val raw = http.newCall(Request.Builder()
                 .url("https://music.youtube.com/youtubei/v1/search?prettyPrint=false")
@@ -2407,7 +2416,7 @@ object InnerTube {
                 val filteredBody = mapOf(
                     "query" to artistName,
                     "params" to "EgWKAQIIAWoKEAMQBBAKEAkQBQ%3D%3D",
-                    "context" to mapOf("client" to mapOf("clientName" to "WEB_REMIX", "clientVersion" to "1.20231218.01.00", "hl" to "en", "gl" to "IN"))
+                    "context" to mapOf("client" to mapOf("clientName" to "WEB_REMIX", "clientVersion" to WEB_REMIX_CLIENT_VERSION, "hl" to "en", "gl" to "IN"))
                 )
                 val filteredRaw = http.newCall(Request.Builder()
                     .url("https://music.youtube.com/youtubei/v1/search?prettyPrint=false")
@@ -2584,7 +2593,7 @@ object InnerTube {
         val body = mapOf(
             "context" to mapOf("client" to mapOf(
                 "clientName" to "WEB_REMIX",
-                "clientVersion" to "1.20231214.00.00",
+                "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             )),
             "videoId" to videoId,
@@ -2597,7 +2606,7 @@ object InnerTube {
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .build()
@@ -2665,7 +2674,7 @@ object InnerTube {
                 "context" to mapOf(
                     "client" to mapOf(
                         "clientName" to "WEB_REMIX",
-                        "clientVersion" to "1.20231214.00.00",
+                        "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                         "hl" to "en",
                         "gl" to "IN"
                     )
@@ -2722,7 +2731,7 @@ object InnerTube {
         val body = mapOf(
             "browseId" to targetId,
             "context" to mapOf("client" to mapOf(
-                "clientName" to "WEB_REMIX", "clientVersion" to "1.20231214.00.00",
+                "clientName" to "WEB_REMIX", "clientVersion" to WEB_REMIX_CLIENT_VERSION,
                 "hl" to "en", "gl" to "IN"
             ))
         )
@@ -2735,7 +2744,7 @@ object InnerTube {
                 .header("Origin", "https://music.youtube.com")
                 .header("Referer", "https://music.youtube.com/")
                 .header("X-YouTube-Client-Name", "67")
-                .header("X-YouTube-Client-Version", "1.20231214.00.00")
+                .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
             
             // Inject cookie and authorization header for private library playlists
             YTMusicApi.getCookie()?.let { cookie ->

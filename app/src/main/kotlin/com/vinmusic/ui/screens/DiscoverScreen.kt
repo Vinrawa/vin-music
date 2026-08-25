@@ -91,6 +91,49 @@ data class DiscoverSong(
     val vibeScore: Int
 )
 
+// ── Shown-card memory ────────────────────────────────────────────────────────
+// Persists which songs were already dealt into a deck so repeated visits never
+// reshuffle the same tracks. Keys are title|artist based (discoverSongKey), so
+// re-uploads of the same song are caught too.
+private const val DISCOVER_SHOWN_PREFS = "discover_shown_cards"
+private const val DISCOVER_SHOWN_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
+
+private fun loadShownDiscoverKeys(ctx: android.content.Context): Set<String> {
+    return try {
+        val prefs = ctx.getSharedPreferences(DISCOVER_SHOWN_PREFS, android.content.Context.MODE_PRIVATE)
+        val raw = prefs.getString("keys", null) ?: return emptySet()
+        val map: Map<String, Long> = com.google.gson.Gson().fromJson(
+            raw,
+            object : com.google.gson.reflect.TypeToken<Map<String, Long>>() {}.type
+        )
+        val now = System.currentTimeMillis()
+        map.filterValues { now - it < DISCOVER_SHOWN_MAX_AGE_MS }.keys
+    } catch (_: Exception) {
+        emptySet()
+    }
+}
+
+private fun rememberShownDiscoverKeys(ctx: android.content.Context, keys: Collection<String>) {
+    if (keys.isEmpty()) return
+    try {
+        val prefs = ctx.getSharedPreferences(DISCOVER_SHOWN_PREFS, android.content.Context.MODE_PRIVATE)
+        val raw = prefs.getString("keys", null)
+        val existing: MutableMap<String, Long> = if (raw != null) {
+            try {
+                com.google.gson.Gson().fromJson(
+                    raw,
+                    object : com.google.gson.reflect.TypeToken<MutableMap<String, Long>>() {}.type
+                )
+            } catch (_: Exception) { mutableMapOf() }
+        } else mutableMapOf()
+        val now = System.currentTimeMillis()
+        keys.forEach { existing[it] = now }
+        // Prune entries older than the retention window so the file stays small.
+        existing.values.removeAll { now - it >= DISCOVER_SHOWN_MAX_AGE_MS }
+        prefs.edit().putString("keys", com.google.gson.Gson().toJson(existing)).apply()
+    } catch (_: Exception) { /* memory is best-effort */ }
+}
+
 /**
  * Filter search results to ensure only official audio/video released by the artist is added.
  * Excludes fan-made content, covers, karaokes, reaction videos, and loops.
@@ -217,40 +260,60 @@ fun DiscoverScreen(
                 val liked   = try { db.likedSongDao().getAll() } catch (_: Exception) { emptyList() }
                 val playlistSongs = try { db.playlistDao().getAllPlaylistSongs() } catch (_: Exception) { emptyList() }
 
+                // A discovery deck must contain NEW music — never tracks the user
+                // just played or was already shown. These exclusions apply to every
+                // candidate source below.
+                val recentHistoryIds = history.take(40).map { it.videoId }.toSet()
+                val shownKeys = loadShownDiscoverKeys(ctx)
+
+                fun usableForDeck(songs: List<VideoItem>): List<VideoItem> = songs.filter {
+                    it.videoId !in recentHistoryIds &&
+                        !shownKeys.contains(discoverSongKey(it)) &&
+                        isDiscoverCandidate(it)
+                }
+
+                val tasteProfile = try {
+                    RecommendationManager.buildTasteProfile(db)
+                } catch (_: Exception) { null }
+
+                fun dnaScore(song: VideoItem): Int {
+                    val profile = tasteProfile ?: return 72
+                    return try {
+                        (RecommendationManager.calculateTasteSimilarity(
+                            RecommendationManager.inferMetadata(song), profile.tasteDNA
+                        ) * 100).toInt().coerceIn(55, 99)
+                    } catch (_: Exception) { 72 }
+                }
+
                 val discoverPool = mutableListOf<DiscoverSong>()
                 fun addCandidate(song: VideoItem, reason: String, score: Int) {
-                    if (isDiscoverCandidate(song)) {
-                        discoverPool.add(DiscoverSong(song, reason, score.coerceIn(70, 100)))
+                    if (song.videoId !in recentHistoryIds &&
+                        !shownKeys.contains(discoverSongKey(song)) &&
+                        isDiscoverCandidate(song)
+                    ) {
+                        discoverPool.add(DiscoverSong(song, reason, score.coerceIn(55, 100)))
                     }
                 }
 
-                // Seed from liked songs - high weight
-                liked.shuffled().take(8).forEach { song ->
-                    addCandidate(
-                        VideoItem(song.videoId, song.title, song.author, song.durationText),
-                        "Because you liked this sound",
-                        Random.nextInt(91, 99)
-                    )
-                }
-                // Seed from history - medium weight
-                history.take(10).forEach { song ->
-                    addCandidate(
-                        VideoItem(song.videoId, song.title, song.author, song.durationText),
-                        "From your recent listening lane",
-                        Random.nextInt(86, 96)
-                    )
-                }
-                // Seed from playlists
-                playlistSongs.shuffled().take(8).forEach { song ->
-                    addCandidate(
-                        VideoItem(song.videoId, song.title, song.author, song.durationText),
-                        "Playlist DNA match",
-                        Random.nextInt(88, 97)
-                    )
-                }
+                // ── Instant deck: cached YT related songs + forgotten favorites ──
+                // (previously this seeded your own liked/history/playlist tracks —
+                // i.e. songs you already know — as "discoveries")
+                try { db.relatedSongDao().quickPickVideos(30).forEach { row ->
+                    val item = VideoItem(row.videoId, row.title, row.author, row.durationText)
+                    addCandidate(item, "Because of what you've been playing", dnaScore(item))
+                } } catch (_: Exception) {}
+                try {
+                    db.songCacheMetaDao().forgottenFavorites(
+                        System.currentTimeMillis() - 86_400_000L * 14, 12
+                    ).forEach { meta ->
+                        val item = VideoItem(meta.videoId, meta.title, meta.author, meta.durationText)
+                        addCandidate(item, "An old favorite you haven't heard in a while", dnaScore(item))
+                    }
+                } catch (_: Exception) {}
 
                 val instantDeck = buildDiscoverDeck(discoverPool)
                 if (instantDeck.isNotEmpty()) {
+                    rememberShownDiscoverKeys(ctx, instantDeck.map { discoverSongKey(it.videoItem) })
                     withContext(Dispatchers.Main) {
                         cards = instantDeck
                         isLoading = false
@@ -281,8 +344,16 @@ fun DiscoverScreen(
 
                 // OPTIMIZATION: Instead of 20 parallel search requests which throttle network/choke playback,
                 // we choose exactly a few random seeds to query concurrently.
-                val seedArtists = combinedArtists.shuffled().take(2)
-                val seedLikes = liked.shuffled().take(1)
+                // Artist seeds progress deterministically through the user's artist
+                // list in 6-hour buckets, so each session explores a different slice
+                // (plus one wildcard for variety).
+                val rotationBucket = (System.currentTimeMillis() / (6L * 3_600_000)).toInt()
+                val rotatedArtists = if (combinedArtists.isEmpty()) emptyList() else
+                    List(combinedArtists.size) { i -> combinedArtists[(i + rotationBucket) % combinedArtists.size] }
+                val seedArtists = (rotatedArtists.take(2) + combinedArtists.shuffled().take(1))
+                    .distinct()
+                    .take(3)
+                val seedLikes = liked.shuffled().take(2)
                 val seedPlaylists = playlistSongs.shuffled().take(1)
 
                 coroutineScope {
@@ -291,57 +362,55 @@ fun DiscoverScreen(
                     // Quick picks from recommendation engine
                     deferreds.add(async(Dispatchers.IO) {
                         try {
-                            vm.recommendationRepository.getQuickPicks()
-                                .filter { isDiscoverCandidate(it) }
+                            usableForDeck(vm.recommendationRepository.getQuickPicks())
                                 .take(12)
                                 .map { song ->
                                     DiscoverSong(
                                         videoItem = song,
                                         recommendationReason = "Smart mix from your taste",
-                                        vibeScore = Random.nextInt(90, 99)
+                                        vibeScore = dnaScore(song)
                                     )
                                 }
                         } catch (_: Exception) { emptyList() }
                     })
 
-                    // Radio seeds from liked/history/playlist songs
+                    // Radio seeds from liked/history/playlist songs — ranked similar
+                    // songs via Smart Queue, not raw search.
                     val radioSeeds = (liked.map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
                         history.map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
                         playlistSongs.map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
-                        .filter { isDiscoverCandidate(it) }
                         .distinctBy { it.videoId }
                         .shuffled()
-                        .take(2)
+                        .take(3)
 
                     radioSeeds.forEach { seed ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
-                                vm.recommendationRepository.getSongRadio(seed.videoId, seed.title, seed.author)
-                                    .filter { isDiscoverCandidate(it) }
+                                usableForDeck(vm.recommendationRepository.getSongRadio(seed.videoId, seed.title, seed.author))
                                     .take(6)
                                     .map { song ->
                                         DiscoverSong(
                                             videoItem = song,
                                             recommendationReason = "Radio match from ${seed.title}",
-                                            vibeScore = Random.nextInt(89, 99)
+                                            vibeScore = dnaScore(song)
                                         )
                                     }
                             } catch (_: Exception) { emptyList() }
                         })
                     }
 
-                    // Artist-specific searches
+                    // Artist-specific searches — rotated by time bucket so repeated
+                    // sessions explore different artists instead of the same two.
                     seedArtists.forEach { artist ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
-                                InnerTube.search("$artist popular songs")
-                                    .filter { isDiscoverCandidate(it) }
+                                usableForDeck(InnerTube.search("$artist popular songs"))
                                     .take(3)
                                     .map { song ->
                                         DiscoverSong(
                                             videoItem = song,
                                             recommendationReason = "Based on your love for $artist",
-                                            vibeScore = Random.nextInt(92, 100)
+                                            vibeScore = dnaScore(song)
                                         )
                                     }
                             } catch (_: Exception) { emptyList() }
@@ -349,32 +418,31 @@ fun DiscoverScreen(
 
                         deferreds.add(async(Dispatchers.IO) {
                             try {
-                                InnerTube.search("$artist new song")
-                                    .filter { isDiscoverCandidate(it) }
+                                usableForDeck(InnerTube.search("$artist new song"))
                                     .take(2)
                                     .map { song ->
                                         DiscoverSong(
                                             videoItem = song,
                                             recommendationReason = "New from $artist",
-                                            vibeScore = Random.nextInt(94, 99)
+                                            vibeScore = dnaScore(song)
                                         )
                                     }
                             } catch (_: Exception) { emptyList() }
                         })
                     }
 
-                    // Similar to Liked Songs seed
+                    // Similar to Liked Songs — YT Music's own related-tracks engine
+                    // (scored similar songs), not "songs like X" text search.
                     seedLikes.forEach { likedSong ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
-                                InnerTube.search("songs like ${likedSong.title} ${likedSong.author}")
-                                    .filter { isDiscoverCandidate(it) }
-                                    .take(4)
+                                usableForDeck(vm.recommendationRepository.getRelatedSongs(likedSong.videoId))
+                                    .take(5)
                                     .map { song ->
                                         DiscoverSong(
                                             videoItem = song,
                                             recommendationReason = "Vibe match with '${likedSong.title}'",
-                                            vibeScore = Random.nextInt(88, 98)
+                                            vibeScore = dnaScore(song)
                                         )
                                     }
                             } catch (_: Exception) { emptyList() }
@@ -385,14 +453,13 @@ fun DiscoverScreen(
                     seedPlaylists.forEach { plSong ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
-                                InnerTube.search("songs like ${plSong.title} ${plSong.author}")
-                                    .filter { isDiscoverCandidate(it) }
-                                    .take(4)
+                                usableForDeck(vm.recommendationRepository.getRelatedSongs(plSong.videoId))
+                                    .take(5)
                                     .map { song ->
                                         DiscoverSong(
                                             videoItem = song,
                                             recommendationReason = "Inspired by your playlist track",
-                                            vibeScore = Random.nextInt(89, 97)
+                                            vibeScore = dnaScore(song)
                                         )
                                     }
                             } catch (_: Exception) { emptyList() }
@@ -403,14 +470,13 @@ fun DiscoverScreen(
                     DISCOVER_QUERIES.shuffled().take(3).forEach { freshQuery ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
-                                InnerTube.search(freshQuery)
-                                    .filter { isDiscoverCandidate(it) }
+                                usableForDeck(InnerTube.search(freshQuery))
                                     .take(5)
                                     .map { song ->
                                         DiscoverSong(
                                             videoItem = song,
                                             recommendationReason = "Fresh: ${freshQuery.replace("2025", "").trim()}",
-                                            vibeScore = Random.nextInt(80, 94)
+                                            vibeScore = dnaScore(song)
                                         )
                                     }
                             } catch (_: Exception) { emptyList() }
@@ -438,14 +504,13 @@ fun DiscoverScreen(
                     genreDiversityQueries.shuffled().take(3).forEach { query ->
                         deferreds.add(async(Dispatchers.IO) {
                             try {
-                                InnerTube.search(query)
-                                    .filter { isDiscoverCandidate(it) }
+                                usableForDeck(InnerTube.search(query))
                                     .take(3)
                                     .map { song ->
                                         DiscoverSong(
                                             videoItem = song,
                                             recommendationReason = "Expand your taste",
-                                            vibeScore = Random.nextInt(75, 88)
+                                            vibeScore = dnaScore(song)
                                         )
                                     }
                             } catch (_: Exception) { emptyList() }
@@ -458,6 +523,7 @@ fun DiscoverScreen(
 
                 // 6. Deduplicate, score-sort, and keep artist diversity.
                 val uniqueDiscover = buildDiscoverDeck(discoverPool)
+                rememberShownDiscoverKeys(ctx, uniqueDiscover.map { discoverSongKey(it.videoItem) })
 
                 withContext(Dispatchers.Main) {
                     val visibleCard = cards.lastOrNull()

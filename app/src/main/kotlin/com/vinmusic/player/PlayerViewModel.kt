@@ -429,7 +429,8 @@ class PlayerViewModel @Inject constructor(
                 delay(600)
                 if (!isActive) return@launch
 
-                // FAST PATH: Direct radio playlist
+                // FAST PATH: Direct radio playlist — pre-filtered so the first thing
+                // that plays after this song is actually similar, not raw popular drift.
                 Log.d(TAG, "playSongWithRadio: fetching instant radio for ${song.videoId}")
                 val radioTracks = InnerTube.getWatchNextRadio(song.videoId)
                 Log.d(TAG, "playSongWithRadio: instant radio returned ${radioTracks.size} tracks")
@@ -437,7 +438,8 @@ class PlayerViewModel @Inject constructor(
                 // Check if user already moved to another song
                 if (!isActive) return@launch
 
-                val fastRecs = radioTracks.filter { it.videoId != song.videoId }.take(19)
+                val fastRecs = com.vinmusic.recommendation.RecommendationManager
+                    .curateRadioCandidates(song, radioTracks)
 
                 if (fastRecs.isNotEmpty()) {
                     withContext(Dispatchers.Main) {
@@ -447,46 +449,56 @@ class PlayerViewModel @Inject constructor(
                             val existingIds = currentQueue.map { it.videoId }.toSet()
                             val unique = fastRecs.filter { it.videoId !in existingIds }
                             if (unique.isNotEmpty()) {
+                                PlayerSingleton.markAutoplayTail(currentQueue.size, unique.map { it.videoId })
                                 currentQueue.addAll(unique)
                                 PlayerSingleton.queue = currentQueue
-                                Log.d(TAG, "playSongWithRadio: appended ${unique.size} initial radio tracks, total=${currentQueue.size}")
+                                Log.d(TAG, "playSongWithRadio: appended ${unique.size} curated radio tracks (raw=${radioTracks.size}), total=${currentQueue.size}")
                             }
                         }
                         PlayerSingleton.isAutoplayLoading = false
                     }
                 } else {
-                    // Radio returned nothing — try direct search fallback
-                    Log.w(TAG, "playSongWithRadio: radio empty, trying search fallback")
+                    // Radio returned nothing — seed-aware search fallback (genre blend
+                    // instead of plain artist top-songs), same curation before appending.
+                    Log.w(TAG, "playSongWithRadio: radio empty, trying seed-aware search fallback")
+                    val seedMeta = com.vinmusic.recommendation.RecommendationManager.inferMetadata(song)
+                    val genreTerm = seedMeta.genre.lowercase(java.util.Locale.ROOT).replace("rap/hip-hop", "rap hip hop")
                     val searchResults = mutableListOf<VideoItem>()
                     if (song.author.isNotBlank()) {
-                        val results = InnerTube.search("${song.author} songs official").take(15)
-                        for (item in results) {
-                            if (item.videoId != song.videoId && searchResults.none { it.videoId == item.videoId }) {
-                                searchResults.add(item)
+                        val queries = listOf(
+                            "${song.author} $genreTerm songs official",
+                            "${song.author} popular tracks"
+                        )
+                        for (query in queries) {
+                            try {
+                                for (item in InnerTube.search(query)) {
+                                    if (item.videoId != song.videoId && searchResults.none { it.videoId == item.videoId }) {
+                                        searchResults.add(item)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "playSongWithRadio: fallback search '$query' failed: ${e.message}")
                             }
-                        }
-                    }
-                    if (searchResults.size < 5 && song.title.isNotBlank()) {
-                        val results = InnerTube.search("${song.title} ${song.author} mix").take(10)
-                        for (item in results) {
-                            if (item.videoId != song.videoId && searchResults.none { it.videoId == item.videoId }) {
-                                searchResults.add(item)
-                            }
+                            if (searchResults.size >= 15) break
                         }
                     }
 
                     if (!isActive) return@launch
 
-                    if (searchResults.isNotEmpty()) {
+                    val curatedFallback = com.vinmusic.recommendation.RecommendationManager
+                        .curateRadioCandidates(song, searchResults)
+
+                    if (curatedFallback.isNotEmpty()) {
                         withContext(Dispatchers.Main) {
                             if (PlayerSingleton.queue.firstOrNull()?.videoId == song.videoId) {
                                 val currentQueue = PlayerSingleton.queue.toMutableList()
                                 val existingIds = currentQueue.map { it.videoId }.toSet()
-                                val unique = searchResults.filter { it.videoId !in existingIds }
+                                val unique = curatedFallback.filter { it.videoId !in existingIds }
                                 if (unique.isNotEmpty()) {
+                                    PlayerSingleton.markAutoplayTail(currentQueue.size, unique.map { it.videoId })
                                     currentQueue.addAll(unique)
                                     PlayerSingleton.queue = currentQueue
-                                    Log.d(TAG, "playSongWithRadio: appended ${unique.size} search fallback tracks")
+                                    Log.d(TAG, "playSongWithRadio: appended ${unique.size} curated fallback tracks")
                                 }
                             }
                             PlayerSingleton.isAutoplayLoading = false
@@ -496,7 +508,8 @@ class PlayerViewModel @Inject constructor(
                     }
                 }
 
-                // SLOW PATH (background enhance): Run full Smart Queue to improve/replace recommendations
+                // SLOW PATH (background): full ranked Smart Queue replaces the unranked
+                // fast-path tail so similar songs play first. Manual user additions survive.
                 if (!isActive) return@launch
                 try {
                     val smartRecs = recommendationRepository.getSongRadio(song.videoId, song.title, song.author)
@@ -504,14 +517,8 @@ class PlayerViewModel @Inject constructor(
                     if (!smartRecs.isNullOrEmpty()) {
                         withContext(Dispatchers.Main) {
                             if (PlayerSingleton.queue.firstOrNull()?.videoId == song.videoId) {
-                                val currentQueue = PlayerSingleton.queue.toMutableList()
-                                val existingIds = currentQueue.map { it.videoId }.toSet()
-                                val unique = smartRecs.filter { it.videoId !in existingIds }
-                                if (unique.isNotEmpty()) {
-                                    currentQueue.addAll(unique)
-                                    PlayerSingleton.queue = currentQueue
-                                    Log.d(TAG, "playSongWithRadio: Smart Queue enhanced with ${unique.size} more tracks, total=${currentQueue.size}")
-                                }
+                                PlayerSingleton.replaceAutoplayTail(smartRecs)
+                                Log.d(TAG, "playSongWithRadio: Smart Queue replaced autoplay tail (${smartRecs.size} ranked), total=${PlayerSingleton.queue.size}")
                             }
                         }
                     }

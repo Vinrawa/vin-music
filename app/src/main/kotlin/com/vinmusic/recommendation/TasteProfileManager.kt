@@ -33,24 +33,26 @@ class TasteProfileManager @Inject constructor(
 
     /**
      * Calculates the user's overall TasteDNA profile based on their listening history.
-     * Weights: Likes (+3), Completions (+1), Skips (-2 if < 20s).
+     * Weights: Likes (+3), Completions (+1), Repeats (+1.2 each), Skips (-2 if < 20s),
+     * all decayed by recency (~21-day time constant) so the DNA tracks current taste.
      */
     suspend fun calculateTasteProfile(): AudioFeatureProfile = withContext(Dispatchers.IO) {
-        val signals = signalDao.getAll().take(30)
-        
+        val now = System.currentTimeMillis()
+        val signals = signalDao.getAll()
+
         var totalWeight = 0.0
         var wEnergy = 0.0
         var wValence = 0.0
         var wDance = 0.0
         var wAcoustic = 0.0
         var wTempo = 0.0
-        
+
         val updatedSignals = mutableListOf<InteractionSignal>()
 
         for (sig in signals) {
             // Skip signals with blank metadata — can't infer anything useful
             if (sig.title.isNullOrBlank() || sig.author.isNullOrBlank()) continue
-            
+
             try {
                 val songKey = RecommendationManager.generateSongKey(sig.author, sig.title)
                 val realCache = try { featureCacheDao.get(songKey) } catch (_: Exception) { null }
@@ -70,7 +72,7 @@ class TasteProfileManager @Inject constructor(
                     // 2. High-precision inference from title, artist, genre, mood
                     val fakeItem = com.vinmusic.innertube.VideoItem(sig.videoId, sig.title, sig.author, sig.durationText)
                     val inferred = RecommendationManager.inferMetadata(fakeItem)
-                    
+
                     sig.energy = (inferred.energy * 100).toInt().coerceIn(15, 95)
                     sig.valence = when (inferred.mood) {
                         "Sad" -> 25
@@ -120,12 +122,21 @@ class TasteProfileManager @Inject constructor(
 
                 if (features.energy <= 0) continue
 
+                // Recency decay — recent listens represent current taste; a track
+                // untouched for weeks barely moves the needle.
+                val ageDays = if (features.lastPlayedAt > 0) {
+                    ((now - features.lastPlayedAt) / 86_400_000.0).coerceAtLeast(0.0)
+                } else 30.0
+                val recency = kotlin.math.exp(-ageDays / 21.0)
+
                 // Calculate weight based on interactions
-                var weight = (features.playCount * 0.5) + features.completeCount
+                var weight = (features.playCount * 0.5) + features.completeCount +
+                    features.repeatCount * 1.2
                 if (features.isLiked) weight += 3.0
                 if (features.isDownloaded) weight += 2.0
                 weight -= (features.skip20sCount * 2.0)
-                
+                weight *= (0.25 + 0.75 * recency)
+
                 if (weight > 0) {
                     totalWeight += weight
                     wEnergy += features.energy * weight

@@ -70,6 +70,67 @@ object PlayerSingleton {
     var isAutoplayLoading by mutableStateOf(false)
     private var isExtendingQueue = false
 
+    // ── Autoplay tail tracking ────────────────────────────────────────────────
+    // Tracks the unranked "fast path" radio tracks appended by playSongWithRadio.
+    // When the ranked Smart Queue finishes loading it replaces exactly these
+    // tracks, leaving anything the user queued manually untouched.
+    @Volatile
+    var autoplayTailStartIndex: Int = -1
+        private set
+    val autoplayTailVideoIds: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    fun clearAutoplayTail() {
+        autoplayTailStartIndex = -1
+        autoplayTailVideoIds.clear()
+    }
+
+    /** Records fast-path radio tracks so Smart Queue can replace them later. */
+    fun markAutoplayTail(startIndex: Int, videoIds: List<String>) {
+        autoplayTailStartIndex = startIndex
+        autoplayTailVideoIds.addAll(videoIds)
+    }
+
+    /**
+     * Swaps the unranked fast-path radio tracks for ranked Smart Queue results.
+     * Only IDs recorded via [autoplayTailVideoIds] are removed, so songs the
+     * user added ("Play next" / "Add to queue") survive the replacement. When no
+     * tail was tracked this behaves as a plain append after the current song.
+     */
+    fun replaceAutoplayTail(rankedRecommendations: List<VideoItem>) {
+        val removed: Set<String> = synchronized(autoplayTailVideoIds) {
+            val copy = autoplayTailVideoIds.toSet()
+            autoplayTailVideoIds.clear()
+            copy
+        }
+        autoplayTailStartIndex = -1
+
+        val currentQueue = queue.toMutableList()
+        // Never drop the track the user has already skipped onto mid-tail.
+        val currentId = currentSong?.videoId
+        val effectiveRemoved = if (currentId != null) removed - currentId else removed
+        if (effectiveRemoved.isNotEmpty()) currentQueue.removeAll { it.videoId in effectiveRemoved }
+        val existingIds = currentQueue.map { it.videoId }.toSet()
+        val uniqueRecs = rankedRecommendations
+            .distinctBy { it.videoId }
+            .filter { it.videoId !in existingIds }
+        if (uniqueRecs.isEmpty()) {
+            if (effectiveRemoved.isNotEmpty()) queue = currentQueue // tail removed but nothing to insert
+            return
+        }
+
+        val currentIndex = currentQueue.indexOfFirst { it.videoId == currentSong?.videoId }
+        val insertAt = (if (currentIndex >= 0) currentIndex + 1 else currentQueue.size)
+            .coerceIn(0, currentQueue.size)
+        queue = buildList {
+            addAll(currentQueue.subList(0, insertAt))
+            addAll(uniqueRecs)
+            addAll(currentQueue.subList(insertAt, currentQueue.size))
+        }
+        // queueIndex follows the currently playing song; recompute after the splice
+        val newIdx = queue.indexOfFirst { it.videoId == currentSong?.videoId }
+        if (newIdx >= 0) queueIndex = newIdx
+    }
+
     // Stored playback parameters — survive across song transitions
     var storedSpeed by mutableFloatStateOf(1.0f)
     var storedPitch by mutableFloatStateOf(1.0f)
@@ -902,6 +963,7 @@ object PlayerSingleton {
     }
 
     fun setQueue(songs: List<VideoItem>, startIndex: Int = 0) {
+        clearAutoplayTail()
         queue      = songs
         queueIndex = startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
         if (songs.isNotEmpty()) playSong(songs[queueIndex])

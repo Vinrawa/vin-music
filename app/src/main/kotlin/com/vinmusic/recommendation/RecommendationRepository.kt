@@ -127,7 +127,8 @@ class RecommendationRepository @Inject constructor(
      */
     suspend fun getQuickPicks(): List<VideoItem> = withContext(Dispatchers.IO) {
         val cacheKey = "quick_picks_v2"
-        val cached = loadVideoItems(cacheKey)
+        // Strict TTL — stale Quick Picks would freeze the shelf on the same songs.
+        val cached = loadVideoItems(cacheKey, allowStale = false)
         if (cached != null && cached.isNotEmpty()) {
             Log.d(TAG, "Loaded getQuickPicks from disk cache.")
             return@withContext cached
@@ -136,46 +137,62 @@ class RecommendationRepository @Inject constructor(
         Log.d(TAG, "Generating Metrolist-style Quick Picks...")
         val profile = RecommendationManager.buildTasteProfile(db)
         val combined = LinkedHashMap<String, VideoItem>()
+        val languageOverflow = ArrayList<VideoItem>()
 
         // 1) Cached related songs from recent seeds
         db.relatedSongDao().quickPickVideos(30).forEach { row ->
-            addFilteredQuickPick(combined, VideoItem(row.videoId, row.title, row.author, row.durationText), profile)
+            addFilteredQuickPick(combined, VideoItem(row.videoId, row.title, row.author, row.durationText), profile, languageOverflow)
         }
 
-        // 2) Forgotten favorites — played before but not in last 14 days
+        // 2) Forgotten favorites — played before but not in last 14 days (small cap
+        //    so resurfaced history never dominates the shelf)
         val twoWeeksAgo = System.currentTimeMillis() - 86400000L * 14
-        db.songCacheMetaDao().forgottenFavorites(twoWeeksAgo, 8).forEach { meta ->
+        db.songCacheMetaDao().forgottenFavorites(twoWeeksAgo, 5).forEach { meta ->
             addFilteredQuickPick(
                 combined,
                 VideoItem(meta.videoId, meta.title, meta.author, meta.durationText),
                 profile,
+                languageOverflow,
             )
         }
 
-        // 3) YouTube Music related() for blended seeds (top 3 recently played + 2 random liked tracks)
-        val recentHistory = db.historyDao().getAllHistory().take(3)
-        val likedSongs = db.likedSongDao().getAll().shuffled().take(2)
-        val seeds = (recentHistory.map { it.videoId } + likedSongs.map { it.videoId }).distinct()
-        
+        // 3) YouTube Music related() for diversified seeds, interleaved round-robin
+        //    so no single seed dominates the shelf.
+        val seeds = buildQuickPickSeeds()
         if (seeds.isNotEmpty()) {
             coroutineScope {
-                val deferreds = seeds.map { seedId ->
+                val perSeedLists = seeds.map { seedId ->
                     async(Dispatchers.IO) {
                         try {
-                            fetchYtRelatedForSeed(seedId)
+                            fetchYtRelatedForSeed(seedId).orEmpty()
                         } catch (e: Exception) {
                             Log.w(TAG, "Failed to fetch related for seed $seedId: ${e.message}")
-                            null
+                            emptyList()
                         }
                     }
-                }
-                deferreds.awaitAll().filterNotNull().flatten().forEach { item ->
-                    addFilteredQuickPick(combined, item, profile)
+                }.awaitAll().filter { it.isNotEmpty() }
+
+                val maxLen = perSeedLists.maxOfOrNull { it.size } ?: 0
+                interleave@ for (i in 0 until maxLen) {
+                    for (list in perSeedLists) {
+                        if (i < list.size) {
+                            addFilteredQuickPick(combined, list[i], profile, languageOverflow)
+                            if (combined.size >= 30) break@interleave
+                        }
+                    }
                 }
             }
         }
 
-        var result = combined.values.take(20)
+        // Soft language rule: only backfill language-mismatched candidates when the
+        // strict pool is thin, instead of letting the shelf collapse.
+        var picked = combined.values.toList()
+        if (picked.size < 8 && languageOverflow.isNotEmpty()) {
+            val seenIds = picked.map { it.videoId }.toSet()
+            picked = picked + languageOverflow.filter { it.videoId !in seenIds }.take(12 - picked.size)
+        }
+
+        var result = picked.take(20)
         if (result.size < 6) {
             Log.d(TAG, "Quick picks sparse (${result.size}), TasteDNA fallback...")
             result = getQuickPicksTasteDnaFallback(profile).take(20)
@@ -183,6 +200,49 @@ class RecommendationRepository @Inject constructor(
 
         if (result.isNotEmpty()) saveVideoItems(cacheKey, result)
         result
+    }
+
+    /**
+     * Diversified Quick Pick seeds drawn across listening behavior — most-completed
+     * tracks, likes, forgotten favorites and older plays — excluding the last ~10
+     * played IDs so the shelf doesn't echo what just finished. Capped at 6 seeds.
+     */
+    private suspend fun buildQuickPickSeeds(): List<String> {
+        val history = try { db.historyDao().getAllHistory() } catch (_: Exception) { emptyList() }
+        val recentIds = history.take(10).map { it.videoId }.toSet()
+        val signals = try { db.interactionSignalDao().getAll() } catch (_: Exception) { emptyList() }
+        val liked = try { db.likedSongDao().getAll() } catch (_: Exception) { emptyList() }
+        val forgotten = try {
+            db.songCacheMetaDao().forgottenFavorites(System.currentTimeMillis() - 86400000L * 14, 20)
+        } catch (_: Exception) { emptyList() }
+
+        fun eligible(ids: List<String>): List<String> =
+            ids.filter { it.isNotBlank() && it !in recentIds }.distinct().shuffled()
+
+        val pools = listOf(
+            eligible(signals.sortedByDescending {
+                it.completeCount + it.repeatCount * 2 + if (it.isLiked) 3 else 0
+            }.map { it.videoId }).take(4),
+            eligible(liked.map { it.videoId }).take(3),
+            eligible(forgotten.map { it.videoId }).take(3),
+            eligible(history.map { it.videoId }).take(3),
+        )
+
+        // Round-robin across pools for behavioral diversity.
+        val seeds = LinkedHashSet<String>()
+        var added = true
+        while (seeds.size < 6 && added) {
+            added = false
+            for (pool in pools) {
+                val next = pool.firstOrNull { it !in seeds }
+                if (next != null) {
+                    seeds.add(next)
+                    added = true
+                    if (seeds.size >= 6) break
+                }
+            }
+        }
+        return seeds.toList()
     }
 
     /** Official YouTube Music home shelves (FEmusic_home) — requires cookie for best results. */
@@ -278,6 +338,7 @@ class RecommendationRepository @Inject constructor(
         out: LinkedHashMap<String, VideoItem>,
         item: VideoItem,
         profile: RecommendationManager.TasteProfile,
+        languageOverflow: MutableList<VideoItem>? = null,
     ) {
         val author = item.author.trim().lowercase(Locale.ROOT)
         if (RecommendationManager.isCompilationTrack(item.title, item.durationText)) return
@@ -287,7 +348,12 @@ class RecommendationRepository @Inject constructor(
         val meta = RecommendationManager.inferMetadata(item)
         if (!meta.isOfficial) return
         val topLang = profile.topLanguages.firstOrNull()?.first
-        if (topLang != null && meta.language != topLang) return
+        if (topLang != null && meta.language != topLang) {
+            // Soft rule: hold back instead of dropping outright so a thin pool can be
+            // backfilled with these later rather than collapsing.
+            languageOverflow?.add(item)
+            return
+        }
         out.putIfAbsent(item.videoId, item)
     }
 

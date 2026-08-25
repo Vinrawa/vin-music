@@ -53,6 +53,16 @@ import kotlinx.coroutines.coroutineScope
 
 private val CATEGORIES = listOf("All", "For You", "Happy", "Sad", "Energize", "Sleep", "Focus", "Workout", "Party", "Bollywood", "Lo-fi", "Rap", "Indie", "K-Pop", "90s Hits", "Long Listens")
 
+// Locally generated shelves that aren't derived from the user's taste. When real
+// YT Music personalized shelves are available they are hidden to reduce noise.
+private val TASTE_INDEPENDENT_SHELVES = setOf(
+    "Fresh finds",
+    "Deep cuts & hidden gems",
+    "Morning Acoustic Sunshine",
+    "Midday Chill & Focus",
+    "Midnight Sanctuary",
+)
+
 data class RapSubCategory(
     val name: String,
     val queries: List<String>  // multiple queries for richer results
@@ -313,7 +323,7 @@ fun HomeScreen(
                     cachePrefs.edit().clear().apply()
                 }
 
-                val cachedJson = cachePrefs.getString("playlists_json_v3", null)
+                val cachedJson = cachePrefs.getString("playlists_json_v4", null)
                 val now = System.currentTimeMillis()
 
                 if (cachedJson != null && !forceRefresh) {
@@ -375,6 +385,15 @@ fun HomeScreen(
                     }
                 }
 
+                val profile = try {
+                    com.vinmusic.recommendation.RecommendationManager.buildTasteProfile(db)
+                } catch (_: Exception) { null }
+                val topGenreTerms = profile?.topGenres?.take(4)
+                    ?.map { it.first.lowercase().replace("rap/hip-hop", "rap hip hop").replace("punjabi folk", "punjabi") }
+                    ?: emptyList()
+                val topLang = profile?.topLanguages?.firstOrNull()?.first?.lowercase()?.takeIf { it != "unknown" }
+                val topMood = profile?.topMoods?.firstOrNull()?.first?.lowercase()
+
                 val queries = mutableListOf<String>()
 
                 // Custom playlists (up to 2, shuffled)
@@ -388,46 +407,38 @@ fun HomeScreen(
                     }
                 }
 
-                // Artist-specific playlists
-                personalizedArtists.forEach { artist ->
+                // Artist-specific playlists (top affinity artists only)
+                personalizedArtists.take(4).forEach { artist ->
                     queries.add("$artist playlist")
                 }
 
-                val uniqueQueries = queries.distinctBy { it.lowercase().trim() }.toMutableList()
-
-                // Fallbacks pool
-                val defaultFallbackPool = listOf(
-                    "chill lofi study playlist",
-                    "acoustic indie vibes playlist",
-                    "jazz fusion classics playlist",
-                    "electronic ambient chill playlist",
-                    "r&b soul hits playlist",
-                    "alternative rock modern playlist",
-                    "synthwave retrowave playlist",
-                    "neo soul groove playlist",
-                    "dream pop shoegaze playlist",
-                    "funk disco classics playlist",
-                    "hip hop lyrical playlist",
-                    "trip hop downtempo playlist",
-                    "progressive rock modern playlist",
-                    "bedroom pop indie playlist",
-                    "reggae dancehall vibes playlist",
-                    "classical crossover playlist"
-                )
-
-                // Fill a wider query set so recommendations do not collapse to the same few shelves.
-                val shuffledFallbacks = defaultFallbackPool.shuffled()
-                var fallbackIndex = 0
-                while (uniqueQueries.size < 10 && fallbackIndex < shuffledFallbacks.size) {
-                    val query = shuffledFallbacks[fallbackIndex]
-                    if (!uniqueQueries.any { it.lowercase().trim() == query.lowercase().trim() }) {
-                        uniqueQueries.add(query)
+                // Genre + language blends straight from the TasteDNA profile — a user
+                // who listens like you should get the playlists someone like you keeps.
+                topGenreTerms.forEachIndexed { i, genreTerm ->
+                    queries.add("$genreTerm ${topLang ?: ""} essentials playlist".trim().replace(Regex("\\s+"), " "))
+                    if (i == 0 && topMood != null) {
+                        queries.add("$genreTerm $topMood songs playlist".trim())
                     }
-                    fallbackIndex++
                 }
 
-                // Shuffle the queries to provide randomized variety on each reload.
-                val finalQueries = uniqueQueries.shuffled().take(7)
+                val tasteQueries = queries.distinctBy { it.lowercase().trim() }
+
+                // Fallbacks pool — only fills remaining slots when the profile is thin.
+                val defaultFallbackPool = listOf(
+                    "${topLang ?: "hindi"} punjabi hits playlist",
+                    "chill lofi study playlist",
+                    "acoustic indie vibes playlist",
+                    "r&b soul hits playlist",
+                    "hip hop lyrical playlist",
+                    "bedroom pop indie playlist",
+                    "punjabi bhangra playlist",
+                    "bollywood romantic playlist"
+                )
+                val shuffledFallbacks = defaultFallbackPool.shuffled()
+                    .filter { fb -> tasteQueries.none { it.equals(fb, ignoreCase = true) } }
+
+                // Taste-derived queries always go out; fallbacks only fill the tail.
+                val finalQueries = (tasteQueries.take(6) + shuffledFallbacks.take(2)).shuffled()
 
                 val allResults = mutableListOf<com.vinmusic.innertube.AlbumItem>()
                 coroutineScope {
@@ -443,15 +454,40 @@ fun HomeScreen(
                     allResults.addAll(deferreds.awaitAll().flatten())
                 }
 
+                // Junk filter — kill the weird spam playlists ("Top 50 nonstop jukebox",
+                // karaoke/reaction/tiktok uploads) before they ever reach home.
+                fun isJunkPlaylist(title: String): Boolean {
+                    val t = title.lowercase()
+                    val junkPhrases = listOf(
+                        "top 50", "top 40", "top 30", "top 20", "top 10", "jukebox", "nonstop",
+                        "non-stop", "mashup", "full album", "all songs", "greatest hits", "hits of",
+                        "megamix", "superhit collection", "karaoke", "cover songs", "reaction",
+                        "tiktok", "insta reels", "reels", "status video", "whatsapp status",
+                        "slowed reverb", "nightcore", "8d audio", "bass boosted", "quiz"
+                    )
+                    return junkPhrases.any { t.contains(it) }
+                }
+
+                fun playlistTasteScore(item: com.vinmusic.innertube.AlbumItem): Int {
+                    val t = item.title.lowercase()
+                    var score = 0
+                    topGenreTerms.forEachIndexed { i, g -> if (t.contains(g)) score += (6 - i) }
+                    if (topLang != null && t.contains(topLang)) score += 3
+                    if (topMood != null && t.contains(topMood)) score += 2
+                    return score
+                }
+
                 val uniquePlaylists = allResults
                     .distinctBy { it.playlistId }
                     .filter { it.playlistId.startsWith("PL") || it.playlistId.startsWith("VL") }
-                    .shuffled() // Shuffle results to avoid identical layouts on every render
+                    .filterNot { isJunkPlaylist(it.title) }
+                    // Taste-ranked with tiny jitter so equal-scoring decks still rotate.
+                    .sortedByDescending { playlistTasteScore(it) + kotlin.random.Random.nextInt(0, 3) }
                     .take(16)
 
                 if (uniquePlaylists.isNotEmpty()) {
                     cachePrefs.edit()
-                        .putString("playlists_json_v3", com.google.gson.Gson().toJson(uniquePlaylists))
+                        .putString("playlists_json_v4", com.google.gson.Gson().toJson(uniquePlaylists))
                         .putLong("cache_time", now)
                         .apply()
                 }
@@ -531,18 +567,32 @@ fun HomeScreen(
     }
 
     suspend fun loadLocalQuickPicks(): List<VideoItem> {
-        val signals = try { db.interactionSignalDao().getAll() } catch (_: Exception) { emptyList() }
-        val history = try { db.historyDao().getAllHistory() } catch (_: Exception) { emptyList() }
-        return (signals
-            .sortedWith(
-                compareByDescending<com.vinmusic.data.db.InteractionSignal> { it.playCount + it.repeatCount * 3 + if (it.isLiked) 8 else 0 }
-                    .thenByDescending { it.lastPlayedAt }
+        // Instant local Quick Picks must surface NEW music, not listening history.
+        // Serve cached related-song maps + forgotten favorites (played before but
+        // not in the last 14 days); liked songs are the cold-start last resort
+        // while the full network version loads.
+        val related = try {
+            db.relatedSongDao().quickPickVideos(18)
+        } catch (_: Exception) { emptyList() }
+        val forgotten = try {
+            db.songCacheMetaDao().forgottenFavorites(
+                System.currentTimeMillis() - 86_400_000L * 14, 8
             )
-            .map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
-            history.take(50).map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
+        } catch (_: Exception) { emptyList() }
+
+        val picks = (
+            related.map { VideoItem(it.videoId, it.title, it.author, it.durationText) } +
+                forgotten.map { VideoItem(it.videoId, it.title, it.author, it.durationText) })
             .filter { it.videoId.isNotBlank() && it.title.isNotBlank() }
             .distinctBy { it.videoId }
-            .take(18)
+        if (picks.isNotEmpty()) return picks.take(18)
+
+        return try {
+            db.likedSongDao().getAll()
+                .shuffled()
+                .take(12)
+                .map { VideoItem(it.videoId, it.title, it.author, it.durationText) }
+        } catch (_: Exception) { emptyList() }
     }
 
     fun triggerRefresh() {
@@ -580,7 +630,17 @@ fun HomeScreen(
                         } else emptyList()
                     }
                     val albumsDeferred = async {
-                        try { InnerTube.searchAll("best hindi albums playlist 2025").albums.take(6) } catch (_: Exception) { emptyList() }
+                        try {
+                            // Taste-derived album search instead of a hardcoded query.
+                            val prof = com.vinmusic.recommendation.RecommendationManager.buildTasteProfile(db)
+                            val genreTerm = prof.topGenres.firstOrNull()?.first
+                                ?.lowercase()?.replace("rap/hip-hop", "rap hip hop")
+                                ?.replace("punjabi folk", "punjabi") ?: "pop"
+                            val langTerm = prof.topLanguages.firstOrNull()?.first?.lowercase()
+                                ?.takeIf { it != "unknown" } ?: ""
+                            InnerTube.searchAll("$genreTerm $langTerm best albums".trim().replace(Regex("\\s+"), " "))
+                                .albums.take(6)
+                        } catch (_: Exception) { emptyList() }
                     }
                     HomeRefreshPayload(
                         recsDeferred.await(),
@@ -682,7 +742,7 @@ fun HomeScreen(
                         isLoadingQuickPicks = false
                     }
                 }
-                val qp = kotlinx.coroutines.withTimeoutOrNull(4500L) {
+                val qp = kotlinx.coroutines.withTimeoutOrNull(9000L) {
                     vm.recommendationRepository.getQuickPicks()
                 }.orEmpty()
                 withContext(Dispatchers.Main) {
@@ -792,7 +852,7 @@ fun HomeScreen(
                 scope.launch(Dispatchers.IO) {
                     try {
                         vm.recommendationRepository.invalidateQuickPicksCache()
-                        val qp = kotlinx.coroutines.withTimeoutOrNull(4500L) {
+                        val qp = kotlinx.coroutines.withTimeoutOrNull(9000L) {
                             vm.recommendationRepository.getQuickPicks()
                         }.orEmpty()
                         if (qp.isNotEmpty()) {
@@ -2262,6 +2322,30 @@ fun HomeScreen(
                     }
                 }
 
+                // 1.9. YouTube Music personalized shelves (account-connected) —
+                // real YT-engine picks lead above locally generated shelves.
+                if (!isLoadingYtHome && ytMusicSections.isNotEmpty()) {
+                    ytMusicSections.forEach { section ->
+                        if (section.songs.isNotEmpty()) {
+                            item {
+                                SectionTitle(section.title)
+                                Spacer(Modifier.height(10.dp))
+                                LazyRow(
+                                    contentPadding = PaddingValues(horizontal = 20.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    modifier = Modifier.padding(bottom = 24.dp)
+                                ) {
+                                    items(section.songs, key = { it.videoId }) { song ->
+                                        TrackCard(song = song) {
+                                            onSongClick(song, section.songs)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 2. Dynamic Recommendations Sections (Personalized Music Engine)
                 if (isRecommendationsLoading && recommendationSections.isEmpty()) {
                     item {
@@ -2276,7 +2360,11 @@ fun HomeScreen(
                     }
                 } else {
                     recommendationSections.forEach { (title, recList) ->
-                        if (recList.isNotEmpty()) {
+                        // With YT Music connected, real YTM-engine shelves carry home —
+                        // drop our weakest taste-independent query shelves to cut noise.
+                        if (recList.isNotEmpty() &&
+                            !(ytMusicSections.isNotEmpty() && title in TASTE_INDEPENDENT_SHELVES)
+                        ) {
                             item {
                                 SectionTitle(title)
                                 Spacer(Modifier.height(10.dp))
@@ -2568,7 +2656,11 @@ fun HomeScreen(
                     }
                 } else {
                     recommendationSections.forEach { (title, recList) ->
-                        if (recList.isNotEmpty()) {
+                        // With YT Music connected, real YTM-engine shelves carry home —
+                        // drop our weakest taste-independent query shelves to cut noise.
+                        if (recList.isNotEmpty() &&
+                            !(ytMusicSections.isNotEmpty() && title in TASTE_INDEPENDENT_SHELVES)
+                        ) {
                             item {
                                 SectionTitle(title)
                                 Spacer(Modifier.height(10.dp))

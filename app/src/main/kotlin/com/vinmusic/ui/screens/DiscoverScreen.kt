@@ -191,7 +191,8 @@ private fun buildDiscoverDeck(pool: List<DiscoverSong>): List<DiscoverSong> {
     return pool
         .filter { isDiscoverCandidate(it.videoItem) }
         .distinctBy { discoverSongKey(it.videoItem) }
-        .sortedByDescending { it.vibeScore + Random.nextInt(0, 7) }
+        .shuffled()
+        .sortedByDescending { it.vibeScore }
         .fold(mutableListOf<DiscoverSong>()) { acc, song ->
             val artistKey = song.videoItem.author.lowercase().trim()
             val artistCount = acc.count { it.videoItem.author.lowercase().trim() == artistKey }

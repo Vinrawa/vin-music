@@ -87,19 +87,18 @@ object RecommendationManager {
         if (genreGraphLoaded) return
         try {
             val json = context.assets.open("genre_graph.json").bufferedReader().use { it.readText() }
-            val data = gson.fromJson(json, com.google.gson.reflect.TypeToken.getParameterized(
-                Map::class.java, String::class.java,
-                com.google.gson.reflect.TypeToken.getParameterized(List::class.java, Any::class.java).type
-            ).type) as? Map<*, *>
-            val simData = data?.get("genre_similar") as? Map<*, *>
+            val root = com.google.gson.JsonParser.parseString(json).asJsonObject
+            val simData = root.getAsJsonObject("genre_similar")
             if (simData != null) {
                 val map = HashMap<String, List<String>>()
-                for ((genre, sims) in simData) {
-                    val genreStr = genre?.toString() ?: continue
-                    val simsList = sims as? List<*> ?: continue
-                    val topGenres = simsList.mapNotNull { (it as? Map<*, *>)?.get("genre")?.toString() }.take(10)
-                    if (topGenres.isNotEmpty()) {
-                        map[genreStr] = topGenres
+                for ((genre, simsElem) in simData.entrySet()) {
+                    if (simsElem.isJsonArray) {
+                        val topGenres = simsElem.asJsonArray.mapNotNull { item ->
+                            if (item.isJsonObject) item.asJsonObject.get("genre")?.asString else null
+                        }.take(10)
+                        if (topGenres.isNotEmpty()) {
+                            map[genre] = topGenres
+                        }
                     }
                 }
                 genreSimilarMap = map

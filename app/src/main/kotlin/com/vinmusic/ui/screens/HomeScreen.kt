@@ -480,9 +480,9 @@ fun HomeScreen(
                 val uniquePlaylists = allResults
                     .distinctBy { it.playlistId }
                     .filter { it.playlistId.startsWith("PL") || it.playlistId.startsWith("VL") }
-                    .filterNot { isJunkPlaylist(it.title) }
-                    // Taste-ranked with tiny jitter so equal-scoring decks still rotate.
-                    .sortedByDescending { playlistTasteScore(it) + kotlin.random.Random.nextInt(0, 3) }
+                    // Taste-ranked with stable tie-breaking rotation via shuffled() first.
+                    .shuffled()
+                    .sortedByDescending { playlistTasteScore(it) }
                     .take(16)
 
                 if (uniquePlaylists.isNotEmpty()) {

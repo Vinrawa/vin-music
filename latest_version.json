@@ -2,7 +2,7 @@
   "latestVersionCode": 19,
   "latestVersionName": "2.3.0",
   "apkUrl": "https://vinrawa.github.io/Vin-music-v2/vinmusic.apk",
-  "sha256": "c9f38b59786b5a27ad0efb00e86e34954be74d5fed8582797ed2e413fee6c696",
+  "sha256": "1b314be111e01b567c621e2eb0b0de72aa90ce3f3b5d37f63cdf73ebac378164",
   "forceUpdate": false,
-  "releaseNotes": "Major security upgrade & key rotation, SHA-256 update verification, memory leak fixes, download reliability, and widget crash-proofing. (Note: Please uninstall any previous build before installing this security update)."
+  "releaseNotes": "Security hardening, SHA-256 update verification, memory leak fixes, download reliability, and widget crash-proofing."
 }

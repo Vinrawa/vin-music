@@ -299,13 +299,15 @@ fun DiscoverScreen(
                 // ── Instant deck: cached YT related songs + forgotten favorites ──
                 // (previously this seeded your own liked/history/playlist tracks —
                 // i.e. songs you already know — as "discoveries")
-                try { db.relatedSongDao().quickPickVideos(30).forEach { row ->
+                // Pool is deliberately generous: marking happens on swipe, not on
+                // deal, so repeat visits still open instantly with fresh cards.
+                try { db.relatedSongDao().quickPickVideos(60).forEach { row ->
                     val item = VideoItem(row.videoId, row.title, row.author, row.durationText)
                     addCandidate(item, "Because of what you've been playing", dnaScore(item))
                 } } catch (_: Exception) {}
                 try {
                     db.songCacheMetaDao().forgottenFavorites(
-                        System.currentTimeMillis() - 86_400_000L * 14, 12
+                        System.currentTimeMillis() - 86_400_000L * 14, 15
                     ).forEach { meta ->
                         val item = VideoItem(meta.videoId, meta.title, meta.author, meta.durationText)
                         addCandidate(item, "An old favorite you haven't heard in a while", dnaScore(item))
@@ -314,7 +316,6 @@ fun DiscoverScreen(
 
                 val instantDeck = buildDiscoverDeck(discoverPool)
                 if (instantDeck.isNotEmpty()) {
-                    rememberShownDiscoverKeys(ctx, instantDeck.map { discoverSongKey(it.videoItem) })
                     withContext(Dispatchers.Main) {
                         cards = instantDeck
                         isLoading = false
@@ -523,8 +524,10 @@ fun DiscoverScreen(
                 }
 
                 // 6. Deduplicate, score-sort, and keep artist diversity.
+                // Cards are remembered as "shown" only when actually swiped
+                // (see dropCurrentCard) — marking the whole deck on deal made
+                // every repeat visit slower and emptier.
                 val uniqueDiscover = buildDiscoverDeck(discoverPool)
-                rememberShownDiscoverKeys(ctx, uniqueDiscover.map { discoverSongKey(it.videoItem) })
 
                 withContext(Dispatchers.Main) {
                     val visibleCard = cards.lastOrNull()
@@ -549,6 +552,14 @@ fun DiscoverScreen(
     }
 
     fun dropCurrentCard() {
+        val swipedCard = cards.lastOrNull()
+        if (swipedCard != null) {
+            // Remember only cards the user actually swiped past — this keeps
+            // future decks fresh without draining the instant local pool.
+            scope.launch(Dispatchers.IO) {
+                rememberShownDiscoverKeys(ctx, listOf(discoverSongKey(swipedCard.videoItem)))
+            }
+        }
         val remainingCards = cards.dropLast(1)
         cards = remainingCards
         if (remainingCards.size <= 4 && !isLoading) {

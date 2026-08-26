@@ -180,12 +180,16 @@ object RecommendationManager {
                 .putString("cached_sections", json)
                 .putLong("cached_time", System.currentTimeMillis())
                 .putInt("cache_schema_version", CACHE_SCHEMA_VERSION)
+                .putInt("rotation_bucket", currentRotationBucket())
                 .apply()
             Log.d(TAG, "Saved recommendations to disk cache.")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save recommendations to disk: ${e.message}")
         }
     }
+
+    /** Day-granular rotation bucket — stable within a day, advances at midnight. */
+    private fun currentRotationBucket(): Int = (System.currentTimeMillis() / 86_400_000L).toInt()
 
     private fun loadFromDisk(ctx: Context): List<Pair<String, List<RecommendedSong>>>? {
         try {
@@ -201,6 +205,15 @@ object RecommendationManager {
             // regenerates from current listening behavior.
             if (System.currentTimeMillis() - time > SHELF_DISK_TTL_MS) {
                 Log.d(TAG, "Disk cache older than TTL — treating as invalid.")
+                prefs.edit().remove("cached_sections").remove("cached_time").apply()
+                return null
+            }
+
+            // Shelves from a previous rotation day would visibly swap out against
+            // today's generated set — treat them as stale too. This keeps the
+            // shelf set stable for the whole day (no random appear/disappear).
+            if (prefs.getInt("rotation_bucket", -1) != currentRotationBucket()) {
+                Log.d(TAG, "Disk cache from a previous rotation day — treating as invalid.")
                 prefs.edit().remove("cached_sections").remove("cached_time").apply()
                 return null
             }
@@ -1784,10 +1797,10 @@ object RecommendationManager {
         val dna = profile.tasteDNA
 
         // ── Session rotation offset ────────────────────────────────────────────
-        // Advances once a day (and on every pull-to-refresh) so seeds, featured
-        // artists and the rotating shelf subset change between sessions without
-        // ever feeling random within a session.
-        val rotationOffset = ((now / 86_400_000L).toInt()) + (if (forceRefresh) 1 else 0)
+        // Advances once a day so seeds, featured artists and the rotating shelf
+        // subset change between days — but stay STABLE within a day. Pull-to-
+        // refresh refreshes content, it must not reshuffle which shelves exist.
+        val rotationOffset = currentRotationBucket()
 
         data class CurationTask(
             val sectionKey: String,

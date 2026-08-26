@@ -1901,23 +1901,39 @@ fun HomeScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
+                        Column {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "VIN",
+                                    fontSize = 32.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color.White,
+                                    letterSpacing = (-0.5).sp
+                                )
+                                Text(
+                                    text = "MUSIC",
+                                    fontSize = 32.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = VinColors.AccentLight,
+                                    letterSpacing = (-0.5).sp
+                                )
+                            }
+                            // Time-aware greeting — a small human moment that makes
+                            // home feel composed rather than generated.
                             Text(
-                                text = "VIN",
-                                fontSize = 32.sp,
-                                fontWeight = FontWeight.Black,
-                                color = Color.White,
-                                letterSpacing = (-0.5).sp
-                            )
-                            Text(
-                                text = "MUSIC",
-                                fontSize = 32.sp,
-                                fontWeight = FontWeight.Black,
-                                color = VinColors.AccentLight,
-                                letterSpacing = (-0.5).sp
+                                text = remember {
+                                    when (java.util.Calendar.getInstance()
+                                        .get(java.util.Calendar.HOUR_OF_DAY)) {
+                                        in 5..11 -> "Good morning — fresh picks for your day"
+                                        in 12..17 -> "Good afternoon — your mix is ready"
+                                        in 18..21 -> "Good evening — unwind with your sound"
+                                        else -> "Late night session — calm vibes ahead"
+                                    }
+                                },
+                                style = Vin.Text.bodySmall.copy(color = VinColors.Secondary)
                             )
                         }
                     }
@@ -1993,7 +2009,7 @@ fun HomeScreen(
                                 .border(
                                     BorderStroke(
                                         1.dp,
-                                        if (active) Color.Transparent else Color.White.copy(alpha = 0.08f)
+                                        if (active) VinColors.AccentGlow else Color.White.copy(alpha = 0.08f)
                                     ),
                                     RoundedCornerShape(22.dp)
                                 )
@@ -2133,14 +2149,7 @@ fun HomeScreen(
                 }
 
                 if (isLoadingQuickPicks && quickPicks.isEmpty()) {
-                    item {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(24.dp))
-                        }
-                    }
+                    item { ShelfSkeleton(cardHeight = 64.dp, cardWidth = 280.dp) }
                 } else if (quickPicks.isNotEmpty()) {
                     item {
                         SectionTitle("Quick Picks")
@@ -2348,16 +2357,7 @@ fun HomeScreen(
 
                 // 2. Dynamic Recommendations Sections (Personalized Music Engine)
                 if (isRecommendationsLoading && recommendationSections.isEmpty()) {
-                    item {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(32.dp))
-                            Text("Loading", color = VinColors.Secondary, fontSize = 12.sp)
-                        }
-                    }
+                    item { ShelfSkeleton() }
                 } else {
                     recommendationSections.forEach { (title, recList) ->
                         // With YT Music connected, real YTM-engine shelves carry home —
@@ -2365,18 +2365,43 @@ fun HomeScreen(
                         if (recList.isNotEmpty() &&
                             !(ytMusicSections.isNotEmpty() && title in TASTE_INDEPENDENT_SHELVES)
                         ) {
-                            item {
-                                SectionTitle(title)
-                                Spacer(Modifier.height(10.dp))
-                                LazyRow(
-                                    contentPadding = PaddingValues(horizontal = 20.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                    modifier = Modifier.padding(bottom = 24.dp)
-                                ) {
-                                    val videoItems = recList.map { it.videoItem }
-                                    items(recList, key = { it.videoItem.videoId }) { rec ->
-                                        RecommendedTrackCard(song = rec.videoItem, reason = rec.reason) {
-                                            onSongClick(rec.videoItem, videoItems)
+                            if (title == "Side A") {
+                                // Hero treatment: big top pick + regular row below.
+                                item {
+                                    SectionTitle(title)
+                                    Spacer(Modifier.height(10.dp))
+                                    val heroRec = recList.first()
+                                    val heroItems = recList.map { it.videoItem }
+                                    SideAHeroCard(heroRec) {
+                                        onSongClick(heroRec.videoItem, heroItems)
+                                    }
+                                    Spacer(Modifier.height(12.dp))
+                                    LazyRow(
+                                        contentPadding = PaddingValues(horizontal = 20.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        modifier = Modifier.padding(bottom = 24.dp)
+                                    ) {
+                                        items(recList.drop(1), key = { it.videoItem.videoId }) { rec ->
+                                            RecommendedTrackCard(song = rec.videoItem, reason = rec.reason) {
+                                                onSongClick(rec.videoItem, heroItems)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                item {
+                                    SectionTitle(title)
+                                    Spacer(Modifier.height(10.dp))
+                                    LazyRow(
+                                        contentPadding = PaddingValues(horizontal = 20.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        modifier = Modifier.padding(bottom = 24.dp)
+                                    ) {
+                                        val videoItems = recList.map { it.videoItem }
+                                        items(recList, key = { it.videoItem.videoId }) { rec ->
+                                            RecommendedTrackCard(song = rec.videoItem, reason = rec.reason) {
+                                                onSongClick(rec.videoItem, videoItems)
+                                            }
                                         }
                                     }
                                 }
@@ -2494,14 +2519,7 @@ fun HomeScreen(
                 }
 
                 if (isLoadingQuickPicks && quickPicks.isEmpty()) {
-                    item {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(24.dp))
-                        }
-                    }
+                    item { ShelfSkeleton(cardHeight = 64.dp, cardWidth = 280.dp) }
                 } else if (quickPicks.isNotEmpty()) {
                     item {
                         SectionTitle("Quick Picks")
@@ -2644,16 +2662,7 @@ fun HomeScreen(
 
                 // 4. Personalized Recommendations Sections
                 if (isRecommendationsLoading && recommendationSections.isEmpty()) {
-                    item {
-                        Column(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            CircularProgressIndicator(color = VinColors.Accent, modifier = Modifier.size(32.dp))
-                            Text("Loading", color = VinColors.Secondary, fontSize = 12.sp)
-                        }
-                    }
+                    item { ShelfSkeleton() }
                 } else {
                     recommendationSections.forEach { (title, recList) ->
                         // With YT Music connected, real YTM-engine shelves carry home —
@@ -2661,18 +2670,43 @@ fun HomeScreen(
                         if (recList.isNotEmpty() &&
                             !(ytMusicSections.isNotEmpty() && title in TASTE_INDEPENDENT_SHELVES)
                         ) {
-                            item {
-                                SectionTitle(title)
-                                Spacer(Modifier.height(10.dp))
-                                LazyRow(
-                                    contentPadding = PaddingValues(horizontal = 20.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                    modifier = Modifier.padding(bottom = 24.dp)
-                                ) {
-                                    val videoItems = recList.map { it.videoItem }
-                                    items(recList, key = { it.videoItem.videoId }) { rec ->
-                                        RecommendedTrackCard(song = rec.videoItem, reason = rec.reason) {
-                                            onSongClick(rec.videoItem, videoItems)
+                            if (title == "Side A") {
+                                // Hero treatment: big top pick + regular row below.
+                                item {
+                                    SectionTitle(title)
+                                    Spacer(Modifier.height(10.dp))
+                                    val heroRec = recList.first()
+                                    val heroItems = recList.map { it.videoItem }
+                                    SideAHeroCard(heroRec) {
+                                        onSongClick(heroRec.videoItem, heroItems)
+                                    }
+                                    Spacer(Modifier.height(12.dp))
+                                    LazyRow(
+                                        contentPadding = PaddingValues(horizontal = 20.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        modifier = Modifier.padding(bottom = 24.dp)
+                                    ) {
+                                        items(recList.drop(1), key = { it.videoItem.videoId }) { rec ->
+                                            RecommendedTrackCard(song = rec.videoItem, reason = rec.reason) {
+                                                onSongClick(rec.videoItem, heroItems)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                item {
+                                    SectionTitle(title)
+                                    Spacer(Modifier.height(10.dp))
+                                    LazyRow(
+                                        contentPadding = PaddingValues(horizontal = 20.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        modifier = Modifier.padding(bottom = 24.dp)
+                                    ) {
+                                        val videoItems = recList.map { it.videoItem }
+                                        items(recList, key = { it.videoItem.videoId }) { rec ->
+                                            RecommendedTrackCard(song = rec.videoItem, reason = rec.reason) {
+                                                onSongClick(rec.videoItem, videoItems)
+                                            }
                                         }
                                     }
                                 }
@@ -3869,6 +3903,99 @@ private fun SectionTitle(text: String) {
         modifier = Modifier.padding(horizontal = 20.dp),
         style = Vin.Text.sectionHeader
     )
+}
+
+/**
+ * Hero treatment for the "Side A" shelf's top pick — one large artwork-backed
+ * card that gives home a focal point instead of another uniform row.
+ */
+@Composable
+private fun SideAHeroCard(rec: com.vinmusic.recommendation.RecommendedSong, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .height(190.dp)
+            .clip(RoundedCornerShape(Vin.Radius.xxl))
+            .clickable { onClick() }
+    ) {
+        AsyncImage(
+            model = rec.videoItem.thumbnailHd,
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize().scale(1.2f),
+            contentScale = ContentScale.Crop
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f), Color.Black.copy(alpha = 0.88f))
+                    )
+                )
+        )
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "SIDE A · TOP PICK",
+                    style = Vin.Text.overline.copy(color = VinColors.AccentLight)
+                )
+                Text(
+                    rec.videoItem.title,
+                    style = Vin.Text.h3,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    rec.videoItem.author,
+                    style = Vin.Text.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(VinColors.Accent),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.PlayArrow,
+                    contentDescription = "Play",
+                    tint = Color.Black,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+        }
+    }
+}
+
+/** Shimmering placeholder row shown while a shelf loads — replaces spinners. */
+@Composable
+private fun ShelfSkeleton(cardHeight: Dp = 190.dp, cardWidth: Dp = 150.dp) {
+    LazyRow(
+        contentPadding = PaddingValues(horizontal = 20.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.padding(bottom = 24.dp)
+    ) {
+        items(4, key = { it }) { index ->
+            Box(
+                modifier = Modifier
+                    .width(cardWidth)
+                    .height(cardHeight)
+                    .clip(RoundedCornerShape(Vin.Radius.lg))
+                    .background(VinColors.Surface)
+                    .shimmerEffect()
+            )
+        }
+    }
 }
 
 @Composable

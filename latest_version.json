@@ -1,8 +1,8 @@
 {
-  "latestVersionCode": 19,
-  "latestVersionName": "2.3.0",
+  "latestVersionCode": 20,
+  "latestVersionName": "2.4.0",
   "apkUrl": "https://vinrawa.github.io/Vin-music-v2/vinmusic.apk",
-  "sha256": "1b314be111e01b567c621e2eb0b0de72aa90ce3f3b5d37f63cdf73ebac378164",
+  "sha256": "a2d76eceb610bb9c5280d7117c472e201cccaaa53a759ed7ac4a241593f51980",
   "forceUpdate": false,
-  "releaseNotes": "Security hardening, SHA-256 update verification, memory leak fixes, download reliability, and widget crash-proofing."
+  "releaseNotes": "Smarter autoplay queue (similar songs first), fresh Quick Picks and Discover deck, Side A hero shelf with daily rotation, taste-based playlist recommendations, rebuilt TasteDNA, and UI polish."
 }

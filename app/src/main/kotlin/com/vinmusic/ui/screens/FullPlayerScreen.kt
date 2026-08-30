@@ -22,9 +22,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
@@ -142,12 +140,6 @@ fun FullPlayerScreen(
     var lastAngle by remember { mutableFloatStateOf(0f) }
     var wasPlayingBeforeScratch by remember { mutableStateOf(false) }
 
-    // Cleanup DJ synthesizer when leaving player screen
-    DisposableEffect(Unit) {
-        onDispose {
-            ScratchSoundSynthesizer.release()
-        }
-    }
 
     val particles = remember {
         List(18) {
@@ -1885,7 +1877,7 @@ fun QueuePanel(vm: PlayerViewModel, onSaveAsPlaylist: (() -> Unit)? = null) {
                 .clip(RoundedCornerShape(8.dp))
                 .background(if (i == vm.queueIndex) VinColors.White10 else Color.Transparent)
                 .combinedClickable(
-                    onClick = { vm.setQueue(vm.queue, i) },
+                    onClick = { vm.skipToIndex(i) },
                     onLongClick = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         selectedMoveIndex = i
@@ -2635,19 +2627,22 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
         parseContributors(artistName).firstOrNull()?.replace("-topic", "", ignoreCase = true)?.replace("- topic", "", ignoreCase = true)?.trim() ?: artistName
     }
     
+    val cachedInitial = remember(cleanName) { com.vinmusic.data.ArtistDataCache.get(cleanName) }
     var isFollowing by remember { mutableStateOf(false) }
-    var artistImageUrl by remember { mutableStateOf<String?>(null) }
-    var bannerImageUrl by remember { mutableStateOf<String?>(null) }
-    var officialAudience by remember { mutableStateOf("") }
-    var isVerifiedArtist by remember { mutableStateOf(false) }
+    var artistImageUrl by remember { mutableStateOf<String?>(cachedInitial?.avatarUrl?.takeIf { it.isNotBlank() }) }
+    var bannerImageUrl by remember { mutableStateOf<String?>(cachedInitial?.bannerUrl?.takeIf { it.isNotBlank() }) }
+    var officialAudience by remember { mutableStateOf(formatMonthlyListenersText(cachedInitial?.subscriberCount.orEmpty())) }
+    var isVerifiedArtist by remember { mutableStateOf(cachedInitial?.isVerified ?: shouldShowVerifiedArtist(cleanName, "", "")) }
 
     val ctx = androidx.compose.ui.platform.LocalContext.current
 
     LaunchedEffect(cleanName) {
-        artistImageUrl = null
-        bannerImageUrl = null
-        officialAudience = ""
-        isVerifiedArtist = false
+        if (cachedInitial == null || (cachedInitial.avatarUrl.isBlank() && cachedInitial.bannerUrl.isBlank())) {
+            artistImageUrl = null
+            bannerImageUrl = null
+            officialAudience = ""
+            isVerifiedArtist = false
+        }
 
         val localBanner = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             com.vinmusic.download.ArtistBannerCache.bannerPath(ctx, cleanName)
@@ -2661,7 +2656,6 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
                 val res = com.vinmusic.innertube.InnerTube.searchAll(cleanName)
                 val artist = res.artists.maxByOrNull { artistSearchScore(cleanName, it.name, it.subscriberCount) }
                 val channelData = runCatching { com.vinmusic.innertube.InnerTube.fetchChannelData(artist?.channelId.orEmpty(), cleanName) }.getOrNull()
-                android.util.Log.d("AboutArtistCard", "channelData banner='${channelData?.bannerUrl}' avatar='${channelData?.avatarUrl}'")
 
                 if (localBanner == null && channelData?.bannerUrl.isNullOrBlank().not()) {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -2677,11 +2671,11 @@ fun AboutArtistCard(artistName: String, onArtistNameClick: (String) -> Unit) {
             }.getOrNull()
         }
         if (resolved != null) {
-            artistImageUrl = resolved.first.takeIf { it.isNotBlank() }
-            if (bannerImageUrl == null) {
-                bannerImageUrl = resolved.second.takeIf { it.isNotBlank() }
+            if (resolved.first.isNotBlank()) artistImageUrl = resolved.first
+            if (bannerImageUrl == null && resolved.second.isNotBlank()) {
+                bannerImageUrl = resolved.second
             }
-            officialAudience = resolved.third
+            if (resolved.third.isNotBlank()) officialAudience = resolved.third
             isVerifiedArtist = shouldShowVerifiedArtist(cleanName, "", "")
         }
     }
@@ -2931,20 +2925,38 @@ fun CreditsCard(
     val contributors = remember(author) { parseContributors(author) }
     val allCredits = remember(author, description) { buildFullSongCredits(author, description) }
 
-    var artistImages by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    val initialImages = remember(contributors) {
+        val map = mutableMapOf<String, String>()
+        contributors.forEach { name ->
+            val cached = com.vinmusic.data.ArtistDataCache.get(name)
+            if (cached != null && cached.avatarUrl.isNotBlank()) {
+                map[name] = cached.avatarUrl
+            }
+        }
+        map
+    }
+    var artistImages by remember(contributors) { mutableStateOf<Map<String, String>>(initialImages) }
 
     LaunchedEffect(contributors) {
         if (contributors.isEmpty()) return@LaunchedEffect
-        val images = mutableMapOf<String, String>()
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            for (name in contributors) {
-                try {
-                    val res = com.vinmusic.innertube.InnerTube.searchAll(name)
-                    val artist = res.artists.maxByOrNull { it.subscriberCount.toLongOrNull() ?: 0L }
-                    if (artist != null && artist.thumbnail.isNotBlank()) {
-                        images[name] = artist.thumbnail
+        val images = mutableMapOf<String, String>().apply { putAll(initialImages) }
+        withContext(Dispatchers.IO) {
+            coroutineScope {
+                val jobs = contributors.filterNot { images.containsKey(it) }.map { name ->
+                    async {
+                        try {
+                            val res = com.vinmusic.innertube.InnerTube.searchAll(name)
+                            val artist = res.artists.maxByOrNull { it.subscriberCount.toLongOrNull() ?: 0L }
+                            if (artist != null && artist.thumbnail.isNotBlank()) {
+                                name to artist.thumbnail
+                            } else null
+                        } catch (_: Exception) { null }
                     }
-                } catch (_: Exception) {}
+                }
+                val results = jobs.awaitAll().filterNotNull()
+                for ((k, v) in results) {
+                    images[k] = v
+                }
             }
         }
         artistImages = images

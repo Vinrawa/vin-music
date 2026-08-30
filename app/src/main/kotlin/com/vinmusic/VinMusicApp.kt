@@ -30,6 +30,7 @@ class VinMusicApp : Application(), SingletonImageLoader.Factory {
 
         NewPipeInit.init()
         com.vinmusic.innertube.InnerTube.init(this)
+        com.vinmusic.data.ArtistDataCache.init(this)
         YTMusicApi.attachContext(this)
         com.vinmusic.config.RemoteConfigHelper.init()
         ReliabilityDiagnostics.init(this)

@@ -388,12 +388,23 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun setQueue(songs: List<VideoItem>, startIndex: Int = 0) {
+        radioJob?.cancel()
         lyricsSuppressedForVideoId = null
         resetLyricsState(songs.getOrNull(startIndex))
         progress          = 0f
         currentTimeMs     = 0L
         durationMs        = 0L
         PlayerSingleton.setQueue(songs, startIndex)
+    }
+
+    /** Skip to a queue index without resetting the queue or cancelling radio. */
+    fun skipToIndex(index: Int) {
+        lyricsSuppressedForVideoId = null
+        resetLyricsState(PlayerSingleton.queue.getOrNull(index))
+        progress          = 0f
+        currentTimeMs     = 0L
+        durationMs        = 0L
+        PlayerSingleton.skipToIndex(index)
     }
 
     fun playNextInQueue(song: VideoItem) {

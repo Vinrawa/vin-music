@@ -701,7 +701,7 @@ fun HomeScreen(
                 withContext(Dispatchers.Main) {
                     recommendationSections = fastRecs
                 }
-                val fullRecs = kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                val fullRecs = kotlinx.coroutines.withTimeoutOrNull(25_000L) {
                     com.vinmusic.recommendation.RecommendationManager.getRecommendations(ctx, forceRefresh = false)
                 }.orEmpty()
                 if (fullRecs.isNotEmpty()) {
@@ -710,9 +710,11 @@ fun HomeScreen(
                     }
                 }
             } catch (e: Exception) {
-                android.util.Log.e("HomeScreen", "Failed to load recommendations: ${e.message}")
+                if (e !is kotlinx.coroutines.CancellationException) {
+                    android.util.Log.e("HomeScreen", "Failed to load recommendations: ${e.message}")
+                }
             } finally {
-                withContext(Dispatchers.Main) {
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
                     isRecommendationsLoading = false
                 }
             }
@@ -721,8 +723,10 @@ fun HomeScreen(
             try {
                 isLoadingMixes = true
                 val rewindMix = loadRepeatRewindMix()
+                val genreMixes = try { vm.recommendationRepository.getGenreMixes() } catch (_: Exception) { emptyList() }
+                val combined = listOfNotNull(rewindMix) + genreMixes
                 withContext(Dispatchers.Main) {
-                    spotifyMixes = listOfNotNull(rewindMix)
+                    spotifyMixes = combined
                     isLoadingMixes = false
                 }
             } catch (e: Exception) {
@@ -1183,36 +1187,25 @@ fun HomeScreen(
                         }
                     }
                 } else {
-                    // Warm-start Discovery Phase: Use Last.fm similar artists (local)
-                    val topListened = listenedArtists.take(16)
-                    for (artName in topListened) {
-                        try {
-                            val lastFmSimilar = fetchSimilarArtistsLocally(artName)
-                            for (simArt in lastFmSimilar) {
-                                if (artistNames.size >= 16) break
-                                val normSim = normalizeArtistName(simArt)
-                                if (!cleanListened.contains(normSim) && !artistNames.map { normalizeArtistName(it) }.contains(normSim)) {
-                                    artistNames.add(simArt)
+                    // Warm-start Discovery Phase: Use Last.fm similar artists in parallel
+                    val topListened = listenedArtists.take(8)
+                    coroutineScope {
+                        val simJobs = topListened.map { artName ->
+                            async(Dispatchers.IO) {
+                                try {
+                                    fetchSimilarArtistsLocally(artName)
+                                } catch (_: Exception) {
+                                    val normArt = normalizeArtistName(artName)
+                                    SIMILAR_ARTISTS_FALLBACK.entries.firstOrNull { normalizeArtistName(it.key) == normArt }?.value ?: emptyList()
                                 }
                             }
-                        } catch (_: Exception) {
-                            // Fallback to hardcoded map if Last.fm fails
-                            val normArt = normalizeArtistName(artName)
-                            var similar: List<String>? = null
-                            for ((key, value) in SIMILAR_ARTISTS_FALLBACK) {
-                                if (normalizeArtistName(key) == normArt) {
-                                    similar = value
-                                    break
-                                }
-                            }
-                            if (similar != null) {
-                                for (simArt in similar) {
-                                    if (artistNames.size >= 16) break
-                                    val normSim = normalizeArtistName(simArt)
-                                    if (!cleanListened.contains(normSim) && !artistNames.map { normalizeArtistName(it) }.contains(normSim)) {
-                                        artistNames.add(simArt)
-                                    }
-                                }
+                        }
+                        val allSimilar = simJobs.awaitAll().flatten()
+                        for (simArt in allSimilar) {
+                            if (artistNames.size >= 16) break
+                            val normSim = normalizeArtistName(simArt)
+                            if (!cleanListened.contains(normSim) && !artistNames.map { normalizeArtistName(it) }.contains(normSim)) {
+                                artistNames.add(simArt)
                             }
                         }
                     }
@@ -1813,79 +1806,7 @@ fun HomeScreen(
                 }
             }
 
-            // ── Premium Actions: Tinder Discover ──
-            item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(96.dp)
-                        .padding(horizontal = 16.dp)
-                        .padding(bottom = 16.dp)
-                        .graphicsLayer(shadowElevation = 8.dp.value, shape = RoundedCornerShape(20.dp), clip = false)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(
-                            Brush.linearGradient(
-                                listOf(
-                                    Color(0xFFC5A880).copy(alpha = 0.25f),
-                                    Color(0xFF2C251C).copy(alpha = 0.35f)
-                                )
-                            )
-                        )
-                        .border(
-                            BorderStroke(1.2.dp, Brush.linearGradient(listOf(Color(0xFFC5A880), Color(0xFF2C251C)))),
-                            RoundedCornerShape(20.dp)
-                        )
-                        .clickable { onDiscoverClick() }
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 20.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(Color.White.copy(alpha = 0.15f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    Icons.Default.Favorite,
-                                    contentDescription = null,
-                                    tint = Color(0xFFC5A880),
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-                            Column {
-                                Text(
-                                    "Discover Mix Deck",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color.White
-                                )
-                                Text(
-                                    "Tinder-style swipe to unlock new music DNA",
-                                    fontSize = 11.sp,
-                                    color = VinColors.Secondary,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-                        Icon(
-                            Icons.Default.ChevronRight,
-                            null,
-                            tint = Color.White,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-                }
-            }
+
 
 
             // ── Screen Title & Sleek Search Glass Capsule ──────────────────────────

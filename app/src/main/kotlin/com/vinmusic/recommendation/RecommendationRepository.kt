@@ -35,7 +35,81 @@ class RecommendationRepository @Inject constructor(
     private val TAG = "VIN_REC_REP"
 
     companion object {
-        private val smartQueueMutex = Mutex()
+        private val inFlightRadios = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Deferred<List<VideoItem>>>()
+    }
+
+    object RecentlySuggestedTracker {
+        private val suggestedHistory = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        /** Maps normalized artist name → list of timestamps when they were suggested. */
+        private val suggestedArtists = java.util.concurrent.ConcurrentHashMap<String, MutableList<Long>>()
+
+        fun recordSuggestions(songs: List<VideoItem>) {
+            val now = System.currentTimeMillis()
+            val cutoff = now - 2 * 60 * 60 * 1000L // 2 hours
+            for (song in songs) {
+                suggestedHistory[song.videoId] = now
+                val normArt = RecommendationManager.normalizeArtistName(song.author)
+                if (normArt.isNotBlank()) {
+                    suggestedArtists.getOrPut(normArt) { mutableListOf() }.add(now)
+                }
+            }
+            // Cleanup entries older than 2 hours
+            suggestedHistory.entries.removeIf { now - it.value > cutoff }
+            // Time-based eviction for artist fatigue (remove timestamps > 2h old)
+            for ((key, timestamps) in suggestedArtists) {
+                timestamps.removeAll { now - it > cutoff }
+                if (timestamps.isEmpty()) suggestedArtists.remove(key)
+            }
+        }
+
+        fun isRecentlySuggested(videoId: String): Boolean {
+            val last = suggestedHistory[videoId] ?: return false
+            return System.currentTimeMillis() - last < 90 * 60 * 1000L // 90 mins cooldown
+        }
+
+        fun getArtistSuggestionCount(artist: String): Int {
+            val normArt = RecommendationManager.normalizeArtistName(artist)
+            val timestamps = suggestedArtists[normArt] ?: return 0
+            val cutoff = System.currentTimeMillis() - 2 * 60 * 60 * 1000L
+            return timestamps.count { it > cutoff }
+        }
+    }
+
+    private suspend fun fetchLastFmSimilarTracks(artist: String, title: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+        val apiKey = com.vinmusic.config.RemoteConfigHelper.getLastFmApiKey()
+        if (apiKey.isBlank() || artist.isBlank() || title.isBlank()) return@withContext emptyList()
+        var conn: java.net.HttpURLConnection? = null
+        try {
+            val urlString = "https://ws.audioscrobbler.com/2.0/?method=track.getsimilar" +
+                "&artist=${java.net.URLEncoder.encode(artist, "UTF-8")}" +
+                "&track=${java.net.URLEncoder.encode(title, "UTF-8")}" +
+                "&api_key=$apiKey" +
+                "&format=json&limit=15"
+            conn = java.net.URL(urlString).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 3500
+            conn.readTimeout = 3500
+            if (conn.responseCode == 200) {
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                val root = com.google.gson.JsonParser.parseString(json).asJsonObject
+                val simtracks = root.getAsJsonObject("similartracks")?.getAsJsonArray("track")
+                if (simtracks != null) {
+                    val list = mutableListOf<Pair<String, String>>()
+                    for (elem in simtracks) {
+                        val obj = elem.asJsonObject
+                        val tTitle = obj.get("name")?.asString ?: ""
+                        val tArtist = obj.getAsJsonObject("artist")?.get("name")?.asString ?: ""
+                        if (tTitle.isNotBlank() && tArtist.isNotBlank()) {
+                            list.add(tArtist to tTitle)
+                        }
+                    }
+                    return@withContext list
+                }
+            }
+        } catch (_: Exception) {
+        } finally {
+            conn?.disconnect()
+        }
+        emptyList()
     }
 
     private fun isOnline(): Boolean {
@@ -195,7 +269,9 @@ class RecommendationRepository @Inject constructor(
         var result = picked.take(20)
         if (result.size < 6) {
             Log.d(TAG, "Quick picks sparse (${result.size}), TasteDNA fallback...")
-            result = getQuickPicksTasteDnaFallback(profile).take(20)
+            val existingIds = result.map { it.videoId }.toSet()
+            val fallback = getQuickPicksTasteDnaFallback(profile).filter { it.videoId !in existingIds }
+            result = (result + fallback).take(20)
         }
 
         if (result.isNotEmpty()) saveVideoItems(cacheKey, result)
@@ -439,12 +515,23 @@ class RecommendationRepository @Inject constructor(
         return selected
     }
 
+    private fun isBannedShelfTitle(title: String): Boolean {
+        val lower = title.lowercase(java.util.Locale.ROOT)
+        return lower.contains("shorts") ||
+            lower.contains("music video") ||
+            lower.contains("videos") ||
+            lower.contains("clip") ||
+            lower.contains("trailer")
+    }
+
     private fun filterHomeSections(
         sections: List<YTMusicHomeSection>,
         profile: RecommendationManager.TasteProfile,
     ): List<YTMusicHomeSection> {
         val topLang = profile.topLanguages.firstOrNull()?.first
         return sections.mapNotNull { section ->
+            if (isBannedShelfTitle(section.title)) return@mapNotNull null
+
             val filtered = section.songs.filter { item ->
                 !RecommendationManager.isCompilationTrack(item.title, item.durationText) &&
                     !RecommendationManager.isNonMusicVideo(item.title, item.author) &&
@@ -453,10 +540,10 @@ class RecommendationRepository @Inject constructor(
             }.mapNotNull { item ->
                 val meta = RecommendationManager.inferMetadata(item)
                 if (!meta.isOfficial) return@mapNotNull null
-                if (topLang != null && meta.language != topLang) return@mapNotNull null
+                if (topLang != null && !RecommendationManager.isCompatibleQueueLanguage(meta.language, topLang, allowUnknown = true)) return@mapNotNull null
                 item
             }.distinctBy { it.videoId }
-            if (filtered.size >= 3) section.copy(songs = filtered.take(12)) else null
+            if (filtered.size >= 2) section.copy(songs = filtered.take(12)) else null
         }
     }
 
@@ -605,22 +692,33 @@ class RecommendationRepository @Inject constructor(
     )
 
     suspend fun getSongRadio(videoId: String, fallbackTitle: String = "", fallbackAuthor: String = "", currentQueue: List<VideoItem> = emptyList()): List<VideoItem> = withContext(Dispatchers.IO) {
-        smartQueueMutex.withLock {
-            getSongRadioInternal(videoId, fallbackTitle, fallbackAuthor, currentQueue)
+        val cacheKey = "song_radio_v6_$videoId"
+        val cached = loadVideoItems(cacheKey, allowStale = false)
+        if (cached != null && cached.isNotEmpty()) {
+            return@withContext cached
         }
+
+        val deferred = inFlightRadios.computeIfAbsent(videoId) {
+            async(Dispatchers.IO) {
+                try {
+                    getSongRadioInternal(videoId, fallbackTitle, fallbackAuthor, currentQueue)
+                } finally {
+                    inFlightRadios.remove(videoId)
+                }
+            }
+        }
+        deferred.await()
     }
 
     private suspend fun getSongRadioInternal(videoId: String, fallbackTitle: String, fallbackAuthor: String, currentQueue: List<VideoItem>): List<VideoItem> {
-        // v3 invalidates the old random/stale queue and enforces the repository's
-        // 15-minute TTL for Smart Queue only. Home recommendation caches are untouched.
-        val cacheKey = "song_radio_v5_$videoId"
+        val cacheKey = "song_radio_v6_$videoId"
         val cached = loadVideoItems(cacheKey, allowStale = false)
         if (cached != null && cached.isNotEmpty()) {
             Log.d(TAG, "Smart Queue cache hit for seed=$videoId size=${cached.size}")
             return cached
         }
 
-        Log.d(TAG, "Generating Smart Queue for seed track $videoId...")
+        Log.d(TAG, "Generating Multi-Angle Smart Queue for seed track $videoId...")
 
         val pool = mutableListOf<VideoItem>()
         
@@ -637,95 +735,112 @@ class RecommendationRepository @Inject constructor(
             VideoItem(videoId, seedTitle.ifBlank { "Track" }, seedAuthor.ifBlank { "Artist" }),
             context
         )
-        val profileLanguage = profile.topLanguages.firstOrNull()?.first?.takeIf { it.isNotBlank() && it != "Unknown" }
-
         val online = isOnline()
-        var rawYtmRelatedCount = 0
-        var rawYtmRadioCount = 0
-        var lastFmAdditions = 0
-        var searchFallbackAdditions = 0
 
         if (online) {
-            Log.d(TAG, "Device is ONLINE. Using YTM Related → YTM Radio → Search fallback.")
+            Log.d(TAG, "Device ONLINE. Executing 4-Angle Candidate Generation Pipeline in parallel.")
 
-            // 1. PRIMARY: YouTube Music Related (fresh, algorithm-curated)
-            val ytRelated = fetchYtRelatedForSeed(videoId).orEmpty()
-            rawYtmRelatedCount = ytRelated.size
-            if (ytRelated.isNotEmpty()) {
-                Log.d(TAG, "YTM Related returned ${ytRelated.size} tracks")
-                pool.addAll(ytRelated)
-            }
-
-            // 2. SECONDARY: YouTube Music Radio (RDAMVM radio playlist)
-            if (pool.size < 15) {
-                val radioTracks = InnerTube.getWatchNextRadio(videoId)
-                rawYtmRadioCount = radioTracks.size
-                if (radioTracks.isNotEmpty()) {
-                    Log.d(TAG, "YTM Radio returned ${radioTracks.size} tracks")
-                    for (track in radioTracks) {
-                        if (pool.none { it.videoId == track.videoId }) {
-                            pool.add(track)
-                        }
-                    }
-                }
-            }
-
-            // 2.5 TERTIARY: Last.fm Similar Tracks (genre/mood matched) - REMOVED (FirestoreRecommendationManager deleted)
-
-            // 3. Artist and genre search fallback to ensure candidate pool is always full
-            if (pool.size < 15) {
-                val searchQueries = mutableListOf<String>()
-                val yr = java.time.LocalDate.now().year
-                val genreLower = seedMeta.genre.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop")
-
-                if (seedAuthor.isNotBlank()) {
-                    searchQueries.add("$seedAuthor official songs")
-                    searchQueries.add("$seedAuthor popular tracks")
-                    searchQueries.add("$seedAuthor radio")
-                }
-
-                val langPrefix = when (seedMeta.language) {
-                    "Hindi" -> "hindi"
-                    "Punjabi" -> "punjabi"
-                    "Tamil" -> "tamil"
-                    "Korean" -> "korean"
-                    else -> ""
-                }
-
-                val crossGenres = listOf("rap hip hop", "pop", "r&b", "indie", "electronic", "rock", "lofi")
-                    .filter { !genreLower.contains(it.take(3)) }
-                    .sortedBy { it }
-                    .take(3)
-
-                if (langPrefix.isNotEmpty()) {
-                    searchQueries.add("$langPrefix $genreLower official hits $yr")
-                    searchQueries.add("$langPrefix ${seedMeta.mood.lowercase()} songs")
-                } else {
-                    searchQueries.add("$genreLower official hits $yr")
-                    searchQueries.add("${seedMeta.mood.lowercase()} $genreLower songs")
-                }
-                for (cg in crossGenres) {
-                    if (langPrefix.isNotEmpty()) {
-                        searchQueries.add("$langPrefix $cg official $yr")
-                    } else {
-                        searchQueries.add("$cg official $yr")
-                    }
-                }
-
-                for (query in searchQueries) {
+            coroutineScope {
+                // Angle 1: YouTube Music Related + Watch Next Radio (capped to avoid starving other angles)
+                val ytJob = async {
+                    val list = mutableListOf<VideoItem>()
                     try {
-                        val results = InnerTube.search(query).take(6)
-                        for (item in results) {
-                            if (pool.none { it.videoId == item.videoId }) {
-                                pool.add(item)
-                                searchFallbackAdditions++
+                        val related = fetchYtRelatedForSeed(videoId).orEmpty()
+                        list.addAll(related.take(15))
+                        if (list.size < 10) {
+                            val radioTracks = InnerTube.getWatchNextRadio(videoId)
+                            list.addAll(radioTracks.take(10))
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Angle 1 (YTM) error: ${e.message}")
+                    }
+                    list
+                }
+
+                // Angle 2: Last.fm Similar Tracks (Direct track/artist graph)
+                val lastFmJob = async {
+                    val list = mutableListOf<VideoItem>()
+                    try {
+                        val simPairs = fetchLastFmSimilarTracks(seedAuthor, seedTitle)
+                        if (simPairs.isNotEmpty()) {
+                            coroutineScope {
+                                val searchJobs = simPairs.take(6).map { (art, tit) ->
+                                    async {
+                                        try {
+                                            InnerTube.search("$art $tit official").firstOrNull {
+                                                !RecommendationManager.isCompilationTrack(it.title, it.durationText)
+                                            }
+                                        } catch (_: Exception) { null }
+                                    }
+                                }
+                                list.addAll(searchJobs.awaitAll().filterNotNull())
                             }
                         }
                     } catch (e: Exception) {
-                        Log.w(TAG, "Search fallback failed for '$query': ${e.message}")
+                        Log.w(TAG, "Angle 2 (Last.fm) error: ${e.message}")
                     }
-                    if (pool.size >= 25) break
+                    list
                 }
+
+                // Angle 3: Sub-Genre, Mood & Era Queries
+                val subgenreJob = async {
+                    val list = mutableListOf<VideoItem>()
+                    try {
+                        val yr = java.time.LocalDate.now().year
+                        val genreLower = seedMeta.genre.lowercase(Locale.ROOT).replace("rap/hip-hop", "rap hip hop")
+                        val queries = mutableListOf<String>()
+                        if (seedAuthor.isNotBlank()) {
+                            queries.add("$seedAuthor official songs")
+                        }
+                        queries.add("$genreLower hits $yr")
+                        queries.add("${seedMeta.mood.lowercase()} $genreLower music")
+
+                        coroutineScope {
+                            val qJobs = queries.take(3).map { q ->
+                                async {
+                                    try {
+                                        InnerTube.search(q).take(5)
+                                    } catch (_: Exception) { emptyList() }
+                                }
+                            }
+                            list.addAll(qJobs.awaitAll().flatten())
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Angle 3 (Subgenre) error: ${e.message}")
+                    }
+                    list
+                }
+
+                // Angle 4: Local 500K DB / Spotify Acoustic Neighbors (BPM/Energy cluster)
+                val acousticJob = async {
+                    val list = mutableListOf<VideoItem>()
+                    try {
+                        val neighbors = RecommendationManager.findAcousticallySimilarTracks(
+                            recDb, seedTitle, seedAuthor, setOf(seedAuthor), limit = 5
+                        )
+                        if (neighbors.isNotEmpty()) {
+                            coroutineScope {
+                                val aJobs = neighbors.take(4).map { trk ->
+                                    async {
+                                        try {
+                                            InnerTube.search("${trk.title} ${trk.artist} official").firstOrNull()
+                                        } catch (_: Exception) { null }
+                                    }
+                                }
+                                list.addAll(aJobs.awaitAll().filterNotNull())
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Angle 4 (Acoustic) error: ${e.message}")
+                    }
+                    list
+                }
+
+                val (ytList, lastFmList, subgenreList, acousticList) = awaitAll(ytJob, lastFmJob, subgenreJob, acousticJob)
+                pool.addAll(ytList)
+                pool.addAll(lastFmList)
+                pool.addAll(subgenreList)
+                pool.addAll(acousticList)
             }
         } else {
             Log.d(TAG, "Device is OFFLINE. Using downloaded songs for radio.")
@@ -834,6 +949,7 @@ class RecommendationRepository @Inject constructor(
             .filter { it.key.isNotBlank() && it.key != "Unknown" }
             .maxByOrNull { it.value }?.key
 
+        val profileLanguage = profile.topLanguages.firstOrNull()?.first?.takeIf { it.isNotBlank() && it != "Unknown" }
         val queueLanguage = seedMeta?.language?.takeIf { it.isNotBlank() && it != "Unknown" }
             ?: candidateMajorityLang
             ?: profileLanguage
@@ -904,9 +1020,11 @@ class RecommendationRepository @Inject constructor(
             val behavior = behaviorScore(item)
             val recentPenalty = if (item.videoId in recentlyPlayedIds) -0.18 else 0.0
             val currentQueuePenalty = if (normalizeQueueArtist(item.author) in currentQueueArtists) -0.12 else 0.0
+            val fatiguePenalty = if (RecentlySuggestedTracker.isRecentlySuggested(item.videoId)) -0.45 else 0.0
+            val artistFatiguePenalty = (RecentlySuggestedTracker.getArtistSuggestionCount(item.author) * -0.06).coerceIn(-0.30, 0.0)
             val officialBonus = if (meta.isOfficial) 0.05 else 0.0
-            val baseScore = seedSimilarity * 0.52 + tasteScore * 0.30 + behavior * 0.13 +
-                recentPenalty + currentQueuePenalty + officialBonus
+            val baseScore = seedSimilarity * 0.50 + tasteScore * 0.28 + behavior * 0.12 +
+                recentPenalty + currentQueuePenalty + fatiguePenalty + artistFatiguePenalty + officialBonus
             SmartQueueCandidate(item, meta, seedSimilarity, tasteScore, behavior, recentPenalty, baseScore)
         }
         val finalScoredCandidatesCount = scoredCandidates.size
@@ -1073,8 +1191,6 @@ class RecommendationRepository @Inject constructor(
         Log.d(
             TAG,
             "SmartQueue: seed=$videoId title='$seedTitle' artist='$seedAuthor' language='$queueLanguage' " +
-                "rawYtmRelated=$rawYtmRelatedCount rawYtmRadio=$rawYtmRadioCount " +
-                "lastFmAdditions=$lastFmAdditions searchFallbackAdditions=$searchFallbackAdditions " +
                 "totalRaw=${pool.size} unique=${dedupedPool.size} " +
                 "afterCompilation=$afterCompilationCount afterNonMusicVideo=$afterNonMusicVideoCount " +
                 "afterUnofficialContent=$afterUnofficialContentCount afterOfficial=$afterOfficialCount " +
@@ -1092,6 +1208,7 @@ class RecommendationRepository @Inject constructor(
         )
 
         if (sequenced.isNotEmpty()) {
+            RecentlySuggestedTracker.recordSuggestions(sequenced)
             saveVideoItems(cacheKey, sequenced)
         }
         return sequenced

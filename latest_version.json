@@ -1,8 +1,8 @@
 {
   "latestVersionCode": 20,
-  "latestVersionName": "2.4.0",
+  "latestVersionName": "2.2.4",
   "apkUrl": "https://vinrawa.github.io/Vin-music-v2/vinmusic.apk",
-  "sha256": "a2d76eceb610bb9c5280d7117c472e201cccaaa53a759ed7ac4a241593f51980",
+  "sha256": "61e4f3eb7db5328afb4e587763d3bf10f865bea25a2e6e846149019577c9c4f2",
   "forceUpdate": false,
-  "releaseNotes": "Smarter autoplay queue (similar songs first), fresh Quick Picks and Discover deck, Side A hero shelf with daily rotation, taste-based playlist recommendations, rebuilt TasteDNA, and UI polish."
+  "releaseNotes": "Bottom Navigation updated with dedicated Downloads & Cache tab, 10 deep codebase audit fixes (queue skipToIndex, 2nd song prefetch, online cache stream, Discover append, anti-fatigue decay), and UI polish."
 }

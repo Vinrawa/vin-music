@@ -314,6 +314,18 @@ fun DiscoverScreen(
                     }
                 } catch (_: Exception) {}
 
+                // If pool is still sparse, seed from user's liked tracks & top history
+                if (discoverPool.size < 6) {
+                    liked.shuffled().take(8).forEach { l ->
+                        val item = VideoItem(l.videoId, l.title, l.author, l.durationText)
+                        addCandidate(item, "From your liked tracks", dnaScore(item))
+                    }
+                    history.take(15).shuffled().take(8).forEach { h ->
+                        val item = VideoItem(h.videoId, h.title, h.author, h.durationText)
+                        addCandidate(item, "Rediscover this vibe", dnaScore(item))
+                    }
+                }
+
                 val instantDeck = buildDiscoverDeck(discoverPool)
                 if (instantDeck.isNotEmpty()) {
                     withContext(Dispatchers.Main) {
@@ -530,14 +542,16 @@ fun DiscoverScreen(
                 val uniqueDiscover = buildDiscoverDeck(discoverPool)
 
                 withContext(Dispatchers.Main) {
-                    val visibleCard = cards.lastOrNull()
-                    val visibleKey = visibleCard?.videoItem?.let { discoverSongKey(it) }
-                    val stableDeck = if (visibleCard != null && visibleKey != null && uniqueDiscover.any { discoverSongKey(it.videoItem) == visibleKey }) {
-                        uniqueDiscover.filterNot { discoverSongKey(it.videoItem) == visibleKey } + visibleCard
-                    } else {
-                        uniqueDiscover
+                    val existingKeys = cards.map { discoverSongKey(it.videoItem) }.toSet()
+                    val newCards = uniqueDiscover.filter { discoverSongKey(it.videoItem) !in existingKeys }
+                    if (cards.isEmpty()) {
+                        // First load — use entire deck
+                        cards = uniqueDiscover
+                    } else if (newCards.isNotEmpty()) {
+                        // Append new cards to the BOTTOM of the stack (index 0)
+                        // so they appear after the user swipes through existing cards
+                        cards = newCards + cards
                     }
-                    cards = stableDeck
                     isLoading = false
                     autoPreviewEnabled = true
                 }

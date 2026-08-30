@@ -193,8 +193,8 @@ object UnisonClient {
 
         return http.newCall(request).execute().use { response ->
             if (response.code == 401 || response.code == 403) {
-                android.util.Log.w("UnisonClient", "Auth error ${response.code} — self-disabling for 12h")
-                disabledUntilMs = System.currentTimeMillis() + TimeUnit.HOURS.toMillis(12)
+                android.util.Log.w("UnisonClient", "Auth error ${response.code} — self-disabling for 15m")
+                disabledUntilMs = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(15)
                 return@use null
             }
             if (!response.isSuccessful) {

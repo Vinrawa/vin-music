@@ -304,9 +304,10 @@ data class NavItem(val route: String, val label: String, val icon: androidx.comp
 
 val NAV_ITEMS = listOf(
     NavItem("home",      "Home",      Icons.Default.Home),
+    NavItem("discover",  "Discover",  Icons.Default.Explore),
+    NavItem("downloads", "Downloads", Icons.Default.Download),
     NavItem("search",    "Search",    Icons.Default.Search),
     NavItem("library",   "Library",   Icons.Default.LibraryMusic),
-    NavItem("downloads", "Downloads", Icons.Default.Download),
     NavItem("settings",  "Profile",   Icons.Default.Person)
 )
 

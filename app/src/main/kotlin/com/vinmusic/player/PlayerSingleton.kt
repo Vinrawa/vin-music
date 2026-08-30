@@ -129,6 +129,10 @@ object PlayerSingleton {
         // queueIndex follows the currently playing song; recompute after the splice
         val newIdx = queue.indexOfFirst { it.videoId == currentSong?.videoId }
         if (newIdx >= 0) queueIndex = newIdx
+        // Clear stale prefetch from the old fast-path tail and prefetch the new upcoming track
+        nextStreamUrlDeferred = null
+        prefetchNextSong()
+        prefetchNextSongs()  // Also cache media bytes to disk so 2nd song plays even if network drops
     }
 
     // Stored playback parameters — survive across song transitions
@@ -921,7 +925,7 @@ object PlayerSingleton {
                                         return androidx.media3.common.C.RESULT_END_OF_INPUT
                                     }
                                     Log.w(TAG, "Offline cache miss at remaining=$bytesRemaining, requesting length=$length")
-                                    return androidx.media3.common.C.RESULT_END_OF_INPUT
+                                    throw java.io.IOException("Offline cache miss: no bytes available at this position")
                                 }
                                 
                                 override fun getUri(): android.net.Uri? = uri
@@ -937,9 +941,21 @@ object PlayerSingleton {
                     .createMediaSource(mediaItem)
             }
         } else {
-            // Fresh network playback - use dynamic HTTP factory to match stream URL client UA
-            androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(dynamicHttpFactory)
-                .createMediaSource(mediaItem)
+            // Fresh network playback — route through player cache so prefetched
+            // bytes from prefetchNextSongs() are used instead of re-downloading.
+            val pCache = context?.let { getCache(it) }
+            if (pCache != null) {
+                val cacheFactory = androidx.media3.datasource.cache.CacheDataSource.Factory()
+                    .setCache(pCache)
+                    .setUpstreamDataSourceFactory(dynamicHttpFactory)
+                    .setCacheKeyFactory { dataSpec -> dataSpec.key ?: song.videoId }
+                    .setFlags(androidx.media3.datasource.cache.CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+                androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(cacheFactory)
+                    .createMediaSource(mediaItem)
+            } else {
+                androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(dynamicHttpFactory)
+                    .createMediaSource(mediaItem)
+            }
         }
         
         player.setMediaSource(mediaSource, safeStartPositionMs)
@@ -962,8 +978,20 @@ object PlayerSingleton {
         }
     }
 
+    /**
+     * Skip to a specific index in the existing queue without resetting it.
+     * Unlike setQueue(), this preserves the queue, autoplay tail, and radioJob.
+     */
+    fun skipToIndex(index: Int) {
+        if (index !in queue.indices) return
+        if (index == queueIndex && currentSong?.videoId == queue[index].videoId) return
+        queueIndex = index
+        playSong(queue[index])
+    }
+
     fun setQueue(songs: List<VideoItem>, startIndex: Int = 0) {
         clearAutoplayTail()
+        nextStreamUrlDeferred = null
         queue      = songs
         queueIndex = startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
         if (songs.isNotEmpty()) playSong(songs[queueIndex])
@@ -1019,6 +1047,8 @@ object PlayerSingleton {
         
         // Spotify Radio Mode / Smart Autoplay
         if (queueIndex == queue.size - 1 && !repeat && smartAutoplayEnabled) {
+            // Guard: prevent duplicate autoplay fetches on rapid "Next" taps
+            if (isAutoplayLoading) return
             val seedSong = currentSong ?: queue[queueIndex]
             isAutoplayLoading = true
             scope.launch {

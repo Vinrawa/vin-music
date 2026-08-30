@@ -2188,20 +2188,31 @@ object InnerTube {
 
     fun fetchChannelData(channelIdInput: String, artistNameFallback: String = ""): ChannelData {
         var activeChannelId = channelIdInput.trim()
-        android.util.Log.d("VinArtistDebug", "fetchChannelData called: channelId='$activeChannelId' fallback='$artistNameFallback'")
+        val queryKey = activeChannelId.ifBlank { artistNameFallback }.trim()
+        if (queryKey.isBlank()) return ChannelData()
+
+        // 1. Check shared ArtistDataCache (0ms instant hit)
+        val cachedShared = com.vinmusic.data.ArtistDataCache.get(queryKey)
+        if (cachedShared != null && (cachedShared.avatarUrl.isNotBlank() || cachedShared.bannerUrl.isNotBlank() || cachedShared.subscriberCount.isNotBlank())) {
+            return ChannelData(
+                bannerUrl = cachedShared.bannerUrl,
+                bio = cachedShared.bio,
+                subscriberCount = cachedShared.subscriberCount,
+                title = cachedShared.name.ifBlank { artistNameFallback },
+                avatarUrl = cachedShared.avatarUrl
+            )
+        }
+
+        // 2. Check local memory cache (10 min TTL)
+        val cacheKey = queryKey.lowercase()
+        val cached = channelDataCache.get(cacheKey)
+        if (cached != null && System.currentTimeMillis() - cached.first < 600_000) {
+            return cached.second
+        }
 
         // 0. If channelId is missing, resolve it from YTM search by artist name
         if (activeChannelId.isBlank() && artistNameFallback.isNotBlank()) {
             activeChannelId = resolveArtistChannelId(artistNameFallback)
-            android.util.Log.d("VinArtistDebug", "resolveArtistChannelId returned: '$activeChannelId'")
-        }
-
-        // Check cache (10 min TTL)
-        val cacheKey = activeChannelId.ifBlank { artistNameFallback }.lowercase()
-        val cached = channelDataCache.get(cacheKey)
-        if (cached != null && System.currentTimeMillis() - cached.first < 600_000) {
-            android.util.Log.d("VinArtistDebug", "fetchChannelData CACHE HIT for '$cacheKey'")
-            return cached.second
         }
 
         var banner = ""
@@ -2211,7 +2222,6 @@ object InnerTube {
         var bio = ""
 
         if (activeChannelId.isNotBlank()) {
-            // Fetch WEB + WEB_REMIX in PARALLEL for speed
             val webBody = mapOf(
                 "browseId" to activeChannelId,
                 "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to "2.20231219.04.00", "hl" to "en", "gl" to "IN"))
@@ -2226,7 +2236,7 @@ object InnerTube {
 
             val webThread = Thread {
                 try {
-                    val raw = http.newCall(Request.Builder()
+                    val raw = racingHttp.newCall(Request.Builder()
                         .url("$BASE/browse?prettyPrint=false")
                         .post(gson.toJson(webBody).toRequestBody(JSON))
                         .header("Content-Type", "application/json")
@@ -2238,7 +2248,7 @@ object InnerTube {
             }
             val ytmThread = Thread {
                 try {
-                    val rawYtm = http.newCall(Request.Builder()
+                    val rawYtm = racingHttp.newCall(Request.Builder()
                         .url("https://music.youtube.com/youtubei/v1/browse?prettyPrint=false")
                         .post(gson.toJson(ytmBody).toRequestBody(JSON))
                         .header("Content-Type", "application/json")
@@ -2251,17 +2261,17 @@ object InnerTube {
 
             webThread.start()
             ytmThread.start()
-            webThread.join()
-            ytmThread.join()
+            try {
+                webThread.join(3500)
+                ytmThread.join(3500)
+            } catch (_: Exception) {}
 
             // Merge: start with WEB data, then override with YTM (better banners)
             webParsed?.let {
                 banner = it.bannerUrl; avatar = it.avatarUrl; subs = it.subscriberCount; title = it.title; bio = it.bio
-                android.util.Log.d("VinArtistDebug", "WEB: banner='${banner.take(60)}' avatar='${avatar.take(60)}' title='$title'")
             }
             val isTopicChannel = title.contains("- Topic", ignoreCase = true)
             ytmParsed?.let { ytm ->
-                android.util.Log.d("VinArtistDebug", "YTM: banner='${ytm.bannerUrl.take(60)}' avatar='${ytm.avatarUrl.take(60)}' title='${ytm.title}'")
                 if (ytm.bannerUrl.isNotBlank()) banner = ytm.bannerUrl
                 if (ytm.avatarUrl.isNotBlank()) avatar = ytm.avatarUrl
                 if (subs.isBlank() || isTopicChannel) subs = ytm.subscriberCount.ifBlank { subs }
@@ -2293,6 +2303,21 @@ object InnerTube {
 
         val result = ChannelData(bannerUrl = banner, bio = finalBio, subscriberCount = subs, title = finalTitle, avatarUrl = avatar)
         channelDataCache.put(cacheKey, Pair(System.currentTimeMillis(), result))
+        if (result.avatarUrl.isNotBlank() || result.bannerUrl.isNotBlank() || result.subscriberCount.isNotBlank()) {
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                com.vinmusic.data.ArtistDataCache.put(
+                    queryKey,
+                    com.vinmusic.data.CachedArtistData(
+                        channelId = activeChannelId,
+                        name = finalTitle,
+                        avatarUrl = result.avatarUrl,
+                        bannerUrl = result.bannerUrl,
+                        subscriberCount = result.subscriberCount,
+                        bio = result.bio
+                    )
+                )
+            }
+        }
         return result
     }
 

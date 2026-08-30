@@ -43,14 +43,16 @@ fun ArtistProfileScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
 
+    val cachedInitial = remember(artist.channelId, artist.name) {
+        com.vinmusic.data.ArtistDataCache.get(artist.channelId) ?: com.vinmusic.data.ArtistDataCache.get(artist.name)
+    }
     var topSongs     by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var rareSongs    by remember { mutableStateOf<List<VideoItem>>(emptyList()) }
     var albums       by remember { mutableStateOf<List<AlbumItem>>(emptyList()) }
     var singles      by remember { mutableStateOf<List<AlbumItem>>(emptyList()) }
-    var similar      by remember { mutableStateOf<List<ArtistItem>>(emptyList()) }
-    var bio          by remember { mutableStateOf("") }
-    var banner       by remember { mutableStateOf("") }
-    var subs         by remember { mutableStateOf(artist.subscriberCount) }
+    var bio          by remember { mutableStateOf(cachedInitial?.bio ?: "") }
+    var banner       by remember { mutableStateOf(cachedInitial?.bannerUrl ?: "") }
+    var subs         by remember { mutableStateOf(cachedInitial?.subscriberCount?.ifBlank { artist.subscriberCount } ?: artist.subscriberCount) }
     var bioExpanded  by remember { mutableStateOf(false) }
     var showAllSongs by remember { mutableStateOf(false) }
     var showAllRare  by remember { mutableStateOf(false) }

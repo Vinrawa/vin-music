@@ -28,9 +28,6 @@
     <!-- Post notifications (download progress, playback) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Receive boot completed (restart service) -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    
     <!-- Required to prompt the user to install APK updates (Android 8.0+) -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
@@ -45,12 +42,12 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.VinMusicV2"
         android:largeHeap="true"
-        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:enableOnBackInvokedCallback="true">
 
         <!-- Sentry configuration -->
         <meta-data android:name="io.sentry.dsn" android:value="https://dce5ff50d6078bb679b24e33fb193549@o4511553421967360.ingest.us.sentry.io/4511553487437824" />
-        <meta-data android:name="io.sentry.traces.sample-rate" android:value="1.0" />
+        <meta-data android:name="io.sentry.traces.sample-rate" android:value="0.1" />
         <meta-data android:name="io.sentry.logs.enabled" android:value="true" />
 
         <activity

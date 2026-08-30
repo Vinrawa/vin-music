@@ -178,20 +178,24 @@ object UpdateManager {
         // Hashing a ~90 MB APK must not run on the main thread.
         CoroutineScope(Dispatchers.IO).launch {
             val expected = expectedSha256
-            if (expected != null) {
-                val actual = sha256Hex(file)
-                if (actual == null || !actual.equals(expected, ignoreCase = true)) {
-                    Log.e(TAG, "APK integrity check failed (expected $expected, got $actual)")
-                    file.delete()
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(ctxt, "Update failed integrity check. Not installing.", Toast.LENGTH_LONG).show()
-                    }
-                    return@launch
+            if (expected.isNullOrBlank()) {
+                Log.e(TAG, "Refusing update without SHA-256 integrity hash")
+                file.delete()
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(ctxt, "Update blocked: missing security signature.", Toast.LENGTH_LONG).show()
                 }
-                Log.i(TAG, "APK integrity verified (${actual.take(12)}…)")
-            } else {
-                Log.w(TAG, "Manifest has no sha256 field — skipping integrity verification")
+                return@launch
             }
+            val actual = sha256Hex(file)
+            if (actual == null || !actual.equals(expected, ignoreCase = true)) {
+                Log.e(TAG, "APK integrity check failed (expected $expected, got $actual)")
+                file.delete()
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(ctxt, "Update failed integrity check. Not installing.", Toast.LENGTH_LONG).show()
+                }
+                return@launch
+            }
+            Log.i(TAG, "APK integrity verified (${actual.take(12)}…)")
 
             withContext(Dispatchers.Main) {
                 startInstall(ctxt, file)

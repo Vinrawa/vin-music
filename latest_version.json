@@ -2,7 +2,7 @@
   "latestVersionCode": 20,
   "latestVersionName": "2.2.4",
   "apkUrl": "https://vinrawa.github.io/Vin-music-v2/vinmusic.apk",
-  "sha256": "61e4f3eb7db5328afb4e587763d3bf10f865bea25a2e6e846149019577c9c4f2",
+  "sha256": "8a845f00901ecc3f1b51e44842117cfafdd2634c1218fb7dd7cbdcad0428239b",
   "forceUpdate": false,
   "releaseNotes": "Bottom Navigation updated with dedicated Downloads & Cache tab, 10 deep codebase audit fixes (queue skipToIndex, 2nd song prefetch, online cache stream, Discover append, anti-fatigue decay), and UI polish."
 }

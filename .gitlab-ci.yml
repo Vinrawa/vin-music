@@ -27,6 +27,11 @@ lint:
   script:
     - ./gradlew lintDebug
 
+unit_test:
+  stage: test
+  script:
+    - ./gradlew testDebugUnitTest
+
 build_release:
   stage: release
   script:
